@@ -1,5 +1,4 @@
 #include <WiFi.h>
-#include <WebServer.h>
 #include <SPIFFS.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
@@ -139,6 +138,37 @@ bool lastBrakeReading = HIGH;
 bool brakeHeld = false;
 bool buttonPressed = false;
 
+// WiFi configuration
+const char* ap_ssid = "GhostKey-Config";
+const char* ap_password = "123456789";
+bool wifiEnabled = false;
+
+// Add these variables near the other button state variables
+unsigned long buttonPressStartTime = 0;
+bool isLongPressDetected = false;
+#define CONFIG_MODE_PRESS_TIME 10000  // 10 seconds for config mode
+
+// Add these variables near the other timing variables
+#define LED_PWM_FREQ 5000
+#define LED_PWM_CHANNEL 0
+#define LED_PWM_RESOLUTION 8
+#define LED_PWM_DUTY_CYCLE 255
+int ledBrightness = 0;
+int ledFadeAmount = 5;  // How much to fade the LED by each step
+
+#define SHUTDOWN_DELAY 1000  // 1 second delay after shutdown
+
+// Add with other global variables
+unsigned long lastShutdownTime = 0;
+bool isShuttingDown = false;
+unsigned long starterPulseTime = STARTER_PULSE_TIME;  // Can be adjusted in config mode
+
+// Timing constants
+#define DEBOUNCE_DELAY 50        // 50ms debounce time
+#define CONFIG_MODE_PRESS_TIME 10000  // 10 seconds for config mode
+#define STARTER_PULSE_TIME 1500    // 1.5 seconds for starter
+#define STATUS_PRINT_INTERVAL 1000  // Print status every second
+
 void IRAM_ATTR lfdata_isr() {
     unsigned long now = micros();
     bool lfdata = digitalRead(RFID_PIN);
@@ -193,17 +223,15 @@ void setup() {
     DEBUG_PRINTLN("\n\n=== GhostKey System Starting ===");
     DEBUG_PRINTLN("Initializing system...");
     
+    // Initialize SPIFFS first
+    if(!SPIFFS.begin(true)) {
+        DEBUG_PRINTLN("SPIFFS Mount Failed");
+        return;
+    }
+    DEBUG_PRINTLN("SPIFFS initialized");
+    
     setupPins();
     DEBUG_PRINTLN("Pins initialized");
-    
-    setupWiFi();
-    DEBUG_PRINTLN("WiFi initialized");
-    
-    setupWebServer();
-    DEBUG_PRINTLN("Web server initialized");
-    
-    setupBluetooth();
-    DEBUG_PRINTLN("Bluetooth initialized");
     
     // Set RFID as authenticated for testing
     rfidState.isAuthenticated = true;
@@ -213,10 +241,14 @@ void setup() {
     preferences.begin("ghostkey", false);
     isConfigured = preferences.getBool("configured", false);
     isBluetoothPaired = preferences.getBool("bluetooth_paired", false);
+    starterPulseTime = preferences.getULong("starter_pulse", 700);  // Load saved pulse time or use default
     DEBUG_PRINT("System configured: ");
     DEBUG_PRINTLN(isConfigured ? "Yes" : "No");
     DEBUG_PRINT("Bluetooth paired: ");
     DEBUG_PRINTLN(isBluetoothPaired ? "Yes" : "No");
+    DEBUG_PRINT("Starter pulse time: ");
+    DEBUG_PRINT(starterPulseTime);
+    DEBUG_PRINTLN("ms");
     
     //load saved RFID keys
     numStoredKeys = preferences.getUInt("num_keys", 0);
@@ -233,58 +265,34 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(RFID_PIN), lfdata_isr, CHANGE);
     DEBUG_PRINTLN("RFID interrupt attached");
     
-    // Initialize current monitoring
-    pinMode(CURRENT_SENSE_PIN, INPUT);
-    analogSetWidth(12);  // Set ADC resolution to 12 bits
-    analogSetAttenuation(ADC_11db);  // Set ADC attenuation for 0-3.3V range
-    
     DEBUG_PRINTLN("=== System Initialization Complete ===\n");
 }
 
 void loop() {
-    static unsigned long lastDebugTime = 0;
+    // Update system state
+    updateSystemState();
     
-    // Print system state every 5 seconds
-    if (millis() - lastDebugTime > 5000) {
-        DEBUG_PRINT("Current System State: ");
-        switch(currentState) {
-            case OFF: DEBUG_PRINTLN("OFF"); break;
-            case ACCESSORY: DEBUG_PRINTLN("ACCESSORY"); break;
-            case IGNITION: DEBUG_PRINTLN("IGNITION"); break;
-            case RUNNING: DEBUG_PRINTLN("RUNNING"); break;
-            case CONFIG_MODE: DEBUG_PRINTLN("CONFIG_MODE"); break;
-        }
-        DEBUG_PRINT("RFID Authenticated: ");
-        DEBUG_PRINTLN(rfidState.isAuthenticated ? "Yes" : "No");
-        lastDebugTime = millis();
-    }
-    
+    // Handle RFID
     handleRFID();
+    
+    // Handle button presses
     handleButtonPress();
-    handleBrakeInput();
     
-    // Handle starter relay pulsing
-    if (startRelayPulsing) {
-        if (millis() - startRelayPulseStart >= STARTER_PULSE_TIME) {
-            DEBUG_RELAY_PRINTLN("Starter pulse complete");
-            startRelayPulsing = false;
-            digitalWrite(RELAY_START, LOW);
-            // Turn back on accessory and ignition 1
-            digitalWrite(RELAY_ACCESSORY, HIGH);
-            digitalWrite(RELAY_IGNITION1, HIGH);
-        }
-    }
+    // Update relay states
+    controlRelays();
     
+    // Check auto-lock
     checkAutoLock();
     
-    // Print system status every second
-    static unsigned long lastStatusTime = 0;
-    if (millis() - lastStatusTime > 1000) {
+    // Print system status periodically
+    static unsigned long lastStatusPrint = 0;
+    if (millis() - lastStatusPrint >= STATUS_PRINT_INTERVAL) {
         printSystemStatus();
-        lastStatusTime = millis();
+        lastStatusPrint = millis();
     }
     
-    delay(50);
+    // Small delay to prevent overwhelming the serial port
+    delay(10);
 }
 
 void setupPins() {
@@ -299,6 +307,10 @@ void setupPins() {
     pinMode(BUZZER_PIN, OUTPUT);
     pinMode(BUTTON_LED_PIN, OUTPUT);
     
+    // Configure PWM for button LED
+    ledcSetup(LED_PWM_CHANNEL, LED_PWM_FREQ, LED_PWM_RESOLUTION);
+    ledcAttachPin(BUTTON_LED_PIN, LED_PWM_CHANNEL);
+    
     //setup relay pins
     pinMode(RELAY_ACCESSORY, OUTPUT);
     pinMode(RELAY_IGNITION1, OUTPUT);
@@ -311,7 +323,7 @@ void setupPins() {
     //turn everything off to start
     digitalWrite(LED_PIN, LOW);
     digitalWrite(BUZZER_PIN, LOW);
-    digitalWrite(BUTTON_LED_PIN, LOW);
+    ledcWrite(LED_PWM_CHANNEL, 0);
     
     digitalWrite(RELAY_ACCESSORY, LOW);
     digitalWrite(RELAY_IGNITION1, LOW);
@@ -435,59 +447,86 @@ void handleButtonPress() {
         DEBUG_BUTTON_PRINTLN("Brake released");
     }
 
-    // Check for button press while brake is held
-    if (buttonReading == LOW && !buttonPressed && brakeHeld && 
-        (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+    // Handle button press detection
+    if (buttonReading == LOW && !buttonPressed) {  // Button just pressed
         buttonPressed = true;
-        lastButtonPress = millis();
-        
-        if (rfidState.isAuthenticated) {
-            if (!startRelayActive && !engineRunning) {
-                // Start the engine sequence
-                startRelayActive = true;
-                startRelayTimer = millis();
-                systemState = 0;  // Reset normal sequence state
-                DEBUG_BUTTON_PRINTLN("Starting engine sequence...");
-            } else if (engineRunning) {
-                // Turn everything off
-                engineRunning = false;
-                startRelayActive = false;
-                systemState = 0;
-                DEBUG_BUTTON_PRINTLN("Engine sequence stopped");
-            }
-            updateRelays();
-        } else {
-            DEBUG_BUTTON_PRINTLN("RFID not authenticated - Access denied");
-            // Error feedback
-            for (int i = 0; i < 3; i++) {
-                digitalWrite(BUZZER_PIN, HIGH);
-                delay(50);
-                digitalWrite(BUZZER_PIN, LOW);
-                delay(50);
-            }
-        }
-    } else if (buttonReading == HIGH) {
+        buttonPressStartTime = millis();
+        isLongPressDetected = false;
+        DEBUG_BUTTON_PRINTLN("Button pressed");
+    } 
+    else if (buttonReading == HIGH && buttonPressed) {  // Button just released
         buttonPressed = false;
+        DEBUG_BUTTON_PRINTLN("Button released");
+        
+        // If we were in a long press but didn't trigger config mode, reset
+        if (isLongPressDetected) {
+            isLongPressDetected = false;
+        }
     }
 
-    // Check for button press without brake
-    if (buttonReading == HIGH && lastButtonReading == LOW && 
-        brakeReading == HIGH && (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
-        if (rfidState.isAuthenticated && !engineRunning) {  // Only allow normal sequence if engine isn't running
-            systemState = (systemState + 1) % 3;
-            DEBUG_BUTTON_PRINT("Button released. New state: ");
-            DEBUG_BUTTON_PRINTLN(systemState);
-            updateRelays();
+    // Check for long press without brake
+    if (buttonPressed && !brakeHeld && !isLongPressDetected) {
+        unsigned long pressDuration = millis() - buttonPressStartTime;
+        if (pressDuration >= CONFIG_MODE_PRESS_TIME) {
+            isLongPressDetected = true;
+            DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode");
+            enterConfigMode();
         }
-        lastButtonPress = millis();
+    }
+
+    // Only process normal button operations if not in config mode
+    if (currentState != CONFIG_MODE) {
+        // Check for button press while brake is held
+        if (buttonReading == LOW && brakeHeld && 
+            (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+            lastButtonPress = millis();
+            
+            if (rfidState.isAuthenticated) {
+                if (engineRunning) {
+                    // If engine is running, only allow turning off
+                    DEBUG_PRINTLN("Engine sequence stopped");
+                    engineRunning = false;
+                    systemState = 0;  // Set to OFF
+                    startRelayActive = false;
+                    controlRelays();
+                } else if (!startRelayActive) {
+                    // Only allow starting sequence if engine is not running and not already starting
+                    DEBUG_PRINTLN("Starting engine sequence...");
+                    startRelayActive = true;
+                    startRelayTimer = millis();
+                    controlRelays();
+                }
+            } else {
+                DEBUG_BUTTON_PRINTLN("RFID not authenticated - Access denied");
+                // Error feedback
+                for (int i = 0; i < 3; i++) {
+                    digitalWrite(BUZZER_PIN, HIGH);
+                    delay(50);
+                    digitalWrite(BUZZER_PIN, LOW);
+                    delay(50);
+                }
+            }
+        }
+
+        // Check for button press without brake
+        if (buttonReading == HIGH && lastButtonReading == LOW && 
+            brakeReading == HIGH && (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+            // Only process button release if we're not in shutdown delay
+            if (!isShuttingDown && !engineRunning && !startRelayActive) {
+                if (rfidState.isAuthenticated) {  // Only allow normal sequence if engine isn't running
+                    systemState = (systemState + 1) % 3;
+                    DEBUG_BUTTON_PRINT("Button released. New state: ");
+                    DEBUG_BUTTON_PRINTLN(systemState);
+                    controlRelays();
+                }
+            }
+            lastButtonPress = millis();
+        }
     }
 
     // Update last states
     lastButtonReading = buttonReading;
     lastBrakeReading = brakeReading;
-
-    // Update relay states
-    updateRelays();
 }
 
 void handleBrakeInput() {
@@ -520,161 +559,79 @@ void updateButtonState(ButtonState &state, int pin) {
 }
 
 void updateSystemState() {
-    // TBD
-}
-// ADD:longer you hold the starter button the longer the starter engages (extra time for the starter to engage)
-void controlRelays() {
-    static SystemState lastState = OFF;
-    static bool relaysInitialized = false;
-    
-    // Initialize relays only once
-    if (!relaysInitialized) {
-        DEBUG_RELAY_PRINTLN("Initializing relays to OFF state");
-        digitalWrite(RELAY_ACCESSORY, LOW);
-        digitalWrite(RELAY_IGNITION1, LOW);
-        digitalWrite(RELAY_IGNITION2, LOW);
-        digitalWrite(RELAY_START, LOW);
-        digitalWrite(RELAY_SECURITY_POS, LOW);
-        digitalWrite(RELAY_SECURITY_GND, LOW);
-        digitalWrite(RELAY_SECURITY_OPEN, LOW);
-        relaysInitialized = true;
-    }
-    
-    // Only update relays if state has changed
-    if (lastState != currentState) {
-        DEBUG_RELAY_PRINT("System state changed from ");
-        switch(lastState) {
-            case OFF: DEBUG_RELAY_PRINT("OFF"); break;
-            case ACCESSORY: DEBUG_RELAY_PRINT("ACCESSORY"); break;
-            case IGNITION: DEBUG_RELAY_PRINT("IGNITION"); break;
-            case RUNNING: DEBUG_RELAY_PRINT("RUNNING"); break;
-            case CONFIG_MODE: DEBUG_RELAY_PRINT("CONFIG_MODE"); break;
-        }
-        DEBUG_RELAY_PRINT(" to ");
-        switch(currentState) {
-            case OFF: DEBUG_RELAY_PRINTLN("OFF"); break;
-            case ACCESSORY: DEBUG_RELAY_PRINTLN("ACCESSORY"); break;
-            case IGNITION: DEBUG_RELAY_PRINTLN("IGNITION"); break;
-            case RUNNING: DEBUG_RELAY_PRINTLN("RUNNING"); break;
-            case CONFIG_MODE: DEBUG_RELAY_PRINTLN("CONFIG_MODE"); break;
-        }
-        
-        // Control relays based on state
-        switch (currentState) {
-            case ACCESSORY:
-                DEBUG_RELAY_PRINTLN("Setting ACCESSORY relays");
-                digitalWrite(RELAY_ACCESSORY, HIGH);
-                digitalWrite(RELAY_IGNITION1, LOW);
-                digitalWrite(RELAY_IGNITION2, LOW);
-                break;
-                
-            case IGNITION:
-                DEBUG_RELAY_PRINTLN("Setting IGNITION relays");
-                digitalWrite(RELAY_ACCESSORY, HIGH);
-                digitalWrite(RELAY_IGNITION1, HIGH);
-                digitalWrite(RELAY_IGNITION2, HIGH);
-                break;
-                
-            case RUNNING:
-                DEBUG_RELAY_PRINTLN("Setting RUNNING relays");
-                digitalWrite(RELAY_ACCESSORY, HIGH);
-                digitalWrite(RELAY_IGNITION1, HIGH);
-                digitalWrite(RELAY_IGNITION2, HIGH);
-                
-                if (startRelayPulsing) {
-                    DEBUG_RELAY_PRINTLN("Starter relay pulsing");
-                    digitalWrite(RELAY_IGNITION2, LOW);
-                    digitalWrite(RELAY_ACCESSORY, LOW);
-                    digitalWrite(RELAY_START, HIGH);
-                    
-                    if (millis() - startRelayPulseStart >= STARTER_PULSE_TIME) {
-                        DEBUG_RELAY_PRINTLN("Starter pulse complete");
-                        startRelayPulsing = false;
-                        digitalWrite(RELAY_START, LOW);
-                        digitalWrite(RELAY_IGNITION2, HIGH);
-                        digitalWrite(RELAY_ACCESSORY, HIGH);
-                    }
-                }
-                break;
-                
-            default:
-                DEBUG_RELAY_PRINTLN("Setting all relays OFF");
-                digitalWrite(RELAY_ACCESSORY, LOW);
-                digitalWrite(RELAY_IGNITION1, LOW);
-                digitalWrite(RELAY_IGNITION2, LOW);
-                digitalWrite(RELAY_START, LOW);
-                break;
-        }
-        
-        lastState = currentState;
-    }
-    
-    // Handle starter relay pulsing separately since it's time-based
-    if (currentState == RUNNING && startRelayPulsing) {
-        if (millis() - startRelayPulseStart >= STARTER_PULSE_TIME) {
-            DEBUG_RELAY_PRINTLN("Starter pulse complete");
-            startRelayPulsing = false;
-            digitalWrite(RELAY_START, LOW);
-            digitalWrite(RELAY_IGNITION2, HIGH);
-            digitalWrite(RELAY_ACCESSORY, HIGH);
-        }
-    }
-}
-
-// call this when starting the vehicle
-void triggerStartRelayPulse() {
-    startRelayPulseStart = millis();
-    startRelayPulsing = true;
-}
-
-void checkAutoLock() {
-    // TBD
-}
-
-void enterConfigMode() {
-    // TBD
-}
-
-void exitConfigMode() {
-    // TBD
-}
-
-void setupWiFi() {
-    // TBD
-}
-
-void setupWebServer() {
-    // TBD
-}
-
-void setupBluetooth() {
-    // TBD
-}
-
-void updateRelays() {
+    // Handle start sequence timing
     if (startRelayActive) {
-        // Start sequence active
-        digitalWrite(RELAY_IGNITION2, HIGH);
-        digitalWrite(RELAY_START, HIGH);
-        digitalWrite(RELAY_ACCESSORY, LOW);
-        digitalWrite(RELAY_IGNITION1, LOW);
-        
-        // Check if start relay time has elapsed
-        if (millis() - startRelayTimer >= START_RELAY_TIME) {
+        if (millis() - startRelayTimer >= STARTER_PULSE_TIME) {
+            DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
             startRelayActive = false;
             engineRunning = true;
-            // Turn off start relay and turn on all other relays
-            digitalWrite(RELAY_START, LOW);
-            digitalWrite(RELAY_ACCESSORY, HIGH);
-            digitalWrite(RELAY_IGNITION1, HIGH);
-            digitalWrite(RELAY_IGNITION2, HIGH);
+            systemState = 2;  // Set to IGNITION state when engine is running
+            controlRelays();
         }
-    } else if (engineRunning) {
-        // Engine is running - all relays on except start
+    }
+
+    // Handle LED pulsing in config mode
+    if (currentState == CONFIG_MODE) {
+        static unsigned long lastLedUpdate = 0;
+        if (millis() - lastLedUpdate > 20) {  // Update every 20ms for smooth fade
+            ledBrightness = ledBrightness + ledFadeAmount;
+            
+            // Reverse the direction of the fading at the ends of the fade
+            if (ledBrightness <= 0 || ledBrightness >= 255) {
+                ledFadeAmount = -ledFadeAmount;
+            }
+            
+            ledcWrite(LED_PWM_CHANNEL, ledBrightness);
+            lastLedUpdate = millis();
+        }
+    } else {
+        // Normal LED control when not in config mode
+        if (brakeHeld) {
+            ledcWrite(LED_PWM_CHANNEL, 255);  // Full brightness when brake is held
+        } else {
+            ledcWrite(LED_PWM_CHANNEL, 0);    // Off when brake is not held
+        }
+    }
+}
+
+void checkStartSequence() {
+    if (startRelayActive) {
+        unsigned long currentTime = millis();
+        unsigned long elapsedTime = currentTime - startRelayTimer;
+        DEBUG_PRINT("Start sequence time: ");
+        DEBUG_PRINT(elapsedTime);
+        DEBUG_PRINT(" / ");
+        DEBUG_PRINTLN(starterPulseTime);
+        
+        if (elapsedTime >= starterPulseTime) {
+            DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
+            startRelayActive = false;
+            engineRunning = true;
+            systemState = 2;  // Set to IGNITION state when engine is running
+            controlRelays();
+        }
+    }
+}
+
+void controlRelays() {
+    // Update system state based on engine running status
+    if (engineRunning) {
+        systemState = 2;  // Set to IGNITION when engine is running
+    }
+
+    // Update relay states based on system state and engine status
+    if (engineRunning) {
+        // Engine is running - all relays ON except START
         digitalWrite(RELAY_ACCESSORY, HIGH);
         digitalWrite(RELAY_IGNITION1, HIGH);
         digitalWrite(RELAY_IGNITION2, HIGH);
         digitalWrite(RELAY_START, LOW);
+    } else if (startRelayActive) {
+        // Engine is starting - only IGN2 and START relays ON
+        digitalWrite(RELAY_ACCESSORY, LOW);
+        digitalWrite(RELAY_IGNITION1, LOW);
+        digitalWrite(RELAY_IGNITION2, HIGH);
+        digitalWrite(RELAY_START, HIGH);
     } else {
         // Normal sequence states
         switch (systemState) {
@@ -702,75 +659,214 @@ void updateRelays() {
     }
 }
 
-float readCurrent() {
-    // Read ADC value
-    int adcValue = analogRead(CURRENT_SENSE_PIN);
+// call this when starting the vehicle
+void triggerStartRelayPulse() {
+    startRelayPulseStart = millis();
+    startRelayPulsing = true;
+}
+
+void checkAutoLock() {
+    // TBD
+}
+
+void enterConfigMode() {
+    currentState = CONFIG_MODE;
+    DEBUG_PRINTLN("Entering configuration mode");
     
-    // Convert ADC value to voltage
-    float voltage = (adcValue * ADC_VREF) / ADC_RESOLUTION;
+    // Initialize WiFi and web server
+    setupWiFi();
+    setupWebServer();
     
-    // Calculate current using Ohm's law (I = V/R)
-    float current = voltage / SHUNT_RESISTOR;
+    // Visual feedback
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(LED_PIN, LOW);
+        delay(100);
+    }
     
-    // Apply scaling factor
-    current *= CURRENT_SCALE;
+    // Start LED pulsing
+    ledBrightness = 0;
+    ledFadeAmount = 5;
+}
+
+void exitConfigMode() {
+    currentState = OFF;
+    DEBUG_PRINTLN("Exiting configuration mode");
     
-    return current;
+    // Stop WiFi and web server
+    if (wifiEnabled) {
+        WiFi.softAPdisconnect(true);
+        wifiEnabled = false;
+    }
+    server.end();
+    
+    // Visual feedback
+    digitalWrite(LED_PIN, HIGH);
+    delay(500);
+    digitalWrite(LED_PIN, LOW);
+    
+    // Turn off LED
+    ledcWrite(LED_PWM_CHANNEL, 0);
+}
+
+void setupWiFi() {
+    DEBUG_PRINTLN("Starting WiFi Access Point...");
+    WiFi.disconnect();  // Disconnect from any existing connections
+    WiFi.mode(WIFI_AP);  // Set WiFi to AP mode
+    WiFi.softAP(ap_ssid, ap_password);
+    
+    IPAddress IP = WiFi.softAPIP();
+    DEBUG_PRINT("AP IP address: ");
+    DEBUG_PRINTLN(IP);
+    
+    wifiEnabled = true;
+}
+
+void setupWebServer() {
+    // Route for root / web page
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        String html = "<!DOCTYPE html><html>";
+        html += "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
+        html += "<title>Ghost Key Configuration</title>";
+        html += "<style>";
+        html += "body { font-family: Arial; text-align: center; margin: 0px auto; padding: 20px; }";
+        html += ".button { background-color: #4CAF50; border: none; color: white; padding: 16px 40px;";
+        html += "text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer; }";
+        html += ".button2 { background-color: #555555; }";
+        html += ".form-group { margin: 20px 0; }";
+        html += "input[type=number] { padding: 8px; font-size: 16px; width: 100px; }";
+        html += ".popup { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); ";
+        html += "background-color: #4CAF50; color: white; padding: 15px 30px; ";
+        html += "border-radius: 5px; display: none; z-index: 1000; }";
+        html += "</style>";
+        html += "<script>";
+        html += "function showPopup(message) {";
+        html += "  var popup = document.getElementById('popup');";
+        html += "  popup.textContent = message;";
+        html += "  popup.style.display = 'block';";
+        html += "  setTimeout(function() { popup.style.display = 'none'; }, 5000);";
+        html += "}";
+        html += "function updatePulseTime(event) {";
+        html += "  event.preventDefault();";
+        html += "  var form = event.target;";
+        html += "  var formData = new FormData(form);";
+        html += "  fetch('/update_pulse', {";
+        html += "    method: 'POST',";
+        html += "    body: formData";
+        html += "  })";
+        html += "  .then(response => response.text())";
+        html += "  .then(data => {";
+        html += "    showPopup(data);";
+        html += "  })";
+        html += "  .catch(error => {";
+        html += "    showPopup('Error: ' + error);";
+        html += "  });";
+        html += "}";
+        html += "</script>";
+        html += "</head>";
+        html += "<body>";
+        html += "<div id='popup' class='popup'></div>";
+        html += "<h1>GhostKey Configuration</h1>";
+        html += "<p>System Status: ";
+        switch(currentState) {
+            case OFF: html += "OFF"; break;
+            case ACCESSORY: html += "ACCESSORY"; break;
+            case IGNITION: html += "IGNITION"; break;
+            case RUNNING: html += "RUNNING"; break;
+            case CONFIG_MODE: html += "CONFIG MODE"; break;
+        }
+        html += "</p>";
+        html += "<p>RFID Authenticated: ";
+        html += rfidState.isAuthenticated ? "Yes" : "No";
+        html += "</p>";
+        html += "<p>Number of Stored Keys: ";
+        html += numStoredKeys;
+        html += "</p>";
+        
+        // Add starter pulse time configuration
+        html += "<div class='form-group'>";
+        html += "<h2>Starter Configuration</h2>";
+        html += "<form onsubmit='updatePulseTime(event)'>";
+        html += "<label for='pulse_time'>Starter Pulse Time (ms): </label>";
+        html += "<input type='number' id='pulse_time' name='pulse_time' min='100' max='2000' step='100' value='";
+        html += starterPulseTime;
+        html += "'>";
+        html += "<button type='submit' class='button'>Update</button>";
+        html += "</form>";
+        html += "</div>";
+        
+        html += "<form action='/exit' method='post'>";
+        html += "<button type='submit' class='button button2'>Exit Config Mode</button>";
+        html += "</form>";
+        html += "</body></html>";
+        request->send(200, "text/html", html);
+    });
+
+    // Route for updating starter pulse time
+    server.on("/update_pulse", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (request->hasParam("pulse_time", true)) {
+            String pulseTimeStr = request->getParam("pulse_time", true)->value();
+            unsigned long newPulseTime = pulseTimeStr.toInt();
+            
+            // Validate the input
+            if (newPulseTime >= 100 && newPulseTime <= 2000) {
+                starterPulseTime = newPulseTime;
+                preferences.putULong("starter_pulse", starterPulseTime);
+                DEBUG_PRINT("Starter pulse time updated to: ");
+                DEBUG_PRINT(starterPulseTime);
+                DEBUG_PRINTLN("ms");
+                request->send(200, "text/plain", "Starter pulse time updated successfully");
+            } else {
+                request->send(400, "text/plain", "Invalid pulse time. Must be between 100ms and 2000ms");
+            }
+        } else {
+            request->send(400, "text/plain", "Missing pulse_time parameter");
+        }
+    });
+
+    // Route for exiting config mode
+    server.on("/exit", HTTP_POST, [](AsyncWebServerRequest *request){
+        exitConfigMode();
+        request->send(200, "text/plain", "Exiting config mode...");
+    });
+
+    // Start server
+    server.begin();
+    DEBUG_PRINTLN("Web server started");
+}
+
+void setupBluetooth() {
+    // TBD
 }
 
 void printSystemStatus() {
-    float current = readCurrent();
-    DEBUG_PRINTLN("\n=== System Power Status ===");
-    DEBUG_PRINT("Total Current Draw: ");
-    DEBUG_PRINT(current);
-    DEBUG_PRINTLN(" mA");
-    
-    // Calculate expected current
-    int activeLeds = 0;
-    if (digitalRead(RELAY_ACCESSORY)) activeLeds++;
-    if (digitalRead(RELAY_IGNITION1)) activeLeds++;
-    if (digitalRead(RELAY_IGNITION2)) activeLeds++;
-    if (digitalRead(RELAY_START)) activeLeds++;
-    
-    DEBUG_PRINTLN("\nPower Breakdown:");
-    DEBUG_PRINT("- ESP32 Base: ~120 mA");
-    DEBUG_PRINT("\n- Active LEDs: ");
-    DEBUG_PRINT(activeLeds);
-    DEBUG_PRINT(" × 20mA = ");
-    DEBUG_PRINT(activeLeds * 20);
-    DEBUG_PRINTLN(" mA");
-    DEBUG_PRINT("- Other Peripherals: ~30 mA");
-    
-    DEBUG_PRINT("\nExpected Total: ~");
-    DEBUG_PRINT(120 + (activeLeds * 20) + 30);
-    DEBUG_PRINTLN(" mA");
-    
-    DEBUG_PRINTLN("\nSystem State: ");
+    Serial.println("\nSystem State: ");
     if (engineRunning) {
-        DEBUG_PRINTLN("ENGINE RUNNING");
+        Serial.println("RUNNING");
     } else if (startRelayActive) {
-        DEBUG_PRINTLN("STARTING");
+        Serial.println("STARTING");
     } else {
         switch (systemState) {
             case 0:
-                DEBUG_PRINTLN("OFF");
+                Serial.println("OFF");
                 break;
             case 1:
-                DEBUG_PRINTLN("ACCESSORY");
+                Serial.println("ACCESSORY");
                 break;
             case 2:
-                DEBUG_PRINTLN("IGNITION");
+                Serial.println("IGNITION");
                 break;
         }
     }
     
-    DEBUG_PRINT("\nLED States - ACC: ");
-    DEBUG_PRINT(digitalRead(RELAY_ACCESSORY) ? "ON" : "OFF");
-    DEBUG_PRINT(" IGN1: ");
-    DEBUG_PRINT(digitalRead(RELAY_IGNITION1) ? "ON" : "OFF");
-    DEBUG_PRINT(" IGN2: ");
-    DEBUG_PRINT(digitalRead(RELAY_IGNITION2) ? "ON" : "OFF");
-    DEBUG_PRINT(" START: ");
-    DEBUG_PRINTLN(digitalRead(RELAY_START) ? "ON" : "OFF");
-    DEBUG_PRINTLN("========================\n");
+    Serial.print("\nLED States - ACC: ");
+    Serial.print(digitalRead(RELAY_ACCESSORY) ? "ON" : "OFF");
+    Serial.print(" IGN1: ");
+    Serial.print(digitalRead(RELAY_IGNITION1) ? "ON" : "OFF");
+    Serial.print(" IGN2: ");
+    Serial.print(digitalRead(RELAY_IGNITION2) ? "ON" : "OFF");
+    Serial.print(" START: ");
+    Serial.println(digitalRead(RELAY_START) ? "ON" : "OFF");
+    Serial.println("========================\n");
 } 

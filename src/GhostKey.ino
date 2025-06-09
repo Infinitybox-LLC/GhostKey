@@ -21,7 +21,7 @@
 #define RELAY_IGNITION1 27  //IO27 - Ignition 1
 #define RELAY_IGNITION2 14  //IO14 - Ignition 2
 #define RELAY_START 12      //IO12 - Start
-#define RELAY_SECURITY_POS 13 //IO13 - Security POS
+#define RELAY_SECURITY_POS 13 //IO13 - Security POS //when security is disabled 12v on pos, ground is enabled, and open is open
 #define RELAY_SECURITY_GND 15 //IO15 - Security Ground
 #define RELAY_SECURITY_OPEN 2  //IO2 - Security NO Relay
 
@@ -561,7 +561,7 @@ void updateButtonState(ButtonState &state, int pin) {
 void updateSystemState() {
     // Handle start sequence timing
     if (startRelayActive) {
-        if (millis() - startRelayTimer >= STARTER_PULSE_TIME) {
+        if (millis() - startRelayTimer >= starterPulseTime) {
             DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
             startRelayActive = false;
             engineRunning = true;
@@ -724,14 +724,30 @@ void setupWiFi() {
 }
 
 void setupWebServer() {
-    // Route for root / web page
+    // Initialize SPIFFS
+    if(!SPIFFS.begin(true)){
+        Serial.println("An Error has occurred while mounting SPIFFS");
+        return;
+    }
+
+    // Serve static files from SPIFFS
+    server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
+    
+    // Add MIME type for AVIF
+    server.on("/logo.avif", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(SPIFFS, "/logo.avif", "image/avif");
+    });
+
+    // Handle root path
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
         String html = "<!DOCTYPE html><html>";
         html += "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
         html += "<title>Ghost Key Configuration</title>";
         html += "<style>";
         html += "body { font-family: Arial; text-align: center; margin: 0px auto; padding: 20px; }";
-        html += ".button { background-color: #4CAF50; border: none; color: white; padding: 16px 40px;";
+        html += ".logo { position: absolute; top: 20px; left: 20px; width: 100px; height: auto; }";
+        html += ".container { margin-top: 60px; }";
+        html += ".button { background-color:rgb(170, 0, 225); border: none; color: white; padding: 16px 40px;";
         html += "text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer; }";
         html += ".button2 { background-color: #555555; }";
         html += ".form-group { margin: 20px 0; }";
@@ -766,8 +782,10 @@ void setupWebServer() {
         html += "</script>";
         html += "</head>";
         html += "<body>";
+        html += "<img src='/logo.avif' alt='Ghost Key Logo' class='logo'>";
+        html += "<div class='container'>";
         html += "<div id='popup' class='popup'></div>";
-        html += "<h1>GhostKey Configuration</h1>";
+        html += "<h1>Ghost Key Configuration</h1>";
         html += "<p>System Status: ";
         switch(currentState) {
             case OFF: html += "OFF"; break;
@@ -788,7 +806,7 @@ void setupWebServer() {
         html += "<div class='form-group'>";
         html += "<h2>Starter Configuration</h2>";
         html += "<form onsubmit='updatePulseTime(event)'>";
-        html += "<label for='pulse_time'>Starter Pulse Time (ms): </label>";
+        html += "<label for='pulse_time'>Starter Crank Time (ms): </label>";
         html += "<input type='number' id='pulse_time' name='pulse_time' min='100' max='2000' step='100' value='";
         html += starterPulseTime;
         html += "'>";
@@ -799,7 +817,7 @@ void setupWebServer() {
         html += "<form action='/exit' method='post'>";
         html += "<button type='submit' class='button button2'>Exit Config Mode</button>";
         html += "</form>";
-        html += "</body></html>";
+        html += "</div></body></html>";
         request->send(200, "text/html", html);
     });
 
@@ -816,9 +834,9 @@ void setupWebServer() {
                 DEBUG_PRINT("Starter pulse time updated to: ");
                 DEBUG_PRINT(starterPulseTime);
                 DEBUG_PRINTLN("ms");
-                request->send(200, "text/plain", "Starter pulse time updated successfully");
+                request->send(200, "text/plain", "Starter crank time updated successfully");
             } else {
-                request->send(400, "text/plain", "Invalid pulse time. Must be between 100ms and 2000ms");
+                request->send(400, "text/plain", "Invalid crank time. Must be between 100ms and 2000ms");
             }
         } else {
             request->send(400, "text/plain", "Missing pulse_time parameter");

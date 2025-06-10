@@ -12,7 +12,7 @@
 #define BUTTON_PIN 19       //IO19 - Start Button (Grounded When Active)
 #define BRAKE_PIN 22        //IO22 - Brake Pedal Input (Grounded When Active)
 #define LED_PIN 23          //IO23 - LED Indicator Light
-#define BUZZER_PIN 34       //IO34 - Beeper Output
+#define TEST_BUTTON_PIN 32  //IO34 - Test Authentication Button
 #define CONFIG_BUTTON_PIN 25 //IO25 - Configuration Button (Grounded When Active)
 #define BUTTON_LED_PIN 18   //IO18 - Start Button Indicator Light
 
@@ -169,6 +169,18 @@ unsigned long starterPulseTime = STARTER_PULSE_TIME;  // Can be adjusted in conf
 #define STARTER_PULSE_TIME 1500    // 1.5 seconds for starter
 #define STATUS_PRINT_INTERVAL 1000  // Print status every second
 
+// Add with other global variables
+bool securityEnabled = false;
+unsigned long lastSecurityCheck = 0;
+unsigned long lastEngineShutdown = 0;  // Track when engine was last running
+#define SECURITY_CHECK_INTERVAL 1000  // Check security state every second
+
+// Add with other global variables
+unsigned long autoLockTimeout = AUTO_LOCK_TIMEOUT;  // Can be adjusted in config mode
+
+// Add with other button state variables
+ButtonState testButtonState = {false, false, false, false, 0, 0};
+
 void IRAM_ATTR lfdata_isr() {
     unsigned long now = micros();
     bool lfdata = digitalRead(RFID_PIN);
@@ -217,6 +229,7 @@ void controlRelays();
 void checkAutoLock();
 void enterConfigMode();
 void exitConfigMode();
+void updateSecurityState();
 
 void setup() {
     Serial.begin(115200);
@@ -234,20 +247,24 @@ void setup() {
     DEBUG_PRINTLN("Pins initialized");
     
     // Set RFID as authenticated for testing
-    rfidState.isAuthenticated = true;
+    rfidState.isAuthenticated = false;
     DEBUG_PRINTLN("RFID authentication enabled for testing");
     
     //load saved settings
     preferences.begin("ghostkey", false);
     isConfigured = preferences.getBool("configured", false);
     isBluetoothPaired = preferences.getBool("bluetooth_paired", false);
-    starterPulseTime = preferences.getULong("starter_pulse", 700);  // Load saved pulse time or use default
+    starterPulseTime = preferences.getULong("starter_pulse", STARTER_PULSE_TIME);
+    autoLockTimeout = preferences.getULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
     DEBUG_PRINT("System configured: ");
     DEBUG_PRINTLN(isConfigured ? "Yes" : "No");
     DEBUG_PRINT("Bluetooth paired: ");
     DEBUG_PRINTLN(isBluetoothPaired ? "Yes" : "No");
     DEBUG_PRINT("Starter pulse time: ");
     DEBUG_PRINT(starterPulseTime);
+    DEBUG_PRINTLN("ms");
+    DEBUG_PRINT("Auto-lock timeout: ");
+    DEBUG_PRINT(autoLockTimeout);
     DEBUG_PRINTLN("ms");
     
     //load saved RFID keys
@@ -278,11 +295,34 @@ void loop() {
     // Handle button presses
     handleButtonPress();
     
+    // Handle test button
+    bool testButtonReading = !digitalRead(TEST_BUTTON_PIN);  // Invert reading since button is active-low
+    //Serial.print("Test Button Pin: ");
+    //Serial.println(digitalRead(TEST_BUTTON_PIN) ? "HIGH" : "LOW");
+    
+    if (testButtonReading && !testButtonState.currentState) {
+        rfidState.isAuthenticated = !rfidState.isAuthenticated;  // Toggle authentication state
+        if (rfidState.isAuthenticated) {
+            securityEnabled = false;  // Immediately disable security when authenticated
+        }
+        // Visual feedback
+        digitalWrite(LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(LED_PIN, LOW);
+    }
+    testButtonState.currentState = testButtonReading;
+    
     // Update relay states
     controlRelays();
     
     // Check auto-lock
     checkAutoLock();
+    
+    // Update security state periodically
+    if (millis() - lastSecurityCheck >= SECURITY_CHECK_INTERVAL) {
+        updateSecurityState();
+        lastSecurityCheck = millis();
+    }
     
     // Print system status periodically
     static unsigned long lastStatusPrint = 0;
@@ -301,10 +341,10 @@ void setupPins() {
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     pinMode(BRAKE_PIN, INPUT_PULLUP);
     pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
+    pinMode(TEST_BUTTON_PIN, INPUT_PULLUP);
     
     //setup output pins
     pinMode(LED_PIN, OUTPUT);
-    pinMode(BUZZER_PIN, OUTPUT);
     pinMode(BUTTON_LED_PIN, OUTPUT);
     
     // Configure PWM for button LED
@@ -322,7 +362,6 @@ void setupPins() {
     
     //turn everything off to start
     digitalWrite(LED_PIN, LOW);
-    digitalWrite(BUZZER_PIN, LOW);
     ledcWrite(LED_PWM_CHANNEL, 0);
     
     digitalWrite(RELAY_ACCESSORY, LOW);
@@ -405,9 +444,9 @@ void handleRFID() {
             DEBUG_RFID_PRINTLN("Pairing mode active - Attempting to add new key");
             if (addRFIDKey(tagId)) {
                 DEBUG_RFID_PRINTLN("New key added successfully");
-                digitalWrite(BUZZER_PIN, HIGH);
+                digitalWrite(LED_PIN, HIGH);
                 delay(100);
-                digitalWrite(BUZZER_PIN, LOW);
+                digitalWrite(LED_PIN, LOW);
             } else {
                 DEBUG_RFID_PRINTLN("Failed to add new key");
             }
@@ -417,14 +456,14 @@ void handleRFID() {
             DEBUG_RFID_PRINTLN(rfidState.isAuthenticated ? "Success" : "Failed");
             
             if (rfidState.isAuthenticated) {
-                digitalWrite(BUZZER_PIN, HIGH);
+                digitalWrite(LED_PIN, HIGH);
                 delay(100);
-                digitalWrite(BUZZER_PIN, LOW);
+                digitalWrite(LED_PIN, LOW);
             } else {
                 for (int i = 0; i < 3; i++) {
-                    digitalWrite(BUZZER_PIN, HIGH);
+                    digitalWrite(LED_PIN, HIGH);
                     delay(50);
-                    digitalWrite(BUZZER_PIN, LOW);
+                    digitalWrite(LED_PIN, LOW);
                     delay(50);
                 }
             }
@@ -488,6 +527,7 @@ void handleButtonPress() {
                     engineRunning = false;
                     systemState = 0;  // Set to OFF
                     startRelayActive = false;
+                    lastEngineShutdown = millis();  // Record time of engine shutdown
                     controlRelays();
                 } else if (!startRelayActive) {
                     // Only allow starting sequence if engine is not running and not already starting
@@ -500,9 +540,9 @@ void handleButtonPress() {
                 DEBUG_BUTTON_PRINTLN("RFID not authenticated - Access denied");
                 // Error feedback
                 for (int i = 0; i < 3; i++) {
-                    digitalWrite(BUZZER_PIN, HIGH);
+                    digitalWrite(LED_PIN, HIGH);
                     delay(50);
-                    digitalWrite(BUZZER_PIN, LOW);
+                    digitalWrite(LED_PIN, LOW);
                     delay(50);
                 }
             }
@@ -779,6 +819,22 @@ void setupWebServer() {
         html += "    showPopup('Error: ' + error);";
         html += "  });";
         html += "}";
+        html += "function updateAutoLock(event) {";
+        html += "  event.preventDefault();";
+        html += "  var form = event.target;";
+        html += "  var formData = new FormData(form);";
+        html += "  fetch('/update_autolock', {";
+        html += "    method: 'POST',";
+        html += "    body: formData";
+        html += "  })";
+        html += "  .then(response => response.text())";
+        html += "  .then(data => {";
+        html += "    showPopup(data);";
+        html += "  })";
+        html += "  .catch(error => {";
+        html += "    showPopup('Error: ' + error);";
+        html += "  });";
+        html += "}";
         html += "</script>";
         html += "</head>";
         html += "<body>";
@@ -814,6 +870,18 @@ void setupWebServer() {
         html += "</form>";
         html += "</div>";
         
+        // Add auto-lock timeout configuration
+        html += "<div class='form-group'>";
+        html += "<h2>Security Configuration</h2>";
+        html += "<form onsubmit='updateAutoLock(event)'>";
+        html += "<label for='auto_lock'>Auto-Lock Timeout (ms): </label>";
+        html += "<input type='number' id='auto_lock' name='auto_lock' min='5000' max='120000' step='1000' value='";
+        html += autoLockTimeout;
+        html += "'>";
+        html += "<button type='submit' class='button'>Update</button>";
+        html += "</form>";
+        html += "</div>";
+        
         html += "<form action='/exit' method='post'>";
         html += "<button type='submit' class='button button2'>Exit Config Mode</button>";
         html += "</form>";
@@ -843,6 +911,28 @@ void setupWebServer() {
         }
     });
 
+    // Route for updating auto-lock timeout
+    server.on("/update_autolock", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (request->hasParam("auto_lock", true)) {
+            String timeoutStr = request->getParam("auto_lock", true)->value();
+            unsigned long newTimeout = timeoutStr.toInt();
+            
+            // Validate the input
+            if (newTimeout >= 5000 && newTimeout <= 120000) {
+                autoLockTimeout = newTimeout;
+                preferences.putULong("auto_lock_timeout", autoLockTimeout);
+                DEBUG_PRINT("Auto-lock timeout updated to: ");
+                DEBUG_PRINT(autoLockTimeout);
+                DEBUG_PRINTLN("ms");
+                request->send(200, "text/plain", "Auto-lock timeout updated successfully");
+            } else {
+                request->send(400, "text/plain", "Invalid timeout. Must be between 5000ms and 120000ms");
+            }
+        } else {
+            request->send(400, "text/plain", "Missing auto_lock parameter");
+        }
+    });
+
     // Route for exiting config mode
     server.on("/exit", HTTP_POST, [](AsyncWebServerRequest *request){
         exitConfigMode();
@@ -856,6 +946,41 @@ void setupWebServer() {
 
 void setupBluetooth() {
     // TBD
+}
+
+void updateSecurityState() {
+    // Check if we need to enable security
+    if (!securityEnabled && rfidState.isAuthenticated == false) {
+        // Enable security if:
+        // 1. Engine is not running
+        // 2. Not in config mode
+        // 3. Not authenticated
+        // 4. Auto-lock timeout has elapsed since engine shutdown
+        if (!engineRunning && currentState != CONFIG_MODE) {
+            unsigned long timeSinceShutdown = millis() - lastEngineShutdown;
+            if (timeSinceShutdown >= autoLockTimeout) {
+                securityEnabled = true;
+            }
+        }
+    }
+    
+    // Check if we need to disable security
+    if (securityEnabled && rfidState.isAuthenticated) {
+        securityEnabled = false;
+    }
+    
+    // Update security relays
+    if (securityEnabled) {
+        // Security active - all relays LOW
+        digitalWrite(RELAY_SECURITY_POS, LOW);
+        digitalWrite(RELAY_SECURITY_GND, LOW);
+        digitalWrite(RELAY_SECURITY_OPEN, LOW);
+    } else {
+        // Security disabled - all relays HIGH
+        digitalWrite(RELAY_SECURITY_POS, HIGH);
+        digitalWrite(RELAY_SECURITY_GND, HIGH);
+        digitalWrite(RELAY_SECURITY_OPEN, HIGH);
+    }
 }
 
 void printSystemStatus() {
@@ -886,5 +1011,15 @@ void printSystemStatus() {
     Serial.print(digitalRead(RELAY_IGNITION2) ? "ON" : "OFF");
     Serial.print(" START: ");
     Serial.println(digitalRead(RELAY_START) ? "ON" : "OFF");
+    
+    Serial.print("\nSecurity State: ");
+    Serial.println(securityEnabled ? "ENABLED" : "DISABLED");
+    Serial.print("Security Relays - POS: ");
+    Serial.print(digitalRead(RELAY_SECURITY_POS) ? "HIGH" : "LOW");
+    Serial.print(" GND: ");
+    Serial.print(digitalRead(RELAY_SECURITY_GND) ? "HIGH" : "LOW");
+    Serial.print(" OPEN: ");
+    Serial.println(digitalRead(RELAY_SECURITY_OPEN) ? "HIGH" : "LOW");
+    
     Serial.println("========================\n");
 } 

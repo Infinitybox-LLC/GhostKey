@@ -144,7 +144,7 @@ bool isPairingMode = false;
 unsigned long pairingModeStartTime = 0;
 
 // BLE objects
-BleKeyboard bleKeyboard("Ghost-Key Secure", "Ghost-Key Inc.", 100);
+BleKeyboard bleKeyboard("Ghost Key", "Jordan Distributors, Inc", 100);
 BLEServer* pServer = nullptr;
 class MyServerCallbacks;
 
@@ -270,7 +270,7 @@ int ledFadeAmount = 5;
 #define LED_PWM_DUTY_CYCLE 255
 
 // WiFi configuration
-const char* ap_ssid = "GhostKey-Config";
+const char* ap_ssid = "Ghost Key Configuration";
 const char* ap_password = "123456789";
 bool wifiEnabled = false;
 

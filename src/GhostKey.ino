@@ -1,3 +1,9 @@
+// ========================================
+// GHOSTKEY - ESP32 Car Security System
+// ========================================
+// Handles RFID + Bluetooth authentication, relay control, and web config
+// Main features: secure car starting, proximity auth, pairing mode safety
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
@@ -10,77 +16,82 @@
 #include <ArduinoJson.h>
 #include "config_html.h"
 
-// Debug levels for reducing serial output
+// ========================================
+// DEBUG CONFIGURATION
+// ========================================
 #define DEBUG_LEVEL_NONE 0
 #define DEBUG_LEVEL_BASIC 1
 #define DEBUG_LEVEL_VERBOSE 2
 #define DEBUG_LEVEL_FULL 3
-#define CURRENT_DEBUG_LEVEL DEBUG_LEVEL_BASIC  // Change this to control verbosity
+#define CURRENT_DEBUG_LEVEL DEBUG_LEVEL_BASIC
 
-// Optimized logging macros to reduce serial overhead
-#define DEBUG_BLE_BASIC(x) do { if(CURRENT_DEBUG_LEVEL >= DEBUG_LEVEL_BASIC) { Serial.print(x); } } while(0)
-#define DEBUG_BLE_BASICLN(x) do { if(CURRENT_DEBUG_LEVEL >= DEBUG_LEVEL_BASIC) { Serial.println(x); } } while(0)
-#define DEBUG_BLE_BASICF(...) do { if(CURRENT_DEBUG_LEVEL >= DEBUG_LEVEL_BASIC) { Serial.printf(__VA_ARGS__); } } while(0)
+// ========================================
+// PIN DEFINITIONS
+// ========================================
+// Input pins (all active low with pullups)
+#define RFID_PIN 4
+#define BUTTON_PIN 19
+#define BRAKE_PIN 22
+#define CONFIG_BUTTON_PIN 25
 
-#define DEBUG_BLE_VERBOSE(x) do { if(CURRENT_DEBUG_LEVEL >= DEBUG_LEVEL_VERBOSE) { Serial.print(x); } } while(0)
-#define DEBUG_BLE_VERBOSELN(x) do { if(CURRENT_DEBUG_LEVEL >= DEBUG_LEVEL_VERBOSE) { Serial.println(x); } } while(0)
-#define DEBUG_BLE_VERBOSEF(...) do { if(CURRENT_DEBUG_LEVEL >= DEBUG_LEVEL_VERBOSE) { Serial.printf(__VA_ARGS__); } } while(0)
+// Output pins
+#define LED_PIN 23
+#define BUTTON_LED_PIN 18
 
-//pins we're using all TBc
-#define RFID_PIN 4          //IO4 - RFID IN
-#define BUTTON_PIN 19       //IO19 - Start Button (Grounded When Active)
-#define BRAKE_PIN 22        //IO22 - Brake Pedal Input (Grounded When Active)
-#define LED_PIN 23          //IO23 - LED Indicator Light
-// Test button removed - no longer needed
-#define CONFIG_BUTTON_PIN 25 //IO25 - Configuration Button (Grounded When Active)
-#define BUTTON_LED_PIN 18   //IO18 - Start Button Indicator Light
+// Relay control pins
+#define RELAY_ACCESSORY 26
+#define RELAY_IGNITION1 27
+#define RELAY_IGNITION2 14
+#define RELAY_START 12
+#define RELAY_SECURITY_POS 13
+#define RELAY_SECURITY_GND 15
+#define RELAY_SECURITY_OPEN 2
 
-//relay pins also TBC
-#define RELAY_ACCESSORY 26  //IO26 - Accessory
-#define RELAY_IGNITION1 27  //IO27 - Ignition 1
-#define RELAY_IGNITION2 14  //IO14 - Ignition 2
-#define RELAY_START 12      //IO12 - Start
-#define RELAY_SECURITY_POS 13 //IO13 - Security POS //when security is disabled 12v on pos, ground is enabled, and open is open
-#define RELAY_SECURITY_GND 15 //IO15 - Security Ground
-#define RELAY_SECURITY_OPEN 2  //IO2 - Security NO Relay
-
-//timing stuff
-#define CONFIG_MODE_TIMEOUT 30000  //30 seconds
-#define AUTO_LOCK_TIMEOUT 30000    //30 seconds
-#define STARTER_PULSE_TIME 1500    // 1.5 seconds for starter
-#define DEBOUNCE_DELAY 50        //50ms debounce time
-#define LONG_PRESS_TIME 30000    //30 seconds for long press
-#define BUTTON_LED_BLINK_RATE 500 //500ms for LED blink rate
+// ========================================
+// TIMING CONSTANTS
+// ========================================
+#define CONFIG_MODE_TIMEOUT 30000
+#define AUTO_LOCK_TIMEOUT 30000
+#define STARTER_PULSE_TIME 1500
+#define DEBOUNCE_DELAY 50
+#define LONG_PRESS_TIME 30000
+#define BUTTON_LED_BLINK_RATE 500
 #define MAX_STORED_KEYS 10
-#define RFID_TIMEOUT 5000  //5 seconds timeout for RFID stuff
-#define PAIRING_MODE_TIMEOUT 30000  //30 seconds timeout for pairing mode
+#define RFID_TIMEOUT 5000
+#define PAIRING_MODE_TIMEOUT 30000
 
-// Current monitoring
-#define CURRENT_SENSE_PIN 36  // ADC1_CH0 (GPIO36)
-#define SHUNT_RESISTOR 0.1   // 0.1 ohm shunt resistor
-#define ADC_VREF 3.3         // ESP32 ADC reference voltage
-#define ADC_RESOLUTION 4095  // 12-bit ADC resolution
-#define CURRENT_SCALE 10     // Reduced scale for LED testing (adjust as needed)
-
-// BLE Configuration
-#define MAX_BONDS 3  // Maximum number of devices that can be bonded
+// ========================================
+// BLUETOOTH CONFIGURATION
+// ========================================
+#define MAX_BONDS 3
 #define BOND_STORAGE_NAMESPACE "ble_bonds"
 #define DEVICE_NAME_KEY "dev_name_"
 #define DEVICE_PRIORITY_KEY "dev_priority_"
-#define MAX_RSSI -30  // Strongest signal we expect
-#define MIN_RSSI -100 // Weakest signal we expect
-#define RSSI_AUTH_THRESHOLD -68  // RSSI threshold for authentication (~4 feet)
-#define RSSI_DEAUTH_THRESHOLD -73  // RSSI threshold for deauthentication (hysteresis)
-
-// BLE Timing definitions
-#define RSSI_UPDATE_INTERVAL 5000 // Update RSSI every 5 seconds
-#define CONNECTION_TIMEOUT 30000  // 30 seconds connection timeout
-#define MIN_CONN_INTERVAL 0x10    // 20ms
-#define MAX_CONN_INTERVAL 0x20    // 40ms
+#define MAX_RSSI -30
+#define MIN_RSSI -100
+#define RSSI_AUTH_THRESHOLD -68
+#define RSSI_DEAUTH_THRESHOLD -73
+#define RSSI_UPDATE_INTERVAL 5000
+#define CONNECTION_TIMEOUT 30000
+#define MIN_CONN_INTERVAL 0x10
+#define MAX_CONN_INTERVAL 0x20
 #define SLAVE_LATENCY 0
-#define SUPERVISION_TIMEOUT 0x100 // 1 second
+#define SUPERVISION_TIMEOUT 0x100
 
-//what the system's current status is
+// ========================================
+// CURRENT MONITORING (Future Use)
+// ========================================
+#define CURRENT_SENSE_PIN 36
+#define SHUNT_RESISTOR 0.1
+#define ADC_VREF 3.3
+#define ADC_RESOLUTION 4095
+#define CURRENT_SCALE 10
+
+// ========================================
+// DATA STRUCTURES
+// ========================================
+
+// System states for the car ignition sequence
 enum SystemState {
     OFF,
     ACCESSORY,
@@ -89,7 +100,7 @@ enum SystemState {
     CONFIG_MODE
 };
 
-//keep track of button settings
+// Button state tracking with debouncing
 struct ButtonState {
     bool currentState;
     bool lastState;
@@ -99,7 +110,7 @@ struct ButtonState {
     unsigned long pressStartTime;
 };
 
-//keep track of RFID key and state
+// RFID key storage and management
 struct RFIDKey {
     uint32_t id;
     bool isActive;
@@ -112,7 +123,11 @@ struct RFIDState {
     bool isAuthenticated;
 };
 
-//global variables
+// ========================================
+// GLOBAL VARIABLES
+// ========================================
+
+// System state management
 SystemState currentState = OFF;
 unsigned long lastActivityTime = 0;
 bool isConfigured = false;
@@ -120,28 +135,31 @@ bool isBluetoothPaired = false;
 WebServer server(80);
 Preferences preferences;
 
-// BLE Global variables
-bool bluetoothAuthenticated = false;  // Separate from RFID authentication
+// Bluetooth authentication state
+bool bluetoothAuthenticated = false;
 bool isBleConnected = false;
-esp_bd_addr_t connectedDeviceAddr = {0};  // Store currently connected device address
-bool hasConnectedDevice = false;  // Track if we have a device connected
+esp_bd_addr_t connectedDeviceAddr = {0};
+bool hasConnectedDevice = false;
+bool isPairingMode = false;
+unsigned long pairingModeStartTime = 0;
 
+// BLE objects
 BleKeyboard bleKeyboard("Ghost-Key Secure", "Ghost-Key Inc.", 100);
 BLEServer* pServer = nullptr;
-
-// Forward declaration of BLE callback class
 class MyServerCallbacks;
 
-//initialize button and RFID states
+// Button and RFID state tracking
 ButtonState buttonState = {false, false, false, false, 0, 0};
 ButtonState brakeState = {false, false, false, false, 0, 0};
 RFIDState rfidState = {false, 0, 0, false};
 RFIDKey storedKeys[MAX_STORED_KEYS];
 uint8_t numStoredKeys = 0;
-bool isPairingMode = false;
-unsigned long pairingModeStartTime = 0;
 
-// BLE Device structures for caching
+// ========================================
+// BLUETOOTH CACHING SYSTEM
+// ========================================
+
+// Device caching structures for efficiency
 struct RSSICache {
     esp_bd_addr_t address;
     int8_t rssi;
@@ -152,15 +170,15 @@ struct RSSICache {
 struct DeviceNameCache {
     esp_bd_addr_t address;
     char name[32];
-    bool hasCustomName;  // True if user set a custom name
-    bool nvsStored;      // True if stored in NVS
+    bool hasCustomName;
+    bool nvsStored;
     bool valid;
 };
 
 struct DevicePriorityCache {
     esp_bd_addr_t address;
     bool isPriority;
-    bool nvsStored;      // True if stored in NVS
+    bool nvsStored;
     bool valid;
 };
 
@@ -171,40 +189,41 @@ RSSICache rssiCache[RSSI_CACHE_SIZE];
 DeviceNameCache nameCache[NAME_CACHE_SIZE];
 DevicePriorityCache priorityCache[PRIORITY_CACHE_SIZE];
 
-// Shared buffer for bonded device operations
+// Memory-efficient device management
 static esp_ble_bond_dev_t sharedBondedDevicesBuffer[MAX_BONDS];
 static bool sharedBufferInUse = false;
-
-// Cache for JSON generation
-static String cachedDevicesJson = "";
+static char cachedDevicesJson[2048] = "";
 static unsigned long lastJsonUpdate = 0;
 static int lastDeviceCount = -1;
 static bool jsonCacheValid = false;
 
-// Manchester decoding state
+// ========================================
+// RFID MANCHESTER DECODING
+// ========================================
 volatile uint32_t manchesterBuffer = 0;
 volatile int manchesterBitCount = 0;
 volatile bool tagReady = false;
 volatile unsigned long lastEdgeTime = 0;
 volatile bool lastLfdataState = false;
+#define MANCHESTER_BIT_PERIOD 400
 
-#define MANCHESTER_BIT_PERIOD 400 // us, adjust as needed for your tag (typical 2.4kHz = ~416us per bit)
-
-// relay pulse timing
+// ========================================
+// TIMING VARIABLES
+// ========================================
 unsigned long startRelayPulseStart = 0;
 bool startRelayPulsing = false;
-
 unsigned long lastButtonReleaseTime = 0;
 int buttonPressStep = 0;
-#define BUTTON_STEP_TIMEOUT 2000  // 2 seconds to reset button press sequence
+#define BUTTON_STEP_TIMEOUT 2000
 
-// Debug flags
+// ========================================
+// DEBUG SYSTEM
+// ========================================
 #define DEBUG_SYSTEM 1
 #define DEBUG_BUTTON 1
 #define DEBUG_RFID 1
 #define DEBUG_RELAY 1
 
-// Debug macros
 #define DEBUG_PRINT(x) if(DEBUG_SYSTEM) Serial.print(x)
 #define DEBUG_PRINTLN(x) if(DEBUG_SYSTEM) Serial.println(x)
 #define DEBUG_BUTTON_PRINT(x) if(DEBUG_BUTTON) Serial.print(x)
@@ -214,68 +233,63 @@ int buttonPressStep = 0;
 #define DEBUG_RELAY_PRINT(x) if(DEBUG_RELAY) Serial.print(x)
 #define DEBUG_RELAY_PRINTLN(x) if(DEBUG_RELAY) Serial.println(x)
 
-// Button state tracking
+// ========================================
+// MORE SYSTEM VARIABLES
+// ========================================
+
+// Button and input tracking
 unsigned long lastButtonPress = 0;
 unsigned long lastBrakePress = 0;
 unsigned long startRelayTimer = 0;
 bool startRelayActive = false;
 bool engineRunning = false;
-int systemState = 0;  // 0 = off, 1 = accessory, 2 = accessory+ignition
-const unsigned long START_RELAY_TIME = 700;  // 0.7 seconds
-
-// For edge detection
+int systemState = 0;
+const unsigned long START_RELAY_TIME = 700;
 bool lastButtonReading = HIGH;
 bool lastBrakeReading = HIGH;
 bool brakeHeld = false;
 bool buttonPressed = false;
+unsigned long buttonPressStartTime = 0;
+bool isLongPressDetected = false;
+
+// Security and timing
+bool securityEnabled = false;
+unsigned long lastSecurityCheck = 0;
+unsigned long lastEngineShutdown = 0;
+unsigned long autoLockTimeout = AUTO_LOCK_TIMEOUT;
+unsigned long starterPulseTime = STARTER_PULSE_TIME;
+unsigned long lastShutdownTime = 0;
+bool isShuttingDown = false;
+
+// LED control
+int ledBrightness = 0;
+int ledFadeAmount = 5;
+#define LED_PWM_FREQ 5000
+#define LED_PWM_CHANNEL 0
+#define LED_PWM_RESOLUTION 8
+#define LED_PWM_DUTY_CYCLE 255
 
 // WiFi configuration
 const char* ap_ssid = "GhostKey-Config";
 const char* ap_password = "123456789";
 bool wifiEnabled = false;
 
-// Add these variables near the other button state variables
-unsigned long buttonPressStartTime = 0;
-bool isLongPressDetected = false;
-#define CONFIG_MODE_PRESS_TIME 10000  // 10 seconds for config mode
+// More timing constants
+#define CONFIG_MODE_PRESS_TIME 10000
+#define STATUS_PRINT_INTERVAL 5000
+#define SECURITY_CHECK_INTERVAL 1000
+#define SHUTDOWN_DELAY 1000
 
-// Add these variables near the other timing variables
-#define LED_PWM_FREQ 5000
-#define LED_PWM_CHANNEL 0
-#define LED_PWM_RESOLUTION 8
-#define LED_PWM_DUTY_CYCLE 255
-int ledBrightness = 0;
-int ledFadeAmount = 5;  // How much to fade the LED by each step
+// ========================================
+// BLUETOOTH FUNCTIONS
+// ========================================
 
-#define SHUTDOWN_DELAY 1000  // 1 second delay after shutdown
-
-// Add with other global variables
-unsigned long lastShutdownTime = 0;
-bool isShuttingDown = false;
-unsigned long starterPulseTime = STARTER_PULSE_TIME;  // Can be adjusted in config mode
-
-// Timing constants
-#define CONFIG_MODE_PRESS_TIME 10000  // 10 seconds for config mode
-#define STATUS_PRINT_INTERVAL 1000  // Print status every second
-
-// Add with other global variables
-bool securityEnabled = false;
-unsigned long lastSecurityCheck = 0;
-unsigned long lastEngineShutdown = 0;  // Track when engine was last running
-#define SECURITY_CHECK_INTERVAL 1000  // Check security state every second
-
-// Add with other global variables
-unsigned long autoLockTimeout = AUTO_LOCK_TIMEOUT;  // Can be adjusted in config mode
-
-// Test button state removed - no longer needed
-
-// ===== BLE FUNCTIONS =====
-
-// Function to clean up only our custom NVS storage (NOT the BLE bonding data)
+// cleanupNVSStorage - Clears our custom device names/settings but keeps BLE bonds
+// Used when: resetting device names but keeping paired devices
+// Links to: saveDeviceName(), getDeviceName() functions
 void cleanupNVSStorage() {
     Serial.println("=== STARTING CUSTOM NVS CLEANUP ===");
     
-    // Only clean our custom namespace, NOT the entire NVS
     nvs_handle_t handle;
     esp_err_t err = nvs_open(BOND_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
     if (err == ESP_OK) {
@@ -292,7 +306,10 @@ void cleanupNVSStorage() {
     Serial.println("Note: BLE bonding data preserved");
 }
 
-// Helper function to get bonded devices using shared buffer
+// getBondedDevicesSafe - Gets list of paired devices, handles memory safely
+// Takes: int* count (returns number of devices found)
+// Returns: esp_ble_bond_dev_t* (array of bonded devices)
+// Links to: Used by getDevicesJson(), GAP event handler for whitelist checks
 esp_ble_bond_dev_t* getBondedDevicesSafe(int* count) {
     if (sharedBufferInUse) {
         int bondedCount = esp_ble_get_bond_device_num();
@@ -320,7 +337,9 @@ esp_ble_bond_dev_t* getBondedDevicesSafe(int* count) {
     }
 }
 
-// Helper function to release bonded devices buffer
+// releaseBondedDevicesBuffer - Cleans up memory from getBondedDevicesSafe()
+// Takes: esp_ble_bond_dev_t* buffer (the buffer to release)
+// Links to: Must be called after every getBondedDevicesSafe() call
 void releaseBondedDevicesBuffer(esp_ble_bond_dev_t* buffer) {
     if (buffer == sharedBondedDevicesBuffer) {
         sharedBufferInUse = false;
@@ -329,10 +348,12 @@ void releaseBondedDevicesBuffer(esp_ble_bond_dev_t* buffer) {
     }
 }
 
-// Invalidate JSON cache when devices change
+// invalidateDeviceCache - Forces web interface to rebuild device list
+// Used when: device is added/removed, names changed
+// Links to: Called by web server endpoints, saveDeviceName()
 void invalidateDeviceCache() {
     jsonCacheValid = false;
-    cachedDevicesJson = "";
+    cachedDevicesJson[0] = '\0';
 }
 
 // Function to find or create name cache entry
@@ -379,7 +400,7 @@ void saveDeviceName(esp_bd_addr_t address, const char* name) {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(BOND_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
     if (err == ESP_OK) {
-        char key[64];
+        char key[32];  // Reduced from 64 to 32 (sufficient for key)
         snprintf(key, sizeof(key), "%s%02x%02x%02x%02x%02x%02x", 
                  DEVICE_NAME_KEY, address[0], address[1], address[2], 
                  address[3], address[4], address[5]);
@@ -413,7 +434,7 @@ bool getDeviceName(esp_bd_addr_t address, char* name, size_t max_len) {
         return false;
     }
 
-    char key[64];
+    char key[32];  // Reduced from 64 to 32 (sufficient for key)
     snprintf(key, sizeof(key), "%s%02x%02x%02x%02x%02x%02x", 
              DEVICE_NAME_KEY, address[0], address[1], address[2], 
              address[3], address[4], address[5]);
@@ -484,18 +505,21 @@ bool getDeviceRSSI(esp_bd_addr_t address, int8_t* rssi) {
     return false;
 }
 
-// Function to calculate approximate distance from RSSI
+// calculateDistance - Converts RSSI signal strength to approximate distance
+// Takes: int8_t rssi (signal strength in dBm)
+// Returns: float distance (meters, or -1.0 if invalid)
+// Links to: Used by getDevicesJson() for web interface display
 float calculateDistance(int8_t rssi) {
     if (rssi == 0 || rssi >= -10) {
         return -1.0;
     }
     
-    if (rssi >= -50) return 1.0;       // Very close (< 1m)
-    else if (rssi >= -65) return 2.0;  // Close (1-3m)
-    else if (rssi >= -68) return 4.0;  // Medium (3-4m) - Auth threshold
-    else if (rssi >= -73) return 5.0;  // Far (4-5m) - Deauth threshold
-    else if (rssi >= -80) return 8.0;  // Very far (5-8m)
-    else return 12.0;                  // Extremely far (8m+)
+    if (rssi >= -50) return 1.0;
+    else if (rssi >= -65) return 2.0;
+    else if (rssi >= -68) return 4.0;
+    else if (rssi >= -73) return 5.0;
+    else if (rssi >= -80) return 8.0;
+    else return 12.0;
 }
 
 // BLE Server Callback Class
@@ -887,42 +911,41 @@ void stopRSSIScan() {
     // Serial.println("BLE: RSSI scanning stopped");
 }
 
+// lfdata_isr - Interrupt handler for RFID Manchester decoding
+// Called on: Every edge change on RFID_PIN (interrupt driven)
+// Links to: handleRFID() checks tagReady flag, uses manchesterBuffer
 void IRAM_ATTR lfdata_isr() {
     unsigned long now = micros();
     bool lfdata = digitalRead(RFID_PIN);
     unsigned long dt = now - lastEdgeTime;
     lastEdgeTime = now;
 
-    // Only process if not already got a tag
     if (tagReady) return;
 
     // Manchester decoding: look for transitions at expected intervals
     if (dt > (MANCHESTER_BIT_PERIOD / 2) && dt < (MANCHESTER_BIT_PERIOD * 1.5)) {
-        // Valid bit period, decode bit
-        // Manchester: transition direction determines bit value
-        // High-to-low = 0, low-to-high = 1 (typical, check your tag type)
         if (lfdata != lastLfdataState) {
-            // Rising edge = 1, falling edge = 0
             manchesterBuffer <<= 1;
             if (lfdata) {
-                manchesterBuffer |= 1; // 1 bit
-            } // else 0 bit
+                manchesterBuffer |= 1;
+            }
             manchesterBitCount++;
         }
     } else {
-        // If timing is off, reset
+        // Reset if timing is off
         manchesterBitCount = 0;
         manchesterBuffer = 0;
     }
     lastLfdataState = lfdata;
 
-    // If we have 32 bits, set flag
     if (manchesterBitCount >= 32) {
         tagReady = true;
     }
 }
 
-//function declarations
+// ========================================
+// FUNCTION DECLARATIONS
+// ========================================
 void setupPins();
 void setupWiFi();
 void setupWebServer();
@@ -937,19 +960,19 @@ void enterConfigMode();
 void exitConfigMode();
 void updateSecurityState();
 
+// ========================================
+// MAIN SETUP - Runs once on boot
+// ========================================
 void setup() {
     Serial.begin(115200);
     DEBUG_PRINTLN("\n\n=== GhostKey System Starting ===");
     DEBUG_PRINTLN("Initializing system...");
     
+    // Hardware setup
     setupPins();
     DEBUG_PRINTLN("Pins initialized");
     
-    // Set RFID as authenticated for testing
-    rfidState.isAuthenticated = false;
-    DEBUG_PRINTLN("RFID authentication enabled for testing");
-    
-    //load saved settings
+    // Load saved settings from flash
     preferences.begin("ghostkey", false);
     isConfigured = preferences.getBool("configured", false);
     isBluetoothPaired = preferences.getBool("bluetooth_paired", false);
@@ -966,7 +989,7 @@ void setup() {
     DEBUG_PRINT(autoLockTimeout);
     DEBUG_PRINTLN("ms");
     
-    //load saved RFID keys
+    // Load RFID keys
     numStoredKeys = preferences.getUInt("num_keys", 0);
     DEBUG_PRINT("Number of stored RFID keys: ");
     DEBUG_PRINTLN(numStoredKeys);
@@ -976,7 +999,7 @@ void setup() {
         DEBUG_PRINTLN("RFID keys loaded from memory");
     }
 
-    // Attach interrupt for LFDATA
+    // Setup RFID interrupt
     pinMode(RFID_PIN, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(RFID_PIN), lfdata_isr, CHANGE);
     DEBUG_PRINTLN("RFID interrupt attached");
@@ -1015,28 +1038,19 @@ void setup() {
     DEBUG_PRINTLN("=== System Initialization Complete ===\n");
 }
 
+// ========================================
+// MAIN LOOP - Runs continuously
+// ========================================
 void loop() {
-    // Update system state
+    // Core system updates
     updateSystemState();
-    
-    // Handle RFID
     handleRFID();
-    
-    // Update bluetooth authentication
     updateBluetoothAuthentication();
-    
-    // Handle button presses
     handleButtonPress();
-    
-    // Test button removed - no longer needed
-    
-    // Update relay states
     controlRelays();
-    
-    // Check auto-lock
     checkAutoLock();
     
-    // Update security state periodically
+    // Periodic security check
     if (millis() - lastSecurityCheck >= SECURITY_CHECK_INTERVAL) {
         updateSecurityState();
         lastSecurityCheck = millis();
@@ -1045,14 +1059,17 @@ void loop() {
     // Update BLE connection status
     isBleConnected = bleKeyboard.isConnected();
     
-    // Start RSSI scanning periodically to track device proximity
+    // RSSI scanning (only when needed)
     static unsigned long lastRSSIScan = 0;
     if (millis() - lastRSSIScan >= RSSI_UPDATE_INTERVAL) {
-        startRSSIScan();
+        int bondedCount = esp_ble_get_bond_device_num();
+        if (bondedCount > 0 && (isBleConnected || isPairingMode)) {
+            startRSSIScan();
+        }
         lastRSSIScan = millis();
     }
     
-    // Check pairing mode timeout
+    // Pairing mode timeout check
     if (isPairingMode && pairingModeStartTime > 0) {
         if (millis() - pairingModeStartTime >= PAIRING_MODE_TIMEOUT) {
             Serial.println("PAIRING: Timeout reached - disabling pairing mode");
@@ -1060,39 +1077,38 @@ void loop() {
         }
     }
     
-    // Handle web server requests when in config mode
+    // Web server handling
     if (currentState == CONFIG_MODE) {
         server.handleClient();
     }
     
-    // Print system status periodically
+    // Status printing
     static unsigned long lastStatusPrint = 0;
     if (millis() - lastStatusPrint >= STATUS_PRINT_INTERVAL) {
         printSystemStatus();
         lastStatusPrint = millis();
     }
-    
-    // Small delay to prevent overwhelming the serial port
-    delay(10);
 }
 
+// setupPins - Initialize all GPIO pins for inputs and outputs
+// Called from: setup() function
+// Links to: All pin constants defined at top of file
 void setupPins() {
-    //setup input pins with pullups (they're active low)
+    // Input pins (active low with pullups)
     pinMode(RFID_PIN, INPUT_PULLUP);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     pinMode(BRAKE_PIN, INPUT_PULLUP);
     pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
-    // Test button pin removed - no longer needed
     
-    //setup output pins
+    // Output pins
     pinMode(LED_PIN, OUTPUT);
     pinMode(BUTTON_LED_PIN, OUTPUT);
     
-    // Configure PWM for button LED
+    // PWM for button LED
     ledcSetup(LED_PWM_CHANNEL, LED_PWM_FREQ, LED_PWM_RESOLUTION);
     ledcAttachPin(BUTTON_LED_PIN, LED_PWM_CHANNEL);
     
-    //setup relay pins
+    // Relay control pins
     pinMode(RELAY_ACCESSORY, OUTPUT);
     pinMode(RELAY_IGNITION1, OUTPUT);
     pinMode(RELAY_IGNITION2, OUTPUT);
@@ -1101,7 +1117,7 @@ void setupPins() {
     pinMode(RELAY_SECURITY_GND, OUTPUT);
     pinMode(RELAY_SECURITY_OPEN, OUTPUT);
     
-    //turn everything off to start
+    // Start with everything off
     digitalWrite(LED_PIN, LOW);
     ledcWrite(LED_PWM_CHANNEL, 0);
     
@@ -1114,7 +1130,10 @@ void setupPins() {
     digitalWrite(RELAY_SECURITY_OPEN, LOW);
 }
 
-//check if this tag is allowed
+// isTagAuthorized - Check if RFID tag is in our allowed list
+// Takes: uint32_t tagId (the scanned RFID tag ID)
+// Returns: bool (true if authorized, false if not)
+// Links to: handleRFID() calls this to verify scanned tags
 bool isTagAuthorized(uint32_t tagId) {
     for (int i = 0; i < numStoredKeys; i++) {
         if (storedKeys[i].id == tagId && storedKeys[i].isActive) {
@@ -1124,11 +1143,14 @@ bool isTagAuthorized(uint32_t tagId) {
     return false;
 }
 
-//add a new RFID key
+// addRFIDKey - Add new RFID tag to authorized list (used in pairing mode)
+// Takes: uint32_t tagId (the new tag to add)
+// Returns: bool (true if added successfully, false if list full)
+// Links to: handleRFID() calls this when in pairing mode
 bool addRFIDKey(uint32_t tagId) {
     if (numStoredKeys >= MAX_STORED_KEYS) return false;
     
-    //check if we already have this tag
+    // Check if we already have this tag
     for (int i = 0; i < numStoredKeys; i++) {
         if (storedKeys[i].id == tagId) {
             storedKeys[i].isActive = true;
@@ -1136,12 +1158,12 @@ bool addRFIDKey(uint32_t tagId) {
         }
     }
     
-    //add the new tag
+    // Add the new tag
     storedKeys[numStoredKeys].id = tagId;
     storedKeys[numStoredKeys].isActive = true;
     numStoredKeys++;
     
-    //save it
+    // Save to flash
     preferences.putUInt("num_keys", numStoredKeys);
     preferences.putBytes("keys", storedKeys, sizeof(storedKeys));
     
@@ -1168,6 +1190,9 @@ bool removeRFIDKey(uint32_t tagId) {
     return false;
 }
 
+// handleRFID - Process RFID tags when detected by interrupt
+// Called from: main loop() continuously
+// Links to: lfdata_isr() sets tagReady flag, uses isTagAuthorized(), addRFIDKey()
 void handleRFID() {
     if (tagReady) {
         uint32_t tagId = manchesterBuffer;
@@ -1177,6 +1202,7 @@ void handleRFID() {
         DEBUG_RFID_PRINT(hexStr);
         DEBUG_RFID_PRINTLN("");
         
+        // Reset for next tag
         manchesterBitCount = 0;
         manchesterBuffer = 0;
         tagReady = false;
@@ -1192,15 +1218,18 @@ void handleRFID() {
                 DEBUG_RFID_PRINTLN("Failed to add new key");
             }
         } else {
+            // Normal mode - check if tag is authorized
             rfidState.isAuthenticated = isTagAuthorized(tagId);
             DEBUG_RFID_PRINT("Tag authentication: ");
             DEBUG_RFID_PRINTLN(rfidState.isAuthenticated ? "Success" : "Failed");
             
             if (rfidState.isAuthenticated) {
+                // Success - single blink
                 digitalWrite(LED_PIN, HIGH);
                 delay(100);
                 digitalWrite(LED_PIN, LOW);
             } else {
+                // Failure - triple blink
                 for (int i = 0; i < 3; i++) {
                     digitalWrite(LED_PIN, HIGH);
                     delay(50);
@@ -1405,50 +1434,48 @@ void checkStartSequence() {
     }
 }
 
+// controlRelays - Manage car ignition relays based on system state
+// Called from: main loop() continuously
+// Links to: Uses systemState, engineRunning, startRelayActive variables
 void controlRelays() {
-    // Update system state based on engine running status
     if (engineRunning) {
-        systemState = 2;  // Set to IGNITION when engine is running
+        systemState = 2;
     }
 
-    // Update relay states based on system state and engine status
+    // Track states to avoid redundant GPIO writes (CPU optimization)
+    static bool lastAccessory = false, lastIgnition1 = false, lastIgnition2 = false, lastStart = false;
+    bool newAccessory, newIgnition1, newIgnition2, newStart;
+
+    // Determine relay states
     if (engineRunning) {
-        // Engine is running - all relays ON except START
-        digitalWrite(RELAY_ACCESSORY, HIGH);
-        digitalWrite(RELAY_IGNITION1, HIGH);
-        digitalWrite(RELAY_IGNITION2, HIGH);
-        digitalWrite(RELAY_START, LOW);
+        // Engine running - all on except starter
+        newAccessory = HIGH; newIgnition1 = HIGH; newIgnition2 = HIGH; newStart = LOW;
     } else if (startRelayActive) {
-        // Engine is starting - only IGN2 and START relays ON
-        digitalWrite(RELAY_ACCESSORY, LOW);
-        digitalWrite(RELAY_IGNITION1, LOW);
-        digitalWrite(RELAY_IGNITION2, HIGH);
-        digitalWrite(RELAY_START, HIGH);
+        // Starting sequence - only IGN2 and START
+        newAccessory = LOW; newIgnition1 = LOW; newIgnition2 = HIGH; newStart = HIGH;
     } else {
-        // Normal sequence states
+        // Normal button sequence
         switch (systemState) {
-            case 0:  // All off
-                digitalWrite(RELAY_ACCESSORY, LOW);
-                digitalWrite(RELAY_IGNITION1, LOW);
-                digitalWrite(RELAY_IGNITION2, LOW);
-                digitalWrite(RELAY_START, LOW);
+            case 0:  // Off
+                newAccessory = LOW; newIgnition1 = LOW; newIgnition2 = LOW; newStart = LOW;
                 break;
-            
-            case 1:  // Accessory only
-                digitalWrite(RELAY_ACCESSORY, HIGH);
-                digitalWrite(RELAY_IGNITION1, LOW);
-                digitalWrite(RELAY_IGNITION2, LOW);
-                digitalWrite(RELAY_START, LOW);
+            case 1:  // Accessory
+                newAccessory = HIGH; newIgnition1 = LOW; newIgnition2 = LOW; newStart = LOW;
                 break;
-            
-            case 2:  // Accessory + Ignition 1 + Ignition 2
-                digitalWrite(RELAY_ACCESSORY, HIGH);
-                digitalWrite(RELAY_IGNITION1, HIGH);
-                digitalWrite(RELAY_IGNITION2, HIGH);
-                digitalWrite(RELAY_START, LOW);
+            case 2:  // Ignition
+                newAccessory = HIGH; newIgnition1 = HIGH; newIgnition2 = HIGH; newStart = LOW;
+                break;
+            default:
+                newAccessory = LOW; newIgnition1 = LOW; newIgnition2 = LOW; newStart = LOW;
                 break;
         }
     }
+    
+    // Only update GPIO if changed
+    if (newAccessory != lastAccessory) { digitalWrite(RELAY_ACCESSORY, newAccessory); lastAccessory = newAccessory; }
+    if (newIgnition1 != lastIgnition1) { digitalWrite(RELAY_IGNITION1, newIgnition1); lastIgnition1 = newIgnition1; }
+    if (newIgnition2 != lastIgnition2) { digitalWrite(RELAY_IGNITION2, newIgnition2); lastIgnition2 = newIgnition2; }
+    if (newStart != lastStart) { digitalWrite(RELAY_START, newStart); lastStart = newStart; }
 }
 
 // call this when starting the vehicle
@@ -1518,35 +1545,40 @@ void setupWiFi() {
     wifiEnabled = true;
 }
 
-// Function to get device info as JSON with caching
-String getDevicesJson() {
+// Function to get device info as JSON with caching (optimized for memory)
+const char* getDevicesJson() {
     int bondedCount = esp_ble_get_bond_device_num();
     
     // Check if we can use cached JSON
     if (jsonCacheValid && 
         lastDeviceCount == bondedCount && 
-        (millis() - lastJsonUpdate < 5000)) {  // Cache valid for 5 seconds
+        (millis() - lastJsonUpdate < 15000)) {  // Extended cache to 15 seconds
         return cachedDevicesJson;
     }
     
-    String json = "[";
+    // Build JSON directly into buffer to avoid heap fragmentation
+    char* jsonPtr = cachedDevicesJson;
+    int remaining = sizeof(cachedDevicesJson) - 1;
+    
+    // Start JSON array
+    int written = snprintf(jsonPtr, remaining, "[");
+    jsonPtr += written; remaining -= written;
     
     if (bondedCount == 0) {
-        json += "]";
-        cachedDevicesJson = json;
+        snprintf(jsonPtr, remaining, "]");
         jsonCacheValid = true;
         lastDeviceCount = bondedCount;
         lastJsonUpdate = millis();
-        return json;
+        return cachedDevicesJson;
     }
     
     esp_ble_bond_dev_t* bondedDevices = getBondedDevicesSafe(&bondedCount);
     if (!bondedDevices) {
-        json += "]";
-        return json;
+        snprintf(jsonPtr, remaining, "]");
+        return cachedDevicesJson;
     }
     
-    for (int i = 0; i < bondedCount; i++) {
+    for (int i = 0; i < bondedCount && remaining > 100; i++) {
         char mac[18];
         snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
                 bondedDevices[i].bd_addr[0], bondedDevices[i].bd_addr[1], bondedDevices[i].bd_addr[2],
@@ -1555,38 +1587,37 @@ String getDevicesJson() {
         char name[32] = "Unknown Device";
         getDeviceName(bondedDevices[i].bd_addr, name, sizeof(name));
         
-        bool hasRssi = false;
         int8_t rssi = -99;
-        float distance = -1;
+        float distance = 0.0;
         
         if (getDeviceRSSI(bondedDevices[i].bd_addr, &rssi)) {
-            hasRssi = true;
             distance = calculateDistance(rssi);
         }
         
-        // Note: Priority functionality would be added here if needed
-        bool priority = false; // Placeholder for now
+        // Build JSON object directly
+        written = snprintf(jsonPtr, remaining, 
+            "%s{\"mac\":\"%s\",\"name\":\"%s\",\"priority\":false,\"rssi\":%d,\"distance\":%.1f}",
+            (i > 0) ? "," : "", mac, name, rssi, distance);
         
-        if (i > 0) json += ",";
-        json += "{";
-        json += "\"mac\":\"" + String(mac) + "\",";
-        json += "\"name\":\"" + String(name) + "\",";
-        json += "\"priority\":" + String(priority ? "true" : "false") + ",";
-        json += "\"rssi\":" + String(hasRssi ? rssi : -99) + ",";
-        json += "\"distance\":" + String(distance >= 0 ? distance : 0.0, 1);
-        json += "}";
+        if (written > 0 && written < remaining) {
+            jsonPtr += written; 
+            remaining -= written;
+        } else {
+            break; // Buffer full
+        }
     }
-    json += "]";
+    
+    // Close JSON array
+    snprintf(jsonPtr, remaining, "]");
     
     releaseBondedDevicesBuffer(bondedDevices);
     
     // Cache the result
-    cachedDevicesJson = json;
     jsonCacheValid = true;
     lastDeviceCount = bondedCount;
     lastJsonUpdate = millis();
     
-    return json;
+    return cachedDevicesJson;
 }
 
 void setupWebServer() {
@@ -1625,7 +1656,7 @@ void setupWebServer() {
     // Bluetooth devices endpoint
     server.on("/devices", HTTP_GET, [](){
         Serial.println("Bluetooth devices request received");
-        String json = getDevicesJson();
+        const char* json = getDevicesJson();
         server.send(200, "application/json", json);
     });
     
@@ -1766,51 +1797,48 @@ void setupBluetooth() {
     // This function kept for compatibility but does nothing
 }
 
-// Function to update bluetooth authentication status
+// updateBluetoothAuthentication - Check if connected device is close enough for auth
+// Called from: main loop() continuously
+// Links to: Uses RSSI thresholds, getDeviceRSSI(), sets bluetoothAuthenticated
 void updateBluetoothAuthentication() {
     bool wasAuthenticated = bluetoothAuthenticated;
     
-    // Bluetooth authentication requires:
-    // 1. Active BLE connection (isBleConnected = true)
-    // 2. Device has completed authentication process (hasConnectedDevice = true)
-    // 3. Device address is known (not all zeros)
-    // 4. Device is within RSSI range (close enough for authentication)
-    
-    bluetoothAuthenticated = false;  // Start with false
+    // Need: connection + completed auth + valid address + close enough RSSI
+    bluetoothAuthenticated = false;
     
     if (isBleConnected && hasConnectedDevice) {
-        // Check if we have a valid connected device address
-        bool hasValidAddress = false;
-        for (int i = 0; i < 6; i++) {
-            if (connectedDeviceAddr[i] != 0) {
-                hasValidAddress = true;
-                break;
+        // Check for valid device address (cached for efficiency)
+        static bool hasValidAddress = false;
+        static esp_bd_addr_t lastCheckedAddr = {0};
+        
+        if (memcmp(connectedDeviceAddr, lastCheckedAddr, sizeof(esp_bd_addr_t)) != 0) {
+            hasValidAddress = false;
+            for (int i = 0; i < 6; i++) {
+                if (connectedDeviceAddr[i] != 0) {
+                    hasValidAddress = true;
+                    break;
+                }
             }
+            memcpy(lastCheckedAddr, connectedDeviceAddr, sizeof(esp_bd_addr_t));
         }
         
         if (hasValidAddress) {
-            // Check if device is within authentication range using hysteresis
+            // RSSI proximity check with hysteresis to prevent flapping
             int8_t rssi = 0;
             if (getDeviceRSSI(connectedDeviceAddr, &rssi)) {
-                // Use hysteresis to prevent rapid switching:
-                // - Authenticate when RSSI >= -75 dBm (~5 feet)
-                // - Deauthenticate when RSSI < -80 dBm (~7+ feet)
                 if (!bluetoothAuthenticated && rssi >= RSSI_AUTH_THRESHOLD) {
-                    // Not authenticated but signal is strong enough - authenticate
                     bluetoothAuthenticated = true;
                 } else if (bluetoothAuthenticated && rssi < RSSI_DEAUTH_THRESHOLD) {
-                    // Currently authenticated but signal is too weak - deauthenticate
                     bluetoothAuthenticated = false;
                 }
-                // If between -80 and -75 dBm, maintain current state (hysteresis)
+                // Between thresholds = maintain current state (hysteresis)
             } else {
-                // No recent RSSI data - assume device is not in range
                 bluetoothAuthenticated = false;
             }
         }
     }
     
-    // Log authentication status changes
+    // Log changes
     if (wasAuthenticated != bluetoothAuthenticated) {
         Serial.printf("Bluetooth authentication: %s\n", bluetoothAuthenticated ? "Authenticated" : "Not authenticated");
         if (bluetoothAuthenticated) {
@@ -1824,45 +1852,35 @@ void updateBluetoothAuthentication() {
     }
 }
 
+// updateSecurityState - Control security relays based on authentication
+// Called from: main loop() every SECURITY_CHECK_INTERVAL
+// Links to: Uses rfidState.isAuthenticated, bluetoothAuthenticated, engineRunning
 void updateSecurityState() {
-    // Either RFID OR Bluetooth can provide authentication
     bool isAuthenticated = rfidState.isAuthenticated || bluetoothAuthenticated;
     
-    // Security logic:
-    // - Security is ENABLED by default when device is on
-    // - Security is DISABLED only when RFID is scanned OR Bluetooth is actively connected
-    // - Config mode can be accessed regardless of security state
-    // - Engine running always disables security
-    
+    // Security logic: enabled by default, disabled when authenticated or engine running
     if (engineRunning) {
-        // Engine running - always disable security
         securityEnabled = false;
     } else if (isAuthenticated) {
-        // RFID scanned or Bluetooth connected - disable security
         securityEnabled = false;
     } else {
-        // No authentication - enable security
+        // No auth - enable security (with timeout after engine shutdown)
         if (lastEngineShutdown > 0) {
-            // Allow some time after engine shutdown before enabling security
             unsigned long timeSinceShutdown = millis() - lastEngineShutdown;
             if (timeSinceShutdown >= autoLockTimeout) {
                 securityEnabled = true;
             }
         } else {
-            // System just started or no engine shutdown recorded - enable security immediately
-            // since no authentication is present
             securityEnabled = true;
         }
     }
     
-    // Update security relays
+    // Control security relays
     if (securityEnabled) {
-        // Security active - all relays LOW
         digitalWrite(RELAY_SECURITY_POS, LOW);
         digitalWrite(RELAY_SECURITY_GND, LOW);
         digitalWrite(RELAY_SECURITY_OPEN, LOW);
     } else {
-        // Security disabled - all relays HIGH
         digitalWrite(RELAY_SECURITY_POS, HIGH);
         digitalWrite(RELAY_SECURITY_GND, HIGH);
         digitalWrite(RELAY_SECURITY_OPEN, HIGH);

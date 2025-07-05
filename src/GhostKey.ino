@@ -1,7 +1,7 @@
 // ========================================
 // GHOSTKEY - ESP32 Car Security System
 // ========================================
-// Handles RFID + Bluetooth authentication, relay control, and web config
+// Handles Bluetooth authentication, relay control, and web config
 // Main features: secure car starting, proximity auth, pairing mode safety
 
 #include <WiFi.h>
@@ -14,7 +14,21 @@
 #include <nvs_flash.h>
 #include <esp_gap_ble_api.h>
 #include <ArduinoJson.h>
+#include <SPIFFS.h>
 #include "config_html.h"
+// ========================================
+// DEBUG SYSTEM - DEFINED EARLY FOR ALL FUNCTIONS
+// ========================================
+#define DEBUG_SYSTEM 1
+#define DEBUG_BUTTON 1
+#define DEBUG_RELAY 1
+
+#define DEBUG_PRINT(x) if(DEBUG_SYSTEM) Serial.print(x)
+#define DEBUG_PRINTLN(x) if(DEBUG_SYSTEM) Serial.println(x)
+#define DEBUG_BUTTON_PRINT(x) if(DEBUG_BUTTON) Serial.print(x)
+#define DEBUG_BUTTON_PRINTLN(x) if(DEBUG_BUTTON) Serial.println(x)
+#define DEBUG_RELAY_PRINT(x) if(DEBUG_RELAY) Serial.print(x)
+#define DEBUG_RELAY_PRINTLN(x) if(DEBUG_RELAY) Serial.println(x)
 
 // ========================================
 // DEBUG CONFIGURATION
@@ -29,7 +43,6 @@
 // PIN DEFINITIONS
 // ========================================
 // Input pins (all active low with pullups)
-#define RFID_PIN 4
 #define BUTTON_PIN 19
 #define BRAKE_PIN 22
 #define CONFIG_BUTTON_PIN 25
@@ -37,6 +50,7 @@
 // Output pins
 #define LED_PIN 23
 #define BUTTON_LED_PIN 18
+#define RFID_SHD_PIN 17
 
 // Relay control pins
 #define RELAY_ACCESSORY 26
@@ -46,6 +60,45 @@
 #define RELAY_SECURITY_POS 13
 #define RELAY_SECURITY_GND 15
 #define RELAY_SECURITY_OPEN 2
+
+// GPIO 34 is input for brake 
+// GPIO 25 is beeper
+// GPIO 26 and 27 are LED 2 and 1 respectively for start button
+// 
+
+// ========================================
+// RFID READER CONFIGURATION
+// ========================================
+#define RFID_DATA_PIN 4
+#define RFID_PREAMBLE_LENGTH 9
+#define RFID_DATA_LENGTH 64
+
+// ========================================
+// RFID STATE VARIABLES
+// ========================================
+bool rfidReading = false;
+int rfidBitCount = 0;
+bool rfidDataBits[RFID_DATA_LENGTH];
+bool lastRfidPin = HIGH; // Assuming pullup, so default HIGH
+int preambleCount = 0;
+bool preambleDetected = false;
+unsigned long lastRfidTransition = 0;
+
+// OOK decoding variables - Updated with measured timings
+#define HIGH_PERIOD_US 274  // Measured HIGH pulse duration
+#define LOW_PERIOD_US 290   // Measured LOW gap duration
+#define AVG_BIT_PERIOD_US 282  // Average for general calculations
+#define MAX_RAW_BITS 512
+bool rawBitStream[MAX_RAW_BITS];
+int rawBitCount = 0;
+bool manchesterDecoded[MAX_RAW_BITS/2];
+int manchesterBitCount = 0;
+
+// Message repetition detection
+bool previousDataBits[RFID_DATA_LENGTH];
+bool hasPreviousData = false;
+int consecutiveValidReads = 0;
+#define REQUIRED_CONSECUTIVE_READS 3
 
 // ========================================
 // TIMING CONSTANTS
@@ -57,7 +110,6 @@
 #define LONG_PRESS_TIME 30000
 #define BUTTON_LED_BLINK_RATE 500
 #define MAX_STORED_KEYS 10
-#define RFID_TIMEOUT 5000
 #define PAIRING_MODE_TIMEOUT 30000
 
 // ========================================
@@ -110,18 +162,7 @@ struct ButtonState {
     unsigned long pressStartTime;
 };
 
-// RFID key storage and management
-struct RFIDKey {
-    uint32_t id;
-    bool isActive;
-};
-
-struct RFIDState {
-    bool isReading;
-    unsigned long lastReadTime;
-    uint32_t currentTag;
-    bool isAuthenticated;
-};
+// Data structures for system state management
 
 // ========================================
 // GLOBAL VARIABLES
@@ -148,12 +189,9 @@ BleKeyboard bleKeyboard("Ghost Key", "Jordan Distributors, Inc", 100);
 BLEServer* pServer = nullptr;
 class MyServerCallbacks;
 
-// Button and RFID state tracking
+// Button state tracking
 ButtonState buttonState = {false, false, false, false, 0, 0};
 ButtonState brakeState = {false, false, false, false, 0, 0};
-RFIDState rfidState = {false, 0, 0, false};
-RFIDKey storedKeys[MAX_STORED_KEYS];
-uint8_t numStoredKeys = 0;
 
 // ========================================
 // BLUETOOTH CACHING SYSTEM
@@ -197,15 +235,7 @@ static unsigned long lastJsonUpdate = 0;
 static int lastDeviceCount = -1;
 static bool jsonCacheValid = false;
 
-// ========================================
-// RFID MANCHESTER DECODING
-// ========================================
-volatile uint32_t manchesterBuffer = 0;
-volatile int manchesterBitCount = 0;
-volatile bool tagReady = false;
-volatile unsigned long lastEdgeTime = 0;
-volatile bool lastLfdataState = false;
-#define MANCHESTER_BIT_PERIOD 400
+
 
 // ========================================
 // TIMING VARIABLES
@@ -216,22 +246,7 @@ unsigned long lastButtonReleaseTime = 0;
 int buttonPressStep = 0;
 #define BUTTON_STEP_TIMEOUT 2000
 
-// ========================================
-// DEBUG SYSTEM
-// ========================================
-#define DEBUG_SYSTEM 1
-#define DEBUG_BUTTON 1
-#define DEBUG_RFID 1
-#define DEBUG_RELAY 1
-
-#define DEBUG_PRINT(x) if(DEBUG_SYSTEM) Serial.print(x)
-#define DEBUG_PRINTLN(x) if(DEBUG_SYSTEM) Serial.println(x)
-#define DEBUG_BUTTON_PRINT(x) if(DEBUG_BUTTON) Serial.print(x)
-#define DEBUG_BUTTON_PRINTLN(x) if(DEBUG_BUTTON) Serial.println(x)
-#define DEBUG_RFID_PRINT(x) if(DEBUG_RFID) Serial.print(x)
-#define DEBUG_RFID_PRINTLN(x) if(DEBUG_RFID) Serial.println(x)
-#define DEBUG_RELAY_PRINT(x) if(DEBUG_RELAY) Serial.print(x)
-#define DEBUG_RELAY_PRINTLN(x) if(DEBUG_RELAY) Serial.println(x)
+// Debug macros now defined at top of file
 
 // ========================================
 // MORE SYSTEM VARIABLES
@@ -271,7 +286,7 @@ int ledFadeAmount = 5;
 
 // WiFi configuration
 const char* ap_ssid = "Ghost Key Configuration";
-const char* ap_password = "123456789";
+String ap_password = "123456789"; // Default password, will be loaded from preferences
 bool wifiEnabled = false;
 
 // More timing constants
@@ -911,38 +926,6 @@ void stopRSSIScan() {
     // Serial.println("BLE: RSSI scanning stopped");
 }
 
-// lfdata_isr - Interrupt handler for RFID Manchester decoding
-// Called on: Every edge change on RFID_PIN (interrupt driven)
-// Links to: handleRFID() checks tagReady flag, uses manchesterBuffer
-void IRAM_ATTR lfdata_isr() {
-    unsigned long now = micros();
-    bool lfdata = digitalRead(RFID_PIN);
-    unsigned long dt = now - lastEdgeTime;
-    lastEdgeTime = now;
-
-    if (tagReady) return;
-
-    // Manchester decoding: look for transitions at expected intervals
-    if (dt > (MANCHESTER_BIT_PERIOD / 2) && dt < (MANCHESTER_BIT_PERIOD * 1.5)) {
-        if (lfdata != lastLfdataState) {
-            manchesterBuffer <<= 1;
-            if (lfdata) {
-                manchesterBuffer |= 1;
-            }
-            manchesterBitCount++;
-        }
-    } else {
-        // Reset if timing is off
-        manchesterBitCount = 0;
-        manchesterBuffer = 0;
-    }
-    lastLfdataState = lfdata;
-
-    if (manchesterBitCount >= 32) {
-        tagReady = true;
-    }
-}
-
 // ========================================
 // FUNCTION DECLARATIONS
 // ========================================
@@ -950,7 +933,6 @@ void setupPins();
 void setupWiFi();
 void setupWebServer();
 void setupBluetooth();
-void handleRFID();
 void handleButtonPress();
 void handleBrakeInput();
 void updateSystemState();
@@ -959,6 +941,340 @@ void checkAutoLock();
 void enterConfigMode();
 void exitConfigMode();
 void updateSecurityState();
+
+// ========================================
+// RFID FUNCTIONS
+// ========================================
+
+// setupRFID - Initialize RFID reader on GPIO 4
+// Called from: setup() function
+// Links to: Uses RFID_DATA_PIN constant
+void setupRFID() {
+    pinMode(RFID_DATA_PIN, INPUT_PULLUP);
+    pinMode(RFID_SHD_PIN, OUTPUT);
+    digitalWrite(RFID_SHD_PIN, HIGH);
+    delay(100);
+    digitalWrite(RFID_SHD_PIN, LOW);
+    delay(100);
+    lastRfidPin = digitalRead(RFID_DATA_PIN);
+    lastRfidTransition = micros();
+    Serial.println("RFID: Reader initialized on GPIO 4");
+}
+
+// readRFIDData - Process RFID data using two-layer decoding (OOK + Manchester)
+// Called from: main loop() with timing control
+// Links to: Layer 1: OOK decoding, Layer 2: Manchester decoding
+void readRFIDData() {
+    bool currentPin = digitalRead(RFID_DATA_PIN);
+    
+    // Check for transition
+    if (currentPin != lastRfidPin) {
+        // Add timing constraint - ignore transitions that are too fast (debounce)
+        unsigned long currentTime = micros();
+        unsigned long timeSinceLastTransition = currentTime - lastRfidTransition;
+        
+        // Ignore transitions faster than 20 microseconds (debounce)
+        if (timeSinceLastTransition < 20) {
+            lastRfidPin = currentPin;
+            lastRfidTransition = currentTime;
+            return;
+        }
+        
+        // Layer 1: OOK Decoding - convert pulses and gaps to raw bit stream
+        if (lastRfidPin == HIGH && currentPin == LOW) {
+            // End of HIGH pulse - should be ~274us for one "1" bit
+                        int bitCount = (timeSinceLastTransition + HIGH_PERIOD_US/2) / HIGH_PERIOD_US;
+            if (bitCount >= 1 && bitCount <= 3) {  // Allow some tolerance
+                // Add the HIGH bits to raw stream
+                for (int i = 0; i < bitCount && rawBitCount < MAX_RAW_BITS; i++) {
+                    rawBitStream[rawBitCount++] = true;
+                }
+            }
+        } else if (lastRfidPin == LOW && currentPin == HIGH) {
+            // End of LOW gap - should be ~290us for one "0" bit
+                        int bitCount = (timeSinceLastTransition + LOW_PERIOD_US/2) / LOW_PERIOD_US;
+            if (bitCount >= 1 && bitCount <= 50) {  // Allow reasonable range
+                // Add the LOW bits to raw stream
+                for (int i = 0; i < bitCount && rawBitCount < MAX_RAW_BITS; i++) {
+                    rawBitStream[rawBitCount++] = false;
+                }
+            }
+        }
+        
+        // Layer 2: Manchester Decoding - try both alignments to find correct start
+        if (rawBitCount >= 200) { // Need enough bits for a complete message + preamble search
+            // Show raw OOK bits for debugging (first 64 bits only) - reduced frequency
+            static int rawDisplayCounter = 0;
+            if (rawDisplayCounter++ % 10 == 0) {  // Show every 10th time
+                Serial.print("Raw OOK bits (first 64): ");
+                for (int i = 0; i < 64 && i < rawBitCount; i++) {
+                    Serial.print(rawBitStream[i] ? "1" : "0");
+                }
+                Serial.println();
+            }
+            
+            // Look for Manchester preamble pattern in raw OOK bits
+            // 9 consecutive 1s in Manchester = 010101010101010101 (18 bits)
+            int preambleStart = findManchesterPreambleInRaw();
+            if (preambleStart >= 0) {
+                Serial.print("Found potential preamble at raw bit position: ");
+                Serial.println(preambleStart);
+                tryManchesterDecoding(preambleStart);
+            } else {
+                // Try multiple alignments to find correct start
+                for (int offset = 0; offset < 16; offset++) {
+                    tryManchesterDecoding(offset);
+                }
+            }
+        }
+        
+        // Update timing variables
+        lastRfidPin = currentPin;
+        lastRfidTransition = currentTime;
+    }
+    
+    // Timeout reset - if we've been reading for too long, reset
+    static unsigned long readingStartTime = 0;
+    if (rfidReading && readingStartTime == 0) {
+        readingStartTime = millis();
+    } else if (rfidReading && (millis() - readingStartTime > 1000)) {
+        // Reset if reading takes more than 1 second
+        resetRFIDReading();
+        readingStartTime = 0;
+    } else if (!rfidReading) {
+        readingStartTime = 0;
+    }
+    
+    // Periodic full reset to prevent getting stuck in bad states
+    static unsigned long lastFullReset = 0;
+    if (millis() - lastFullReset > 5000) {
+        if (rawBitCount > 0 || manchesterBitCount > 0) {
+            // If we have accumulated bits but no successful read, reset everything
+            fullRFIDReset();
+        }
+        lastFullReset = millis();
+    }
+    
+    // Buffer overflow protection
+    if (rawBitCount >= MAX_RAW_BITS - 10) {
+        resetRFIDReading();
+    }
+}
+
+// Function to find Manchester preamble pattern in raw OOK bits
+// Looking for 9 consecutive 1s in Manchester = 010101010101010101 (18 bits)
+int findManchesterPreambleInRaw() {
+    // Pattern we're looking for: 010101010101010101 (18 bits)
+    const char* preamblePattern = "010101010101010101";
+    int patternLength = 18;
+    
+    // Search through the raw bit stream
+    for (int i = 0; i <= rawBitCount - patternLength; i++) {
+        bool patternMatch = true;
+        
+        // Check if the pattern matches at this position
+        for (int j = 0; j < patternLength; j++) {
+            bool expectedBit = (preamblePattern[j] == '1');
+            bool actualBit = rawBitStream[i + j];
+            
+            if (expectedBit != actualBit) {
+                patternMatch = false;
+                break;
+            }
+        }
+        
+        if (patternMatch) {
+            return i; // Return the starting position
+        }
+    }
+    
+    return -1; // Pattern not found
+}
+
+// Function to try Manchester decoding starting at a specific offset
+void tryManchesterDecoding(int startOffset) {
+    static bool tempManchesterDecoded[MAX_RAW_BITS/2];
+    int tempManchesterBitCount = 0;
+    
+    // Process pairs of bits starting from the offset
+    for (int i = startOffset; i < rawBitCount - 1; i += 2) {
+        if (i + 1 < rawBitCount && tempManchesterBitCount < MAX_RAW_BITS/2) {
+            bool bit1 = rawBitStream[i];
+            bool bit2 = rawBitStream[i + 1];
+            
+            bool manchesterBit;
+            bool validPair = false;
+            
+            if (!bit1 && bit2) {
+                // "01" = logical 1
+                manchesterBit = true;
+                validPair = true;
+            } else if (bit1 && !bit2) {
+                // "10" = logical 0
+                manchesterBit = false;
+                validPair = true;
+            }
+            
+            if (validPair) {
+                tempManchesterDecoded[tempManchesterBitCount++] = manchesterBit;
+            }
+        }
+    }
+    
+    // Debug: Show what we decoded for this offset (reduced output)
+    if (tempManchesterBitCount >= 32) {  // Only show if we have reasonable amount of data
+        // Check for preamble at start
+        int preambleOnes = 0;
+        for (int i = 0; i < 12 && i < tempManchesterBitCount; i++) {
+            if (tempManchesterDecoded[i]) {
+                preambleOnes++;
+            } else {
+                break;
+            }
+        }
+        
+        // Only show debug if we have significant preamble bits
+        if (preambleOnes >= 5) {
+            Serial.print("Manchester decode offset ");
+            Serial.print(startOffset);
+            Serial.print(" (");
+            Serial.print(tempManchesterBitCount);
+            Serial.print(" bits): ");
+            for (int i = 0; i < 32 && i < tempManchesterBitCount; i++) {
+                Serial.print(tempManchesterDecoded[i] ? "1" : "0");
+            }
+            Serial.print(" [Preamble ones: ");
+            Serial.print(preambleOnes);
+            Serial.println("]");
+        }
+    }
+    
+    // Check if this alignment gives us a valid preamble and enough data
+    if (tempManchesterBitCount >= RFID_DATA_LENGTH) {
+        // Look for 9 consecutive 1s at the start
+        bool validPreamble = true;
+        for (int i = 0; i < 9; i++) {
+            if (!tempManchesterDecoded[i]) {
+                validPreamble = false;
+                break;
+            }
+        }
+        
+        // Check if last bit is 0 (stop bit)
+        bool validStopBit = !tempManchesterDecoded[RFID_DATA_LENGTH - 1];
+        
+        if (validPreamble && validStopBit) {
+            // This alignment works! Copy to main arrays and process
+            manchesterBitCount = tempManchesterBitCount;
+            for (int i = 0; i < tempManchesterBitCount && i < MAX_RAW_BITS/2; i++) {
+                manchesterDecoded[i] = tempManchesterDecoded[i];
+            }
+            
+            // Copy the complete 64-bit message
+            rfidBitCount = RFID_DATA_LENGTH;
+            for (int i = 0; i < RFID_DATA_LENGTH; i++) {
+                rfidDataBits[i] = tempManchesterDecoded[i];
+            }
+            
+            // Show collected bits and validation status
+            Serial.print("RFID 64-bit data (offset ");
+            Serial.print(startOffset);
+            Serial.print("): ");
+            for (int i = 0; i < RFID_DATA_LENGTH; i++) {
+                Serial.print(rfidDataBits[i] ? "1" : "0");
+            }
+            Serial.println(" - VALID");
+            
+            // Show the specific 40-bit data section (bits 19-58)
+            Serial.print("40-bit data section (bits 19-58): ");
+            for (int i = 19; i < 59; i++) {
+                Serial.print(rfidDataBits[i] ? "1" : "0");
+            }
+            
+            // Check if this matches the expected pattern
+            const char* expectedPattern = "0000000000010100010100101001100000001001";
+            bool matchesExpected = true;
+            for (int i = 0; i < 40; i++) {
+                bool expectedBit = (expectedPattern[i] == '1');
+                bool actualBit = rfidDataBits[19 + i];
+                if (expectedBit != actualBit) {
+                    matchesExpected = false;
+                    break;
+                }
+            }
+            
+            if (matchesExpected) {
+                Serial.println(" ← MATCHES EXPECTED PATTERN!");
+            } else {
+                Serial.println(" ← Does not match expected");
+            }
+            
+            // Process the valid message
+            processValidRFIDMessage();
+        }
+    }
+}
+
+// Process a validated RFID message
+void processValidRFIDMessage() {
+    // Check if this message matches the previous one
+    if (hasPreviousData) {
+        bool isRepeated = true;
+        for (int i = 0; i < RFID_DATA_LENGTH; i++) {
+            if (rfidDataBits[i] != previousDataBits[i]) {
+                isRepeated = false;
+                break;
+            }
+        }
+        
+        if (isRepeated) {
+            consecutiveValidReads++;
+            if (consecutiveValidReads >= REQUIRED_CONSECUTIVE_READS) {
+                // Multiple consecutive identical reads - this is the real key
+                Serial.print("RFID KEY: ");
+                for (int i = 0; i < RFID_DATA_LENGTH; i++) {
+                    Serial.print(rfidDataBits[i] ? "1" : "0");
+                }
+                Serial.println();
+                
+                // Reset everything to avoid repeating the same key
+                fullRFIDReset();
+                consecutiveValidReads = 0;
+            }
+        } else {
+            // Different message - reset counter and store new data
+            consecutiveValidReads = 1;
+            for (int i = 0; i < RFID_DATA_LENGTH; i++) {
+                previousDataBits[i] = rfidDataBits[i];
+            }
+        }
+    } else {
+        // First valid message - store it
+        consecutiveValidReads = 1;
+        for (int i = 0; i < RFID_DATA_LENGTH; i++) {
+            previousDataBits[i] = rfidDataBits[i];
+        }
+        hasPreviousData = true;
+    }
+}
+
+
+// Helper function to reset RFID reading state
+void resetRFIDReading() {
+    rfidReading = false;
+    preambleDetected = false;
+    preambleCount = 0;
+    rfidBitCount = 0;
+    rawBitCount = 0;
+    manchesterBitCount = 0;
+    // Don't reset hasPreviousData here - we want to keep it for comparison
+}
+
+// Helper function to completely reset RFID state including previous data
+void fullRFIDReset() {
+    resetRFIDReading();
+    hasPreviousData = false;
+}
 
 // ========================================
 // MAIN SETUP - Runs once on boot
@@ -978,6 +1294,7 @@ void setup() {
     isBluetoothPaired = preferences.getBool("bluetooth_paired", false);
     starterPulseTime = preferences.getULong("starter_pulse", STARTER_PULSE_TIME);
     autoLockTimeout = preferences.getULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
+    ap_password = preferences.getString("wifi_password", "123456789");
     DEBUG_PRINT("System configured: ");
     DEBUG_PRINTLN(isConfigured ? "Yes" : "No");
     DEBUG_PRINT("Bluetooth paired: ");
@@ -989,20 +1306,7 @@ void setup() {
     DEBUG_PRINT(autoLockTimeout);
     DEBUG_PRINTLN("ms");
     
-    // Load RFID keys
-    numStoredKeys = preferences.getUInt("num_keys", 0);
-    DEBUG_PRINT("Number of stored RFID keys: ");
-    DEBUG_PRINTLN(numStoredKeys);
-    
-    if (numStoredKeys > 0) {
-        preferences.getBytes("keys", storedKeys, sizeof(storedKeys));
-        DEBUG_PRINTLN("RFID keys loaded from memory");
-    }
 
-    // Setup RFID interrupt
-    pinMode(RFID_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(RFID_PIN), lfdata_isr, CHANGE);
-    DEBUG_PRINTLN("RFID interrupt attached");
     
     // Initialize NVS for bluetooth
     esp_err_t err = nvs_flash_init();
@@ -1014,6 +1318,13 @@ void setup() {
         Serial.printf("Error initializing NVS: %d\n", err);
     } else {
         Serial.println("NVS initialized for Bluetooth");
+    }
+    
+    // Initialize SPIFFS for logo storage
+    if (!SPIFFS.begin(true)) {
+        Serial.println("SPIFFS Mount Failed");
+    } else {
+        Serial.println("SPIFFS initialized for logo storage");
     }
     
     // Initialize BLE cache arrays
@@ -1035,6 +1346,10 @@ void setup() {
     startRSSIScan();
     DEBUG_PRINTLN("RSSI scanning started");
     
+    // Initialize RFID reader
+    setupRFID();
+    DEBUG_PRINTLN("RFID reader initialized");
+    
     DEBUG_PRINTLN("=== System Initialization Complete ===\n");
 }
 
@@ -1044,7 +1359,6 @@ void setup() {
 void loop() {
     // Core system updates
     updateSystemState();
-    handleRFID();
     updateBluetoothAuthentication();
     handleButtonPress();
     controlRelays();
@@ -1067,6 +1381,13 @@ void loop() {
             startRSSIScan();
         }
         lastRSSIScan = millis();
+    }
+    
+    // RFID reading (high frequency check)
+    static unsigned long lastRfidCheck = 0;
+    if (micros() - lastRfidCheck >= 50) {  // Check every 50 microseconds
+        readRFIDData();
+        lastRfidCheck = micros();
     }
     
     // Pairing mode timeout check
@@ -1095,7 +1416,6 @@ void loop() {
 // Links to: All pin constants defined at top of file
 void setupPins() {
     // Input pins (active low with pullups)
-    pinMode(RFID_PIN, INPUT_PULLUP);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     pinMode(BRAKE_PIN, INPUT_PULLUP);
     pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
@@ -1103,6 +1423,7 @@ void setupPins() {
     // Output pins
     pinMode(LED_PIN, OUTPUT);
     pinMode(BUTTON_LED_PIN, OUTPUT);
+    pinMode(RFID_SHD_PIN, OUTPUT);
     
     // PWM for button LED
     ledcSetup(LED_PWM_CHANNEL, LED_PWM_FREQ, LED_PWM_RESOLUTION);
@@ -1130,116 +1451,7 @@ void setupPins() {
     digitalWrite(RELAY_SECURITY_OPEN, LOW);
 }
 
-// isTagAuthorized - Check if RFID tag is in our allowed list
-// Takes: uint32_t tagId (the scanned RFID tag ID)
-// Returns: bool (true if authorized, false if not)
-// Links to: handleRFID() calls this to verify scanned tags
-bool isTagAuthorized(uint32_t tagId) {
-    for (int i = 0; i < numStoredKeys; i++) {
-        if (storedKeys[i].id == tagId && storedKeys[i].isActive) {
-            return true;
-        }
-    }
-    return false;
-}
 
-// addRFIDKey - Add new RFID tag to authorized list (used in pairing mode)
-// Takes: uint32_t tagId (the new tag to add)
-// Returns: bool (true if added successfully, false if list full)
-// Links to: handleRFID() calls this when in pairing mode
-bool addRFIDKey(uint32_t tagId) {
-    if (numStoredKeys >= MAX_STORED_KEYS) return false;
-    
-    // Check if we already have this tag
-    for (int i = 0; i < numStoredKeys; i++) {
-        if (storedKeys[i].id == tagId) {
-            storedKeys[i].isActive = true;
-            return true;
-        }
-    }
-    
-    // Add the new tag
-    storedKeys[numStoredKeys].id = tagId;
-    storedKeys[numStoredKeys].isActive = true;
-    numStoredKeys++;
-    
-    // Save to flash
-    preferences.putUInt("num_keys", numStoredKeys);
-    preferences.putBytes("keys", storedKeys, sizeof(storedKeys));
-    
-    return true;
-}
-
-//remove an RFID key
-bool removeRFIDKey(uint32_t tagId) {
-    for (int i = 0; i < numStoredKeys; i++) {
-        if (storedKeys[i].id == tagId) {
-            //move everything up
-            for (int j = i; j < numStoredKeys - 1; j++) {
-                storedKeys[j] = storedKeys[j + 1];
-            }
-            numStoredKeys--;
-            
-            //save the changes
-            preferences.putUInt("num_keys", numStoredKeys);
-            preferences.putBytes("keys", storedKeys, sizeof(storedKeys));
-            
-            return true;
-        }
-    }
-    return false;
-}
-
-// handleRFID - Process RFID tags when detected by interrupt
-// Called from: main loop() continuously
-// Links to: lfdata_isr() sets tagReady flag, uses isTagAuthorized(), addRFIDKey()
-void handleRFID() {
-    if (tagReady) {
-        uint32_t tagId = manchesterBuffer;
-        DEBUG_RFID_PRINT("RFID Tag detected: 0x");
-        char hexStr[9];
-        sprintf(hexStr, "%08X", tagId);
-        DEBUG_RFID_PRINT(hexStr);
-        DEBUG_RFID_PRINTLN("");
-        
-        // Reset for next tag
-        manchesterBitCount = 0;
-        manchesterBuffer = 0;
-        tagReady = false;
-
-        if (isPairingMode) {
-            DEBUG_RFID_PRINTLN("Pairing mode active - Attempting to add new key");
-            if (addRFIDKey(tagId)) {
-                DEBUG_RFID_PRINTLN("New key added successfully");
-                digitalWrite(LED_PIN, HIGH);
-                delay(100);
-                digitalWrite(LED_PIN, LOW);
-            } else {
-                DEBUG_RFID_PRINTLN("Failed to add new key");
-            }
-        } else {
-            // Normal mode - check if tag is authorized
-            rfidState.isAuthenticated = isTagAuthorized(tagId);
-            DEBUG_RFID_PRINT("Tag authentication: ");
-            DEBUG_RFID_PRINTLN(rfidState.isAuthenticated ? "Success" : "Failed");
-            
-            if (rfidState.isAuthenticated) {
-                // Success - single blink
-                digitalWrite(LED_PIN, HIGH);
-                delay(100);
-                digitalWrite(LED_PIN, LOW);
-            } else {
-                // Failure - triple blink
-                for (int i = 0; i < 3; i++) {
-                    digitalWrite(LED_PIN, HIGH);
-                    delay(50);
-                    digitalWrite(LED_PIN, LOW);
-                    delay(50);
-                }
-            }
-        }
-    }
-}
 
 void handleButtonPress() {
     bool buttonReading = digitalRead(BUTTON_PIN);
@@ -1299,8 +1511,8 @@ void handleButtonPress() {
             (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
             lastButtonPress = millis();
             
-            // Check if authenticated by either RFID OR Bluetooth
-            if (rfidState.isAuthenticated || bluetoothAuthenticated) {
+            // Check if authenticated by Bluetooth
+            if (bluetoothAuthenticated) {
                 if (engineRunning) {
                     // If engine is running, only allow turning off
                     DEBUG_PRINTLN("Engine sequence stopped");
@@ -1317,7 +1529,7 @@ void handleButtonPress() {
                     controlRelays();
                 }
             } else {
-                DEBUG_BUTTON_PRINTLN("Not authenticated (RFID or Bluetooth) - Access denied");
+                DEBUG_BUTTON_PRINTLN("Not authenticated (Bluetooth) - Access denied");
                 // Error feedback
                 for (int i = 0; i < 3; i++) {
                     digitalWrite(LED_PIN, HIGH);
@@ -1333,8 +1545,8 @@ void handleButtonPress() {
             brakeReading == HIGH && (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
             // Only process button release if we're not in shutdown delay
             if (!isShuttingDown && !engineRunning && !startRelayActive) {
-                // Check if authenticated by either RFID OR Bluetooth
-                if (rfidState.isAuthenticated || bluetoothAuthenticated) {  // Only allow normal sequence if engine isn't running
+                // Check if authenticated by Bluetooth
+                if (bluetoothAuthenticated) {  // Only allow normal sequence if engine isn't running
                     systemState = (systemState + 1) % 3;
                     DEBUG_BUTTON_PRINT("Button released. New state: ");
                     DEBUG_BUTTON_PRINTLN(systemState);
@@ -1516,10 +1728,17 @@ void exitConfigMode() {
     // Disable pairing mode when exiting config
     disablePairingMode();
     
-    // Stop WiFi and web server
+    // Apply any WiFi password changes before stopping WiFi
     if (wifiEnabled) {
         WiFi.softAPdisconnect(true);
         wifiEnabled = false;
+        
+        // Check if there's a new WiFi password and restart with it
+        String savedPassword = preferences.getString("wifi_password", "123456789");
+        if (savedPassword != ap_password) {
+            DEBUG_PRINTLN("Applying WiFi password change on exit");
+            ap_password = savedPassword;
+        }
     }
     // Note: WebServer doesn't have an end() method, server stops when WiFi stops
     
@@ -1536,11 +1755,13 @@ void setupWiFi() {
     DEBUG_PRINTLN("Starting WiFi Access Point...");
     WiFi.disconnect();  // Disconnect from any existing connections
     WiFi.mode(WIFI_AP);  // Set WiFi to AP mode
-    WiFi.softAP(ap_ssid, ap_password);
+    WiFi.softAP(ap_ssid, ap_password.c_str());
     
     IPAddress IP = WiFi.softAPIP();
     DEBUG_PRINT("AP IP address: ");
     DEBUG_PRINTLN(IP);
+    DEBUG_PRINT("WiFi password: ");
+    DEBUG_PRINTLN(ap_password);
     
     wifiEnabled = true;
 }
@@ -1629,6 +1850,28 @@ void setupWebServer() {
         server.send_P(200, "text/html", config_html);
     });
     
+    // Handle logo requests - serve from SPIFFS with fallback
+    server.on("/logo", HTTP_GET, [](){
+        Serial.println("Logo request received");
+        
+        // Try to serve logo from SPIFFS first
+        File logoFile = SPIFFS.open("/jdi_logo.png", "r");
+        if (logoFile && logoFile.size() > 0) {
+            Serial.println("Serving JDI logo from SPIFFS");
+            server.streamFile(logoFile, "image/png");
+            logoFile.close();
+        } else {
+            Serial.println("Logo file not found in SPIFFS, serving fallback SVG");
+            // Fallback SVG logo
+            server.send(200, "image/svg+xml", 
+                "<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'>"
+                "<rect width='120' height='120' rx='24' fill='#f8f9fa'/>"
+                "<text x='60' y='65' text-anchor='middle' fill='#333' font-size='14' font-weight='bold' font-family='Arial'>JDI</text>"
+                "<text x='60' y='95' text-anchor='middle' fill='#666' font-size='8' font-family='Arial'>Jordan Distributors Inc.</text>"
+                "</svg>");
+        }
+    });
+    
     // System status endpoint
     server.on("/status", HTTP_GET, [](){
         String stateStr;
@@ -1643,9 +1886,7 @@ void setupWebServer() {
         
         String json = "{";
         json += "\"state\":\"" + stateStr + "\",";
-        json += "\"rfid\":" + String(rfidState.isAuthenticated ? "true" : "false") + ",";
         json += "\"bluetooth\":" + String(bluetoothAuthenticated ? "true" : "false") + ",";
-        json += "\"keys\":" + String(numStoredKeys) + ",";
         json += "\"starterPulse\":" + String(starterPulseTime) + ",";
         json += "\"autoLockTimeout\":" + String(autoLockTimeout);
         json += "}";
@@ -1779,6 +2020,37 @@ void setupWebServer() {
         }
     });
 
+
+
+    // WiFi password management endpoints
+    server.on("/wifi_password", HTTP_GET, [](){
+        Serial.println("WiFi password request received");
+        String json = "{\"password\":\"" + ap_password + "\"}";
+        server.send(200, "application/json", json);
+    });
+    
+    server.on("/update_wifi_password", HTTP_POST, [](){
+        Serial.println("WiFi password update request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                const char* newPassword = doc["password"];
+                
+                if (newPassword && strlen(newPassword) >= 8) {
+                    ap_password = String(newPassword);
+                    preferences.putString("wifi_password", ap_password);
+                    Serial.printf("WiFi password saved (will apply on exit): %s\n", ap_password.c_str());
+                    
+                    server.send(200, "text/plain", "WiFi password saved successfully");
+                    return;
+                }
+            }
+        }
+        server.send(400, "text/plain", "Invalid request or password too short");
+    });
+
     // Route for exiting config mode
     server.on("/exit", HTTP_POST, [](){
         exitConfigMode();
@@ -1854,9 +2126,9 @@ void updateBluetoothAuthentication() {
 
 // updateSecurityState - Control security relays based on authentication
 // Called from: main loop() every SECURITY_CHECK_INTERVAL
-// Links to: Uses rfidState.isAuthenticated, bluetoothAuthenticated, engineRunning
+// Links to: Uses bluetoothAuthenticated, engineRunning
 void updateSecurityState() {
-    bool isAuthenticated = rfidState.isAuthenticated || bluetoothAuthenticated;
+    bool isAuthenticated = bluetoothAuthenticated;
     
     // Security logic: enabled by default, disabled when authenticated or engine running
     if (engineRunning) {

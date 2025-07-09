@@ -957,13 +957,19 @@ const char config_html[] PROGMEM = R"rawliteral(
                 if (!response.ok) throw new Error('Network response was not ok');
                 
                 const data = await response.json();
-                document.getElementById('rfidPairingStatus').textContent = data.pairingMode ? 'Pairing mode: active' : 'Pairing mode: inactive';
+                
+                // Get RFID status separately
+                const statusResponse = await fetchWithTimeout('/rfid_status');
+                if (statusResponse.ok) {
+                    const statusData = await statusResponse.json();
+                    document.getElementById('rfidPairingStatus').textContent = statusData.pairing ? 'Pairing mode: active' : 'Pairing mode: inactive';
+                }
                 
                 let html = '';
-                if (data.keys && data.keys.length === 0) {
+                if (data.length === 0) {
                     html = '<div class="card"><p>No RFID keys found.</p></div>';
-                } else if (data.keys) {
-                    data.keys.forEach((key, index) => {
+                } else {
+                    data.forEach((key, index) => {
                         html += '<div class="device-card">';
                         html += '<div class="device-header">';
                         html += '<div>';
@@ -972,13 +978,8 @@ const char config_html[] PROGMEM = R"rawliteral(
                         html += '</div>';
                         html += '</div>';
                         
-                        html += '<div>';
-                        html += '<input type="text" class="form-input" id="rfid_name_' + index + '" placeholder="Enter key name" value="' + (key.name || '') + '" style="margin-bottom: 1rem;">';
-                        html += '</div>';
-                        
                         html += '<div class="device-actions">';
-                        html += '<button onclick="setRfidKeyName(\'' + key.id + '\', ' + index + ')" class="btn btn-primary">Set Name</button>';
-                        html += '<button onclick="removeRfidKey(\'' + key.id + '\')" class="btn btn-danger">Remove Key</button>';
+                        html += '<button onclick="removeRfidKey(' + index + ')" class="btn btn-danger">Remove Key</button>';
                         html += '</div>';
                         html += '</div>';
                     });
@@ -991,11 +992,11 @@ const char config_html[] PROGMEM = R"rawliteral(
 
         async function toggleRfidPairing() {
             try {
-                const response = await fetchWithTimeout('/rfid_pairing');
+                const response = await fetchWithTimeout('/rfid_pair', { method: 'POST' });
                 if (!response.ok) throw new Error('Network response was not ok');
                 
                 const status = await response.text();
-                document.getElementById('rfidPairingStatus').textContent = status;
+                document.getElementById('rfidPairingStatus').textContent = 'Pairing mode: active';
                 showNotification(status);
             } catch (error) {
                 const errorMsg = 'Error: ' + error.message;
@@ -1004,32 +1005,9 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
         }
 
-        async function setRfidKeyName(keyId, index) {
-            const nameInput = document.getElementById('rfid_name_' + index);
-            const name = nameInput.value.trim();
-            
-            if (!name) {
-                showNotification('Please enter a key name', 'error');
-                return;
-            }
-            
-            try {
-                const response = await fetchWithTimeout('/rfid_name', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: keyId, name: name })
-                });
-                
-                if (!response.ok) throw new Error('Network response was not ok');
-                
-                showNotification('RFID key name updated successfully');
-                await loadRfidKeys();
-            } catch (error) {
-                showNotification('Error setting key name: ' + error.message, 'error');
-            }
-        }
 
-        async function removeRfidKey(keyId) {
+
+        async function removeRfidKey(index) {
             if (!confirm('Are you sure you want to remove this RFID key?')) {
                 return;
             }
@@ -1038,7 +1016,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 const response = await fetchWithTimeout('/rfid_remove', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: keyId })
+                    body: JSON.stringify({ index: index })
                 });
                 
                 if (!response.ok) throw new Error('Network response was not ok');

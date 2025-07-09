@@ -43,33 +43,27 @@
 // PIN DEFINITIONS
 // ========================================
 // Input pins (all active low with pullups)
-#define BUTTON_PIN 19 // 
-#define BRAKE_PIN 22 // Change to GPIO 23?
-#define CONFIG_BUTTON_PIN 25  // GPIO 25 will be used for the beeper
+#define BUTTON_PIN 32 // Changed from 34 - supports internal pullup
+#define BRAKE_PIN 18 // Good
+#define BEEPER_PIN 25  // GPIO 25 will be used for the beeper
 
 // Output pins
 #define LED_PIN 23 // change
-#define BUTTON_LED_PIN 18
+#define BUTTON_LED_PIN 26 // good
 
 // RFID pins
-#define RFID_DEMOD_OUT 16
-#define RFID_SHD 4
-#define RFID_MOD 27
-#define RFID_RDY_CLK 15
+#define RFID_DEMOD_OUT 12 // good
+#define RFID_SHD 13 // good
+#define RFID_MOD 27 // good
+#define RFID_RDY_CLK 14 // good
 
 // Relay control pins
-#define RELAY_ACCESSORY 32
-#define RELAY_IGNITION1 26 
-#define RELAY_IGNITION2 14
-#define RELAY_START 12
-#define RELAY_SECURITY_POS 13
-#define RELAY_SECURITY_GND 2
-#define RELAY_SECURITY_OPEN 0
+#define RELAY_ACCESSORY 15 // good
+#define RELAY_IGNITION1 5 // 
+#define RELAY_IGNITION2 4 // good
+#define RELAY_START 16 // good
+#define RELAY_SECURITY 17 // Change all // good
 
-// GPIO 34 is input for brake 
-// GPIO 25 is beeper
-// GPIO 26 and 27 are LED 2 and 1 respectively for start button
-// 
 
 // ========================================
 // TIMING CONSTANTS
@@ -1614,11 +1608,11 @@ void setupPins() {
     // Input pins (active low with pullups)
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     pinMode(BRAKE_PIN, INPUT_PULLUP);
-    pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
     
     // Output pins
     pinMode(LED_PIN, OUTPUT);
     pinMode(BUTTON_LED_PIN, OUTPUT);
+    pinMode(BEEPER_PIN, OUTPUT);
     
     // RFID pins - start timing
     rfidInitStartTime = millis();
@@ -1646,9 +1640,7 @@ void setupPins() {
     pinMode(RELAY_IGNITION1, OUTPUT);
     pinMode(RELAY_IGNITION2, OUTPUT);
     pinMode(RELAY_START, OUTPUT);
-    pinMode(RELAY_SECURITY_POS, OUTPUT);
-    pinMode(RELAY_SECURITY_GND, OUTPUT);
-    pinMode(RELAY_SECURITY_OPEN, OUTPUT);
+    pinMode(RELAY_SECURITY, OUTPUT);
     
     // Start with everything off
     digitalWrite(LED_PIN, LOW);
@@ -1658,9 +1650,7 @@ void setupPins() {
     digitalWrite(RELAY_IGNITION1, LOW);
     digitalWrite(RELAY_IGNITION2, LOW);
     digitalWrite(RELAY_START, LOW);
-    digitalWrite(RELAY_SECURITY_POS, LOW);
-    digitalWrite(RELAY_SECURITY_GND, LOW);
-    digitalWrite(RELAY_SECURITY_OPEN, LOW);
+    digitalWrite(RELAY_SECURITY, LOW);
 }
 
 
@@ -2405,13 +2395,9 @@ void updateSecurityState() {
     
     // Control security relays
     if (securityEnabled) {
-        digitalWrite(RELAY_SECURITY_POS, LOW);
-        digitalWrite(RELAY_SECURITY_GND, LOW);
-        digitalWrite(RELAY_SECURITY_OPEN, LOW);
+        digitalWrite(RELAY_SECURITY, LOW);
     } else {
-        digitalWrite(RELAY_SECURITY_POS, HIGH);
-        digitalWrite(RELAY_SECURITY_GND, HIGH);
-        digitalWrite(RELAY_SECURITY_OPEN, HIGH);
+        digitalWrite(RELAY_SECURITY, HIGH);
     }
 }
 
@@ -2447,11 +2433,5 @@ void printSystemStatus() {
     Serial.print("\nSecurity State: ");
     Serial.println(securityEnabled ? "ENABLED" : "DISABLED");
     Serial.print("Security Relays - POS: ");
-    Serial.print(digitalRead(RELAY_SECURITY_POS) ? "HIGH" : "LOW");
-    Serial.print(" GND: ");
-    Serial.print(digitalRead(RELAY_SECURITY_GND) ? "HIGH" : "LOW");
-    Serial.print(" OPEN: ");
-    Serial.println(digitalRead(RELAY_SECURITY_OPEN) ? "HIGH" : "LOW");
-    
-    Serial.println("========================\n");
+    Serial.print(digitalRead(RELAY_SECURITY) ? "HIGH \n" : "LOW \n");
 } 

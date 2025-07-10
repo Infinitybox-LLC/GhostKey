@@ -20,15 +20,15 @@ const char config_html[] PROGMEM = R"rawliteral(
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
             background:
-  radial-gradient(circle at 25% 30%, rgba(102, 126, 234, 0.25) 0%, transparent 50%),
-  radial-gradient(circle at 70% 60%, rgba(102, 126, 234, 0.15) 0%, transparent 40%),
-  radial-gradient(circle at 45% 80%, rgba(102, 126, 234, 0.2) 0%, transparent 60%),
-  linear-gradient(135deg, #764ba2 0%, #5a3c94 100%);
+  radial-gradient(circle at 25% 30%, rgba(24, 53, 181, 0.3) 0%, rgba(102, 126, 234, 0) 70%),
+  radial-gradient(circle at 70% 60%, rgba(102, 126, 234, 0.3) 0%, rgba(102, 126, 234, 0) 60%),
+  radial-gradient(circle at 45% 80%, rgba(102, 126, 234, 0.28) 0%, rgba(102, 126, 234, 0) 65%),
+  linear-gradient(135deg, #764ba2 0%,rgb(81, 55, 132) 100%);
 
             min-height: 100vh;
             color: #333;
             overflow-x: hidden;
-            font-size: 14px;
+            font-size: 16px;
             line-height: 1.6;
         }
         
@@ -65,9 +65,9 @@ const char config_html[] PROGMEM = R"rawliteral(
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
             background:
-  radial-gradient(circle at 25% 30%, rgba(102, 126, 234, 0.25) 0%, transparent 50%),
-  radial-gradient(circle at 70% 60%, rgba(102, 126, 234, 0.15) 0%, transparent 40%),
-  radial-gradient(circle at 45% 80%, rgba(102, 126, 234, 0.2) 0%, transparent 60%),
+  radial-gradient(circle at 25% 30%, rgba(102, 126, 234, 0.25) 0%, rgba(102, 126, 234, 0) 70%),
+  radial-gradient(circle at 70% 60%, rgba(102, 126, 234, 0.2) 0%, rgba(102, 126, 234, 0) 60%),
+  radial-gradient(circle at 45% 80%, rgba(102, 126, 234, 0.18) 0%, rgba(102, 126, 234, 0) 65%),
   linear-gradient(135deg, #764ba2 0%, #5a3c94 100%);
             display: flex;
             flex-direction: column;
@@ -213,7 +213,8 @@ const char config_html[] PROGMEM = R"rawliteral(
             cursor: pointer;
             transition: all 0.3s;
             color: #666;
-            font-weight: 500;
+            font-size: 1.05rem;
+            font-weight: 600;
         }
         
         .nav-item.active {
@@ -288,13 +289,13 @@ const char config_html[] PROGMEM = R"rawliteral(
         }
         
         .status-label {
-            font-size: 0.9rem;
+            font-size: 1rem;
             color: #666;
             margin-bottom: 0.5rem;
         }
         
         .status-value {
-            font-size: 1.2rem;
+            font-size: 1.35rem;
             font-weight: 600;
             color: #333;
         }
@@ -315,7 +316,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             width: 100%;
             max-width: 300px;
             padding: 1rem;
-            font-size: 1rem;
+            font-size: 1.1rem;
             border: 2px solid #e1e5e9;
             border-radius: 12px;
             background: white;
@@ -331,7 +332,7 @@ const char config_html[] PROGMEM = R"rawliteral(
         /* Buttons */
         .btn {
             padding: 1rem 2rem;
-            font-size: 1rem;
+            font-size: 1.1rem;
             font-weight: 600;
             border: none;
             border-radius: 12px;
@@ -396,13 +397,13 @@ const char config_html[] PROGMEM = R"rawliteral(
         }
         
         .device-name {
-            font-size: 1.2rem;
+            font-size: 1.35rem;
             font-weight: 600;
             color: #333;
         }
         
         .device-mac {
-            font-size: 0.9rem;
+            font-size: 1rem;
             color: #666;
             font-family: monospace;
         }
@@ -440,7 +441,7 @@ const char config_html[] PROGMEM = R"rawliteral(
         
         .device-actions .btn {
             padding: 0.5rem 1rem;
-            font-size: 0.9rem;
+            font-size: 1rem;
         }
         
         /* Toggle Switch */
@@ -554,7 +555,7 @@ const char config_html[] PROGMEM = R"rawliteral(
         
         .exit-message p {
             margin: 0.5rem 0;
-            font-size: 1.1rem;
+            font-size: 1.2rem;
         }
         
         /* Mobile Responsive */

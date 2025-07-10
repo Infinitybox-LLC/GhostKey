@@ -8,7 +8,9 @@ const char config_html[] PROGMEM = R"rawliteral(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Ghost Key Configuration</title>
+    
     <style>
+        /* ======================================== */
         * {
             margin: 0;
             padding: 0;
@@ -16,18 +18,57 @@ const char config_html[] PROGMEM = R"rawliteral(
         }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+            background:
+  radial-gradient(circle at 25% 30%, rgba(102, 126, 234, 0.25) 0%, transparent 50%),
+  radial-gradient(circle at 70% 60%, rgba(102, 126, 234, 0.15) 0%, transparent 40%),
+  radial-gradient(circle at 45% 80%, rgba(102, 126, 234, 0.2) 0%, transparent 60%),
+  linear-gradient(135deg, #764ba2 0%, #5a3c94 100%);
+
             min-height: 100vh;
             color: #333;
             overflow-x: hidden;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        
+        /* Typography - System fonts */
+        .splash-title {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            font-weight: normal;
+            letter-spacing: -0.03em;
+        }
+        
+        .app-name, .card-title, .device-name, 
+        h1, h2, h3, h4, h5, h6 {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            font-weight: normal;
+            letter-spacing: -0.02em;
+        }
+        
+        .form-label, .status-label {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            font-weight: normal;
+        }
+        
+        .nav-item {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            font-weight: normal;
+        }
+        
+        p, span, input, button, .btn {
+            font-weight: 400;
         }
         
         /* Splash Screen Styles */
         .splash-screen {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background:
+  radial-gradient(circle at 25% 30%, rgba(102, 126, 234, 0.25) 0%, transparent 50%),
+  radial-gradient(circle at 70% 60%, rgba(102, 126, 234, 0.15) 0%, transparent 40%),
+  radial-gradient(circle at 45% 80%, rgba(102, 126, 234, 0.2) 0%, transparent 60%),
+  linear-gradient(135deg, #764ba2 0%, #5a3c94 100%);
             display: flex;
             flex-direction: column;
             justify-content: center;
@@ -118,7 +159,7 @@ const char config_html[] PROGMEM = R"rawliteral(
         .app-header {
             background: rgba(255,255,255,0.95);
             backdrop-filter: blur(20px);
-            padding: 1rem 2rem;
+            padding: 0.75rem 2rem;
             position: sticky;
             top: 0;
             z-index: 100;
@@ -132,15 +173,15 @@ const char config_html[] PROGMEM = R"rawliteral(
         }
         
         .app-logo {
-            width: 40px;
-            height: 40px;
-            border-radius: 8px;
+            width: 56px;
+            height: 56px;
+            border-radius: 10px;
         }
         
         .app-name {
             font-size: 1.5rem;
             font-weight: 700;
-            color: #667eea;
+            color:rgb(119, 88, 185);
         }
         
         .main-container {
@@ -565,7 +606,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
             
             .app-header {
-                padding: 1rem;
+                padding: 0.75rem 1rem;
             }
             
             .notification {
@@ -685,12 +726,12 @@ const char config_html[] PROGMEM = R"rawliteral(
                     document.getElementById('bluetoothStatus').textContent = data.bluetooth ? 'Authenticated' : 'Not Authenticated';
                     document.getElementById('storedKeys').textContent = data.keys || '0';
                     
-                    // Update form values
+                    // Update form values - convert from milliseconds to seconds
                     if (data.starterPulse) {
-                        document.getElementById('pulseTime').value = data.starterPulse;
+                        document.getElementById('pulseTime').value = (data.starterPulse / 1000).toFixed(1);
                     }
                     if (data.autoLockTimeout) {
-                        document.getElementById('autoLockTime').value = data.autoLockTimeout;
+                        document.getElementById('autoLockTime').value = Math.round(data.autoLockTimeout / 1000);
                     }
                 }
             } catch (error) {
@@ -701,9 +742,10 @@ const char config_html[] PROGMEM = R"rawliteral(
 
         // Configuration Functions
         async function updatePulseTime() {
-            const pulseTime = document.getElementById('pulseTime').value;
+            const pulseTimeSeconds = document.getElementById('pulseTime').value;
+            const pulseTimeMs = Math.round(pulseTimeSeconds * 1000); // Convert seconds to milliseconds
             const formData = new FormData();
-            formData.append('pulse_time', pulseTime);
+            formData.append('pulse_time', pulseTimeMs);
             
             try {
                 const response = await fetch('/update_pulse', {
@@ -718,9 +760,10 @@ const char config_html[] PROGMEM = R"rawliteral(
         }
 
         async function updateAutoLock() {
-            const autoLock = document.getElementById('autoLockTime').value;
+            const autoLockSeconds = document.getElementById('autoLockTime').value;
+            const autoLockMs = autoLockSeconds * 1000; // Convert seconds to milliseconds
             const formData = new FormData();
-            formData.append('auto_lock', autoLock);
+            formData.append('auto_lock', autoLockMs);
             
             try {
                 const response = await fetch('/update_autolock', {
@@ -1176,8 +1219,8 @@ const char config_html[] PROGMEM = R"rawliteral(
                     <div class="card">
                         <h2 class="card-title">Starter Configuration</h2>
                         <div class="form-group">
-                            <label class="form-label" for="pulseTime">Starter Crank Time (ms)</label>
-                            <input type="number" id="pulseTime" class="form-input" min="100" max="3000" step="100" value="1500">
+                            <label class="form-label" for="pulseTime">Starter Crank Time (seconds)</label>
+                            <input type="number" id="pulseTime" class="form-input" min="0.1" max="3.0" step="0.1" value="0.7">
                             <button onclick="updatePulseTime()" class="btn btn-primary" style="margin-left: 1rem;">Update</button>
                         </div>
                     </div>
@@ -1185,8 +1228,8 @@ const char config_html[] PROGMEM = R"rawliteral(
                     <div class="card">
                         <h2 class="card-title">Security Configuration</h2>
                         <div class="form-group">
-                            <label class="form-label" for="autoLockTime">Auto-Lock Timeout (ms)</label>
-                            <input type="number" id="autoLockTime" class="form-input" min="5000" max="120000" step="1000" value="30000">
+                            <label class="form-label" for="autoLockTime">Auto-Lock Timeout (seconds)</label>
+                            <input type="number" id="autoLockTime" class="form-input" min="5" max="120" step="1" value="30">
                             <button onclick="updateAutoLock()" class="btn btn-primary" style="margin-left: 1rem;">Update</button>
                         </div>
                     </div>

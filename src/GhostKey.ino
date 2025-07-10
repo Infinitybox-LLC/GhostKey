@@ -204,6 +204,8 @@ esp_bd_addr_t connectedDeviceAddr = {0};
 bool hasConnectedDevice = false;
 bool isPairingMode = false;
 unsigned long pairingModeStartTime = 0;
+bool bluetoothEnabled = true; // Default to enabled
+bool bluetoothInitialized = false;
 
 // Bluetooth timing measurements
 unsigned long systemBootTime = 0;
@@ -1392,6 +1394,7 @@ void setup() {
     starterPulseTime = preferences.getULong("starter_pulse", STARTER_PULSE_TIME);
     autoLockTimeout = preferences.getULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
     ap_password = preferences.getString("wifi_password", "123456789");
+    bluetoothEnabled = preferences.getBool("bluetooth_enabled", true);
     DEBUG_PRINT("System configured: ");
     DEBUG_PRINTLN(isConfigured ? "Yes" : "No");
     DEBUG_PRINT("Bluetooth paired: ");
@@ -1430,33 +1433,39 @@ void setup() {
         priorityCache[i].valid = false;
     }
     
-    // Initialize BLE
-    bluetoothInitStartTime = millis();
-    DEBUG_PRINT("Starting Bluetooth initialization at: ");
-    DEBUG_PRINT(bluetoothInitStartTime);
-    DEBUG_PRINTLN("ms");
-    
-    initializeBluetooth();
-    
-    bluetoothInitCompleteTime = millis();
-    DEBUG_PRINT("Bluetooth initialization complete at: ");
-    DEBUG_PRINT(bluetoothInitCompleteTime);
-    DEBUG_PRINTLN("ms");
-    DEBUG_PRINT("Bluetooth init duration: ");
-    DEBUG_PRINT(bluetoothInitCompleteTime - bluetoothInitStartTime);
-    DEBUG_PRINTLN("ms");
-    
-    // Start RSSI scanning for bonded devices
-    firstRSSIScanStartTime = millis();
-    DEBUG_PRINT("Starting first RSSI scan at: ");
-    DEBUG_PRINT(firstRSSIScanStartTime);
-    DEBUG_PRINTLN("ms");
-    DEBUG_PRINT("Time from boot to RSSI scan start: ");
-    DEBUG_PRINT(firstRSSIScanStartTime - systemBootTime);
-    DEBUG_PRINTLN("ms");
-    
-    startRSSIScan();
-    DEBUG_PRINTLN("RSSI scanning started");
+    // Initialize BLE only if enabled
+    if (bluetoothEnabled) {
+        bluetoothInitStartTime = millis();
+        DEBUG_PRINT("Starting Bluetooth initialization at: ");
+        DEBUG_PRINT(bluetoothInitStartTime);
+        DEBUG_PRINTLN("ms");
+        
+        initializeBluetooth();
+        bluetoothInitialized = true;
+        
+        bluetoothInitCompleteTime = millis();
+        DEBUG_PRINT("Bluetooth initialization complete at: ");
+        DEBUG_PRINT(bluetoothInitCompleteTime);
+        DEBUG_PRINTLN("ms");
+        DEBUG_PRINT("Bluetooth init duration: ");
+        DEBUG_PRINT(bluetoothInitCompleteTime - bluetoothInitStartTime);
+        DEBUG_PRINTLN("ms");
+        
+        // Start RSSI scanning for bonded devices
+        firstRSSIScanStartTime = millis();
+        DEBUG_PRINT("Starting first RSSI scan at: ");
+        DEBUG_PRINT(firstRSSIScanStartTime);
+        DEBUG_PRINTLN("ms");
+        DEBUG_PRINT("Time from boot to RSSI scan start: ");
+        DEBUG_PRINT(firstRSSIScanStartTime - systemBootTime);
+        DEBUG_PRINTLN("ms");
+        
+        startRSSIScan();
+        DEBUG_PRINTLN("RSSI scanning started");
+    } else {
+        DEBUG_PRINTLN("Bluetooth disabled - skipping initialization");
+        bluetoothInitialized = false;
+    }
     
     // Load stored RFID keys
     loadStoredRfidKeys();
@@ -1475,7 +1484,9 @@ void setup() {
 void loop() {
     // Core system updates
     updateSystemState();
-    updateBluetoothAuthentication();
+    if (bluetoothEnabled && bluetoothInitialized) {
+        updateBluetoothAuthentication();
+    }
     handleButtonPress();
     controlRelays();
     checkAutoLock();
@@ -1486,25 +1497,32 @@ void loop() {
         lastSecurityCheck = millis();
     }
     
-    // Update BLE connection status
-    isBleConnected = bleKeyboard.isConnected();
-    
-    // RSSI scanning (only when needed)
-    static unsigned long lastRSSIScan = 0;
-    if (millis() - lastRSSIScan >= RSSI_UPDATE_INTERVAL) {
-        int bondedCount = esp_ble_get_bond_device_num();
-        if (bondedCount > 0 && (isBleConnected || isPairingMode)) {
-            startRSSIScan();
+    // Update BLE connection status (only if Bluetooth is enabled)
+    if (bluetoothEnabled && bluetoothInitialized) {
+        isBleConnected = bleKeyboard.isConnected();
+        
+        // RSSI scanning (only when needed)
+        static unsigned long lastRSSIScan = 0;
+        if (millis() - lastRSSIScan >= RSSI_UPDATE_INTERVAL) {
+            int bondedCount = esp_ble_get_bond_device_num();
+            if (bondedCount > 0 && (isBleConnected || isPairingMode)) {
+                startRSSIScan();
+            }
+            lastRSSIScan = millis();
         }
-        lastRSSIScan = millis();
-    }
-    
-    // Pairing mode timeout check
-    if (isPairingMode && pairingModeStartTime > 0) {
-        if (millis() - pairingModeStartTime >= PAIRING_MODE_TIMEOUT) {
-            Serial.println("PAIRING: Timeout reached - disabling pairing mode");
-            disablePairingMode();
+        
+        // Pairing mode timeout check
+        if (isPairingMode && pairingModeStartTime > 0) {
+            if (millis() - pairingModeStartTime >= PAIRING_MODE_TIMEOUT) {
+                Serial.println("PAIRING: Timeout reached - disabling pairing mode");
+                disablePairingMode();
+            }
         }
+    } else {
+        // Reset Bluetooth state if disabled
+        isBleConnected = false;
+        bluetoothAuthenticated = false;
+        isPairingMode = false;
     }
     
     // Web server handling
@@ -1757,8 +1775,9 @@ void handleButtonPress() {
             (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
             lastButtonPress = millis();
             
-            // Check if authenticated by Bluetooth or RFID
-            if (bluetoothAuthenticated || rfidAuthenticated) {
+            // Check if authenticated by Bluetooth (if enabled) or RFID
+            bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+            if (isAuthenticated) {
                 if (engineRunning) {
                     // If engine is running, only allow turning off
                     DEBUG_PRINTLN("Engine sequence stopped");
@@ -1791,8 +1810,9 @@ void handleButtonPress() {
             brakeReading == HIGH && (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
             // Only process button release if we're not in shutdown delay
             if (!isShuttingDown && !engineRunning && !startRelayActive) {
-                // Check if authenticated by Bluetooth or RFID
-                if (bluetoothAuthenticated || rfidAuthenticated) {  // Only allow normal sequence if engine isn't running
+                // Check if authenticated by Bluetooth (if enabled) or RFID
+                bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+                if (isAuthenticated) {  // Only allow normal sequence if engine isn't running
                     systemState = (systemState + 1) % 3;
                     DEBUG_BUTTON_PRINT("Button released. New state: ");
                     DEBUG_BUTTON_PRINTLN(systemState);
@@ -2116,7 +2136,8 @@ void setupWebServer() {
         
         String json = "{";
         json += "\"state\":\"" + stateStr + "\",";
-        json += "\"bluetooth\":" + String(bluetoothAuthenticated ? "true" : "false") + ",";
+        json += "\"bluetooth\":" + String((bluetoothEnabled && bluetoothAuthenticated) ? "true" : "false") + ",";
+        json += "\"bluetoothEnabled\":" + String(bluetoothEnabled ? "true" : "false") + ",";
         json += "\"starterPulse\":" + String(starterPulseTime) + ",";
         json += "\"autoLockTimeout\":" + String(autoLockTimeout);
         json += "}";
@@ -2127,6 +2148,10 @@ void setupWebServer() {
     // Bluetooth devices endpoint
     server.on("/devices", HTTP_GET, [](){
         Serial.println("Bluetooth devices request received");
+        if (!bluetoothEnabled || !bluetoothInitialized) {
+            server.send(200, "application/json", "[]");
+            return;
+        }
         const char* json = getDevicesJson();
         server.send(200, "application/json", json);
     });
@@ -2134,6 +2159,10 @@ void setupWebServer() {
     // Bluetooth pairing toggle endpoint
     server.on("/pairing", HTTP_GET, [](){
         Serial.println("Bluetooth pairing toggle request received");
+        if (!bluetoothEnabled || !bluetoothInitialized) {
+            server.send(400, "text/plain", "Bluetooth is disabled");
+            return;
+        }
         toggleBluetoothPairingMode();
         String status = isPairingMode ? "Pairing mode active" : "Pairing mode inactive";
         server.send(200, "text/plain", status);
@@ -2325,6 +2354,38 @@ void setupWebServer() {
         server.send(200, "application/json", json);
     });
 
+    // Bluetooth enable/disable endpoints
+    server.on("/bluetooth_status", HTTP_GET, [](){
+        Serial.println("Bluetooth status request received");
+        String json = "{";
+        json += "\"enabled\":" + String(bluetoothEnabled ? "true" : "false") + ",";
+        json += "\"initialized\":" + String(bluetoothInitialized ? "true" : "false");
+        json += "}";
+        server.send(200, "application/json", json);
+    });
+    
+    server.on("/bluetooth_toggle", HTTP_POST, [](){
+        Serial.println("Bluetooth toggle request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                bool newState = doc["enabled"];
+                bluetoothEnabled = newState;
+                preferences.putBool("bluetooth_enabled", bluetoothEnabled);
+                
+                Serial.printf("Bluetooth %s (restart required)\n", bluetoothEnabled ? "enabled" : "disabled");
+                
+                String message = bluetoothEnabled ? "Bluetooth enabled. Restart required to take effect." 
+                                                 : "Bluetooth disabled. Restart required to take effect.";
+                server.send(200, "text/plain", message);
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+
     // Route for exiting config mode
     server.on("/exit", HTTP_POST, [](){
         exitConfigMode();
@@ -2402,7 +2463,7 @@ void updateBluetoothAuthentication() {
 // Called from: main loop() every SECURITY_CHECK_INTERVAL
 // Links to: Uses bluetoothAuthenticated, rfidAuthenticated, engineRunning
 void updateSecurityState() {
-    bool isAuthenticated = bluetoothAuthenticated || rfidAuthenticated;
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
     
     // Security logic: enabled by default, disabled when authenticated or engine running
     if (engineRunning) {
@@ -2462,4 +2523,16 @@ void printSystemStatus() {
     Serial.println(securityEnabled ? "ENABLED" : "DISABLED");
     Serial.print("Security Relays - POS: ");
     Serial.print(digitalRead(RELAY_SECURITY) ? "HIGH \n" : "LOW \n");
+    
+    Serial.print("\nBluetooth State: ");
+    Serial.print(bluetoothEnabled ? "ENABLED" : "DISABLED");
+    if (bluetoothEnabled) {
+        Serial.print(" (");
+        Serial.print(bluetoothInitialized ? "Initialized" : "Not Initialized");
+        Serial.print(", Auth: ");
+        Serial.print(bluetoothAuthenticated ? "YES" : "NO");
+        Serial.println(")");
+    } else {
+        Serial.println();
+    }
 } 

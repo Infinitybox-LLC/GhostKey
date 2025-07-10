@@ -671,6 +671,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 if (sectionName === 'overview') {
                     loadSystemStatus();
                 } else if (sectionName === 'bluetooth') {
+                    loadBluetoothStatus();
                     updateDevices();
                 } else if (sectionName === 'rfid') {
                     loadRfidKeys();
@@ -848,6 +849,65 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
         }
 
+        // Bluetooth Enable/Disable Functions
+        async function loadBluetoothStatus() {
+            try {
+                const response = await fetchWithTimeout('/bluetooth_status');
+                if (response.ok) {
+                    const data = await response.json();
+                    document.getElementById('bluetoothEnabled').checked = data.enabled;
+                    updateBluetoothUI(data.enabled);
+                }
+            } catch (error) {
+                console.error('Error loading Bluetooth status:', error);
+            }
+        }
+
+        async function toggleBluetoothEnabled() {
+            const enabled = document.getElementById('bluetoothEnabled').checked;
+            
+            try {
+                const response = await fetchWithTimeout('/bluetooth_toggle', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: enabled })
+                });
+                
+                if (!response.ok) throw new Error('Network response was not ok');
+                
+                const message = enabled ? 'Bluetooth enabled.' : 'Bluetooth disabled.';
+                showNotification(message);
+                updateBluetoothUI(enabled);
+                
+            } catch (error) {
+                // Revert toggle on error
+                document.getElementById('bluetoothEnabled').checked = !enabled;
+                showNotification('Error updating Bluetooth setting: ' + error.message, 'error');
+            }
+        }
+
+        function updateBluetoothUI(enabled) {
+            const pairingButton = document.querySelector('button[onclick="togglePairing()"]');
+            const devicesList = document.getElementById('devicesList');
+            
+            if (enabled) {
+                pairingButton.disabled = false;
+                pairingButton.style.opacity = '1';
+                if (devicesList) {
+                    devicesList.style.opacity = '1';
+                    devicesList.style.pointerEvents = 'auto';
+                }
+            } else {
+                pairingButton.disabled = true;
+                pairingButton.style.opacity = '0.5';
+                if (devicesList) {
+                    devicesList.style.opacity = '0.5';
+                    devicesList.style.pointerEvents = 'none';
+                    devicesList.innerHTML = '<div class="card"><p style="color: #888;">Bluetooth is disabled. Enable Bluetooth above to manage devices.</p></div>';
+                }
+            }
+        }
+
         // Bluetooth Functions with timeout
         async function fetchWithTimeout(url, options = {}, timeout = 5000) {
             const controller = new AbortController();
@@ -870,6 +930,13 @@ const char config_html[] PROGMEM = R"rawliteral(
         }
 
         async function updateDevices() {
+            // Check if Bluetooth is enabled first
+            const bluetoothToggle = document.getElementById('bluetoothEnabled');
+            if (bluetoothToggle && !bluetoothToggle.checked) {
+                document.getElementById('devicesList').innerHTML = '<div class="card"><p style="color: #888;">Bluetooth is disabled. Enable Bluetooth above to manage devices.</p></div>';
+                return;
+            }
+            
             try {
                 const response = await fetchWithTimeout('/devices');
                 if (!response.ok) throw new Error('Network response was not ok');
@@ -1105,6 +1172,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                     if (activeSection && activeSection.id === 'overviewSection') {
                         loadSystemStatus();
                     } else if (activeSection && activeSection.id === 'bluetoothSection') {
+                        loadBluetoothStatus();
                         updateDevices();
                     } else if (activeSection && activeSection.id === 'rfidSection') {
                         loadRfidKeys();
@@ -1199,6 +1267,22 @@ const char config_html[] PROGMEM = R"rawliteral(
 
                 <!-- Bluetooth Section -->
                 <section class="content-section" id="bluetoothSection">
+                    <div class="card">
+                        <h2 class="card-title">Bluetooth Configuration</h2>
+                        <div class="form-group" style="margin-bottom: 2rem;">
+                            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
+                                <label class="form-label" for="bluetoothEnabled" style="margin-bottom: 0;">Enable Bluetooth Authentication</label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="bluetoothEnabled" onchange="toggleBluetoothEnabled()">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
+                                When disabled, Bluetooth authentication will be completely turned off to save power and improve security.
+                            </p>
+                        </div>
+                    </div>
+                    
                     <div class="card">
                         <h2 class="card-title">Bluetooth Device Management</h2>
                         <div style="margin-bottom: 2rem;">

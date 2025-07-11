@@ -6,7 +6,7 @@ const char config_html[] PROGMEM = R"rawliteral(
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, shrink-to-fit=no, viewport-fit=cover">
     <title>Ghost Key Configuration</title>
     
     <style>
@@ -15,6 +15,15 @@ const char config_html[] PROGMEM = R"rawliteral(
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+            max-width: 100%;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+        
+        html {
+            overflow-x: hidden;
+            width: 100%;
+            max-width: 100%;
         }
         
         body {
@@ -28,6 +37,8 @@ const char config_html[] PROGMEM = R"rawliteral(
             min-height: 100vh;
             color: #333;
             overflow-x: hidden;
+            width: 100%;
+            max-width: 100%;
             font-size: 16px;
             line-height: 1.6;
         }
@@ -560,8 +571,15 @@ const char config_html[] PROGMEM = R"rawliteral(
         
         /* Mobile Responsive */
         @media (max-width: 768px) {
+            body {
+                overflow-x: hidden;
+            }
+            
             .main-container {
                 flex-direction: column;
+                overflow-x: hidden;
+                width: 100%;
+                max-width: 100%;
             }
             
             .sidebar {
@@ -571,6 +589,8 @@ const char config_html[] PROGMEM = R"rawliteral(
                 display: flex;
                 overflow-x: auto;
                 padding: 1rem 0;
+                max-width: calc(100vw - 2rem);
+                box-sizing: border-box;
             }
             
             .nav-item {
@@ -580,6 +600,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 margin: 0 0.5rem;
                 border-radius: 12px;
                 text-align: center;
+                flex-shrink: 0;
             }
             
             .nav-item.active {
@@ -588,10 +609,18 @@ const char config_html[] PROGMEM = R"rawliteral(
             
             .content {
                 padding: 1rem;
+                width: 100%;
+                max-width: 100%;
+                overflow-x: hidden;
+                box-sizing: border-box;
             }
             
             .card {
                 padding: 1.5rem;
+                width: 100%;
+                max-width: 100%;
+                overflow-x: hidden;
+                box-sizing: border-box;
             }
             
             .status-grid {
@@ -604,16 +633,29 @@ const char config_html[] PROGMEM = R"rawliteral(
             
             .device-actions .btn {
                 width: 100%;
+                box-sizing: border-box;
             }
             
             .app-header {
                 padding: 0.75rem 1rem;
+                overflow-x: hidden;
+                width: 100%;
+                max-width: 100%;
+                box-sizing: border-box;
             }
             
             .notification {
                 top: 1rem;
                 right: 1rem;
                 left: 1rem;
+                max-width: calc(100vw - 2rem);
+                box-sizing: border-box;
+            }
+            
+            .form-input {
+                width: 100%;
+                max-width: 100%;
+                box-sizing: border-box;
             }
         }
         
@@ -634,7 +676,6 @@ const char config_html[] PROGMEM = R"rawliteral(
     </style>
     <script>
         // Configuration
-        let appPassword = localStorage.getItem('ghostkey_password') || '1234';
         let isAuthenticated = false;
         
         // Utility Functions
@@ -700,17 +741,39 @@ const char config_html[] PROGMEM = R"rawliteral(
             const password = input.value;
             const errorDiv = document.getElementById('loginError');
             
-            if (password === appPassword) {
-                isAuthenticated = true;
-                checkAuth();
+            // Validate password against the server
+            validatePassword(password).then(isValid => {
+                if (isValid) {
+                    isAuthenticated = true;
+                    checkAuth();
+                    input.value = '';
+                    errorDiv.textContent = '';
+                } else {
+                    errorDiv.textContent = 'Invalid password';
+                    input.value = '';
+                    // Shake animation
+                    input.style.animation = 'shake 0.5s';
+                    setTimeout(() => input.style.animation = '', 500);
+                }
+            }).catch(error => {
+                errorDiv.textContent = 'Error validating password';
                 input.value = '';
-                errorDiv.textContent = '';
-            } else {
-                errorDiv.textContent = 'Invalid password';
-                input.value = '';
-                // Shake animation
-                input.style.animation = 'shake 0.5s';
-                setTimeout(() => input.style.animation = '', 500);
+            });
+        }
+        
+        // Server-side password validation
+        async function validatePassword(password) {
+            try {
+                const response = await fetch('/validate_web_password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: password })
+                });
+                
+                return response.ok;
+            } catch (error) {
+                console.error('Password validation error:', error);
+                return false;
             }
         }
 
@@ -917,11 +980,22 @@ const char config_html[] PROGMEM = R"rawliteral(
                 return;
             }
             
-            localStorage.setItem('ghostkey_password', newPassword);
-            appPassword = newPassword;
-            document.getElementById('newPassword').value = '';
-            document.getElementById('confirmPassword').value = '';
-            showNotification('Web interface password updated successfully');
+            try {
+                const response = await fetch('/update_web_password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: newPassword })
+                });
+                
+                if (!response.ok) throw new Error('Network response was not ok');
+                
+                document.getElementById('newPassword').value = '';
+                document.getElementById('confirmPassword').value = '';
+                showNotification('Web interface password updated successfully');
+                
+            } catch (error) {
+                showNotification('Error updating web interface password: ' + error.message, 'error');
+            }
         }
 
         async function loadWifiPassword() {

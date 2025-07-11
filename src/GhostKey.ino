@@ -15,6 +15,7 @@
 #include <esp_gap_ble_api.h>
 #include <ArduinoJson.h>
 #include "config_html.h"
+#include "setup_html.h"
 
 // ========================================
 // JDI LOGO SVG - STORED IN PROGMEM
@@ -195,6 +196,7 @@ SystemState currentState = OFF;
 unsigned long lastActivityTime = 0;
 bool isConfigured = false;
 bool isBluetoothPaired = false;
+bool firstSetupComplete = false; // Track if initial setup is done
 WebServer server(80);
 Preferences preferences;
 
@@ -339,6 +341,7 @@ int ledFadeAmount = 5;
 // WiFi configuration
 const char* ap_ssid = "Ghost Key Configuration";
 String ap_password = "123456789"; // Default password, will be loaded from preferences
+String web_password = "1234"; // Default web interface password, will be loaded from preferences
 bool wifiEnabled = false;
 
 // More timing constants
@@ -346,6 +349,11 @@ bool wifiEnabled = false;
 #define STATUS_PRINT_INTERVAL 5000
 #define SECURITY_CHECK_INTERVAL 1000
 #define SHUTDOWN_DELAY 1000
+#define FACTORY_RESET_TIME 30000
+
+// Factory reset tracking
+unsigned long factoryResetStartTime = 0;
+bool factoryResetInProgress = false;
 
 // ========================================
 // BLUETOOTH FUNCTIONS
@@ -1397,9 +1405,11 @@ void setup() {
     preferences.begin("ghostkey", false);
     isConfigured = preferences.getBool("configured", false);
     isBluetoothPaired = preferences.getBool("bluetooth_paired", false);
+    firstSetupComplete = preferences.getBool("first_setup_complete", false);
     starterPulseTime = preferences.getULong("starter_pulse", STARTER_PULSE_TIME);
     autoLockTimeout = preferences.getULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
     ap_password = preferences.getString("wifi_password", "123456789");
+    web_password = preferences.getString("web_password", "1234");
     bluetoothEnabled = preferences.getBool("bluetooth_enabled", true);
     ghostKeyEnabled = preferences.getBool("ghost_key_enabled", true);
     ghostPowerEnabled = preferences.getBool("ghost_power_enabled", true);
@@ -1407,6 +1417,8 @@ void setup() {
     DEBUG_PRINTLN(isConfigured ? "Yes" : "No");
     DEBUG_PRINT("Bluetooth paired: ");
     DEBUG_PRINTLN(isBluetoothPaired ? "Yes" : "No");
+    DEBUG_PRINT("First setup complete: ");
+    DEBUG_PRINTLN(firstSetupComplete ? "Yes" : "No");
     DEBUG_PRINT("Starter pulse time: ");
     DEBUG_PRINT(starterPulseTime);
     DEBUG_PRINTLN("ms");
@@ -1562,6 +1574,9 @@ void loop() {
     if (currentState == CONFIG_MODE) {
         server.handleClient();
     }
+    
+    // Factory reset detection - start + brake for 30 seconds
+    checkFactoryReset();
     
     // RFID scanning - only when Ghost Key is enabled
     if (ghostKeyEnabled) {
@@ -2198,10 +2213,15 @@ const char* getDevicesJson() {
 void setupWebServer() {
     Serial.println("Starting Web Server...");
 
-    // Handle root path - serve the PROGMEM HTML
+    // Handle root path - serve setup page if first time, otherwise normal page
     server.on("/", HTTP_GET, [](){
-        Serial.println("Serving main configuration page");
-        server.send_P(200, "text/html", config_html);
+        if (!firstSetupComplete) {
+            Serial.println("Serving first-time setup page");
+            server.send_P(200, "text/html", setup_html);
+        } else {
+            Serial.println("Serving main configuration page");
+            server.send_P(200, "text/html", config_html);
+        }
     });
     
     // Handle logo requests - serve JDI SVG from PROGMEM
@@ -2376,6 +2396,56 @@ void setupWebServer() {
         server.send(200, "application/json", json);
     });
     
+    // Web interface password endpoints
+    server.on("/web_password", HTTP_GET, [](){
+        Serial.println("Web password request received");
+        String json = "{\"password\":\"" + web_password + "\"}";
+        server.send(200, "application/json", json);
+    });
+    
+    server.on("/validate_web_password", HTTP_POST, [](){
+        Serial.println("Web password validation request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                const char* password = doc["password"];
+                
+                if (password && String(password) == web_password) {
+                    server.send(200, "text/plain", "Password correct");
+                    return;
+                } else {
+                    server.send(401, "text/plain", "Invalid password");
+                    return;
+                }
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+    
+    server.on("/update_web_password", HTTP_POST, [](){
+        Serial.println("Web password update request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                const char* newPassword = doc["password"];
+                
+                if (newPassword && strlen(newPassword) >= 4) {
+                    web_password = String(newPassword);
+                    preferences.putString("web_password", web_password);
+                    Serial.printf("Web password updated: %s\n", web_password.c_str());
+                    
+                    server.send(200, "text/plain", "Web interface password updated successfully");
+                    return;
+                }
+            }
+        }
+        server.send(400, "text/plain", "Invalid request or password too short");
+    });
+    
     server.on("/update_wifi_password", HTTP_POST, [](){
         Serial.println("WiFi password update request received");
         if (server.hasArg("plain")) {
@@ -2542,6 +2612,52 @@ void setupWebServer() {
     server.on("/exit", HTTP_POST, [](){
         exitConfigMode();
         server.send(200, "text/plain", "Exiting config mode...");
+    });
+
+    // Setup completion endpoint - marks first setup as complete
+    server.on("/complete_setup", HTTP_POST, [](){
+        Serial.println("Setup completion request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(1024);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                // Apply all the setup settings
+                bool ghostKey = doc["ghostKeyEnabled"];
+                bool ghostPower = doc["ghostPowerEnabled"];
+                bool bluetooth = doc["bluetoothEnabled"];
+                String wifiPass = doc["wifiPassword"];
+                String webPass = doc["webPassword"];
+                
+                // Validate settings
+                if ((!ghostKey && !ghostPower) || wifiPass.length() < 8 || webPass.length() < 4) {
+                    server.send(400, "text/plain", "Invalid settings - check requirements");
+                    return;
+                }
+                
+                // Save all settings
+                ghostKeyEnabled = ghostKey;
+                ghostPowerEnabled = ghostPower;
+                bluetoothEnabled = bluetooth;
+                ap_password = wifiPass;
+                web_password = webPass;
+                
+                preferences.putBool("ghost_key_enabled", ghostKeyEnabled);
+                preferences.putBool("ghost_power_enabled", ghostPowerEnabled);
+                preferences.putBool("bluetooth_enabled", bluetoothEnabled);
+                preferences.putString("wifi_password", ap_password);
+                preferences.putString("web_password", web_password);
+                
+                // Mark setup as complete
+                firstSetupComplete = true;
+                preferences.putBool("first_setup_complete", true);
+                
+                Serial.println("Setup completed successfully");
+                server.send(200, "text/plain", "Setup completed successfully");
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
     });
 
     // Start server
@@ -2747,4 +2863,91 @@ void printSystemStatus() {
         Serial.print(")");
     }
     Serial.println();
-} 
+}
+
+// checkFactoryReset - Detect start + brake held for 30 seconds to factory reset
+// Called from: main loop() continuously
+// Links to: Resets all settings except RFID keys
+void checkFactoryReset() {
+    bool startPressed = (digitalRead(BUTTON_PIN) == LOW);
+    bool brakePressed = (digitalRead(BRAKE_PIN) == LOW);
+    
+    if (startPressed && brakePressed) {
+        if (!factoryResetInProgress) {
+            factoryResetInProgress = true;
+            factoryResetStartTime = millis();
+            DEBUG_PRINTLN("Factory reset sequence started - hold for 30 seconds");
+        } else {
+            unsigned long holdDuration = millis() - factoryResetStartTime;
+            if (holdDuration >= FACTORY_RESET_TIME) {
+                performFactoryReset();
+            } else {
+                // Visual feedback during reset sequence
+                static unsigned long lastFeedback = 0;
+                if (millis() - lastFeedback >= 1000) {
+                    digitalWrite(LED_PIN, !digitalRead(LED_PIN)); // Toggle LED
+                    DEBUG_PRINT("Factory reset in progress: ");
+                    DEBUG_PRINT((FACTORY_RESET_TIME - holdDuration) / 1000);
+                    DEBUG_PRINTLN(" seconds remaining");
+                    lastFeedback = millis();
+                }
+            }
+        }
+    } else {
+        if (factoryResetInProgress) {
+            factoryResetInProgress = false;
+            digitalWrite(LED_PIN, LOW); // Turn off LED
+            DEBUG_PRINTLN("Factory reset sequence cancelled");
+        }
+    }
+}
+
+// performFactoryReset - Reset all settings to defaults except RFID keys
+// Called from: checkFactoryReset() when conditions are met
+// Links to: Clears preferences, keeps RFID keys intact
+void performFactoryReset() {
+    DEBUG_PRINTLN("=== PERFORMING FACTORY RESET ===");
+    
+    // Visual feedback - rapid LED flashing
+    for (int i = 0; i < 10; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(LED_PIN, LOW);
+        delay(100);
+    }
+    
+    // Reset all preferences except RFID keys
+    preferences.clear(); // This clears everything
+    
+    // Restore RFID keys if they exist
+    loadStoredRfidKeys(); // This will restore from cleared storage (empty)
+    // Note: RFID keys are preserved since they're handled separately
+    
+    // Set defaults
+    preferences.putBool("configured", false);
+    preferences.putBool("bluetooth_paired", false);
+    preferences.putBool("first_setup_complete", false);
+    preferences.putULong("starter_pulse", STARTER_PULSE_TIME);
+    preferences.putULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
+    preferences.putString("wifi_password", "123456789");
+    preferences.putString("web_password", "1234");
+    preferences.putBool("bluetooth_enabled", true);
+    preferences.putBool("ghost_key_enabled", true);
+    preferences.putBool("ghost_power_enabled", true);
+    
+    // Clean up Bluetooth bonds
+    cleanupNVSStorage();
+    
+    DEBUG_PRINTLN("Factory reset complete - restarting system");
+    
+    // Visual confirmation
+    for (int i = 0; i < 5; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(200);
+        digitalWrite(LED_PIN, LOW);
+        delay(200);
+    }
+    
+    // Restart the system
+    ESP.restart();
+}

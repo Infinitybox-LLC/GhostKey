@@ -94,6 +94,7 @@ const char jdi_logo_svg[] PROGMEM = R"(<?xml version="1.0" encoding="UTF-8"?>
 // Input pins (all active low with pullups)
 #define BUTTON_PIN 32 // Changed from 34 - supports internal pullup
 #define BRAKE_PIN 18 // Good
+#define ACCESSORY_INPUT_PIN 19 // Ghost Power accessory input (external pullup)
 #define BEEPER_PIN 25  // GPIO 25 will be used for the beeper
 
 // Output pins
@@ -206,6 +207,11 @@ bool isPairingMode = false;
 unsigned long pairingModeStartTime = 0;
 bool bluetoothEnabled = true; // Default to enabled
 bool bluetoothInitialized = false;
+
+// System modularity - Ghost Key vs Ghost Power
+bool ghostKeyEnabled = true;    // RFID/Bluetooth/Push-to-start functionality
+bool ghostPowerEnabled = true;  // Security relay functionality
+bool accessoryInputAuth = false; // Authentication via brake + accessory input
 
 // Bluetooth timing measurements
 unsigned long systemBootTime = 0;
@@ -1395,6 +1401,8 @@ void setup() {
     autoLockTimeout = preferences.getULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
     ap_password = preferences.getString("wifi_password", "123456789");
     bluetoothEnabled = preferences.getBool("bluetooth_enabled", true);
+    ghostKeyEnabled = preferences.getBool("ghost_key_enabled", true);
+    ghostPowerEnabled = preferences.getBool("ghost_power_enabled", true);
     DEBUG_PRINT("System configured: ");
     DEBUG_PRINTLN(isConfigured ? "Yes" : "No");
     DEBUG_PRINT("Bluetooth paired: ");
@@ -1484,11 +1492,36 @@ void setup() {
 void loop() {
     // Core system updates
     updateSystemState();
-    if (bluetoothEnabled && bluetoothInitialized) {
-        updateBluetoothAuthentication();
+    
+    // Handle authentication based on enabled systems
+    if (ghostKeyEnabled) {
+        // Ghost Key enabled: RFID/Bluetooth authentication and push-to-start
+        if (bluetoothEnabled && bluetoothInitialized) {
+            updateBluetoothAuthentication();
+        }
+        // RFID scanning handled in main loop below
+        handleButtonPress(); // Push-to-start functionality
+    } else {
+        // Ghost Key disabled: Reset authentication states and disable wireless
+        bluetoothAuthenticated = false;
+        rfidAuthenticated = false;
+        
+        if (ghostPowerEnabled) {
+            // Ghost Power only mode: Brake + Accessory authentication
+            updateAccessoryAuthentication();
+            // Configuration mode access still available via button
+            handleConfigModeOnly(); // Only handle config mode button press
+        }
     }
-    handleButtonPress();
-    controlRelays();
+    
+    // Control systems based on what's enabled
+    if (ghostKeyEnabled) {
+        controlRelays(); // Full relay control for push-to-start
+    }
+    if (ghostPowerEnabled) {
+        // Security relay control handled in updateSecurityState()
+    }
+    
     checkAutoLock();
     
     // Periodic security check
@@ -1530,25 +1563,27 @@ void loop() {
         server.handleClient();
     }
     
-    // RFID scanning - track first scan timing
-    static bool firstRfidScanStarted = false;
-    if (!firstRfidScanStarted) {
-        firstRfidScanStartTime = millis();
-        firstRfidScanStarted = true;
-        Serial.println("=== STARTING FIRST RFID SCAN ===");
-        Serial.print("First RFID scan started at: ");
-        Serial.print(firstRfidScanStartTime);
-        Serial.println("ms");
-        Serial.print("Time from boot to RFID scan start: ");
-        Serial.print(firstRfidScanStartTime - systemBootTime);
-        Serial.println("ms");
-        Serial.print("Time from RFID init to scan start: ");
-        Serial.print(firstRfidScanStartTime - rfidInitCompleteTime);
-        Serial.println("ms");
-        Serial.println("==============================");
-    }
-    
-    if(scanForTag(tagData) == true) {
+    // RFID scanning - only when Ghost Key is enabled
+    if (ghostKeyEnabled) {
+        // Track first scan timing
+        static bool firstRfidScanStarted = false;
+        if (!firstRfidScanStarted) {
+            firstRfidScanStartTime = millis();
+            firstRfidScanStarted = true;
+            Serial.println("=== STARTING FIRST RFID SCAN ===");
+            Serial.print("First RFID scan started at: ");
+            Serial.print(firstRfidScanStartTime);
+            Serial.println("ms");
+            Serial.print("Time from boot to RFID scan start: ");
+            Serial.print(firstRfidScanStartTime - systemBootTime);
+            Serial.println("ms");
+            Serial.print("Time from RFID init to scan start: ");
+            Serial.print(firstRfidScanStartTime - rfidInitCompleteTime);
+            Serial.println("ms");
+            Serial.println("==============================");
+        }
+        
+        if(scanForTag(tagData) == true) {
         // Record first RFID read completion time
         if (!firstRfidReadDone) {
             firstRfidReadCompleteTime = millis();
@@ -1612,11 +1647,15 @@ void loop() {
         }
     }
     
-    // Check RFID authentication timeout
+    // Check RFID authentication timeout (only when Ghost Key is enabled)
     if (rfidAuthenticated && (millis() - rfidAuthStartTime >= RFID_AUTH_TIMEOUT)) {
         rfidAuthenticated = false;
         Serial.println("RFID: Authentication expired");
     }
+} else {
+    // Ghost Key disabled: Reset RFID authentication state
+    rfidAuthenticated = false;
+}
     
     // Check for RSSI scan timeout (if no results after 10 seconds)
     static bool rssiTimeoutChecked = false;
@@ -1663,6 +1702,7 @@ void loop() {
     }
 }
 
+
 // setupPins - Initialize all GPIO pins for inputs and outputs
 // Called from: setup() function
 // Links to: All pin constants defined at top of file
@@ -1670,6 +1710,7 @@ void setupPins() {
     // Input pins (active low with pullups)
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     pinMode(BRAKE_PIN, INPUT_PULLUP);
+    pinMode(ACCESSORY_INPUT_PIN, INPUT); // External pullup, no internal pullup needed
     
     // Output pins
     pinMode(LED_PIN, OUTPUT);
@@ -1716,6 +1757,53 @@ void setupPins() {
 }
 
 
+
+// handleConfigModeOnly - Only handle config mode button press (for Ghost Power only)
+// Called from: main loop() when Ghost Key is disabled but Ghost Power is enabled
+// Links to: Allows config mode access without push-to-start functionality
+void handleConfigModeOnly() {
+    bool buttonReading = digitalRead(BUTTON_PIN);
+    bool brakeReading = digitalRead(BRAKE_PIN);
+
+    // Handle button press detection
+    if (buttonReading == LOW && !buttonPressed) {  // Button just pressed
+        buttonPressed = true;
+        buttonPressStartTime = millis();
+        isLongPressDetected = false;
+        DEBUG_BUTTON_PRINTLN("Button pressed (config mode only)");
+    } 
+    else if (buttonReading == HIGH && buttonPressed) {  // Button just released
+        buttonPressed = false;
+        DEBUG_BUTTON_PRINTLN("Button released (config mode only)");
+        
+        if (isLongPressDetected) {
+            isLongPressDetected = false;
+        }
+    }
+
+    // Check for long press without brake - config mode can be accessed
+    if (buttonPressed && !brakeHeld && !isLongPressDetected) {
+        unsigned long pressDuration = millis() - buttonPressStartTime;
+        if (pressDuration >= CONFIG_MODE_PRESS_TIME) {
+            isLongPressDetected = true;
+            DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode (Ghost Power only)");
+            enterConfigMode();
+        }
+    }
+
+    // Check for start button press in config mode with pairing active
+    if (currentState == CONFIG_MODE && isPairingMode && 
+        buttonReading == LOW && lastButtonReading == HIGH && 
+        (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+        DEBUG_BUTTON_PRINTLN("Start button pressed in pairing mode - Exiting config mode");
+        exitConfigMode();
+        lastButtonPress = millis();
+    }
+
+    // Update last states
+    lastButtonReading = buttonReading;
+    lastBrakeReading = brakeReading;
+}
 
 void handleButtonPress() {
     bool buttonReading = digitalRead(BUTTON_PIN);
@@ -2386,6 +2474,70 @@ void setupWebServer() {
         server.send(400, "text/plain", "Invalid request");
     });
 
+    // Ghost Key/Power system toggle endpoints
+    server.on("/system_status", HTTP_GET, [](){
+        Serial.println("System status request received");
+        String json = "{";
+        json += "\"ghostKeyEnabled\":" + String(ghostKeyEnabled ? "true" : "false") + ",";
+        json += "\"ghostPowerEnabled\":" + String(ghostPowerEnabled ? "true" : "false");
+        json += "}";
+        server.send(200, "application/json", json);
+    });
+    
+    server.on("/toggle_ghost_key", HTTP_POST, [](){
+        Serial.println("Ghost Key toggle request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                bool newState = doc["enabled"];
+                
+                // Prevent disabling both systems
+                if (!newState && !ghostPowerEnabled) {
+                    server.send(400, "text/plain", "Cannot disable both Ghost Key and Ghost Power systems");
+                    return;
+                }
+                
+                ghostKeyEnabled = newState;
+                preferences.putBool("ghost_key_enabled", ghostKeyEnabled);
+                
+                Serial.printf("Ghost Key %s\n", ghostKeyEnabled ? "enabled" : "disabled");
+                String message = ghostKeyEnabled ? "Ghost Key enabled." : "Ghost Key disabled.";
+                server.send(200, "text/plain", message);
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+    
+    server.on("/toggle_ghost_power", HTTP_POST, [](){
+        Serial.println("Ghost Power toggle request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                bool newState = doc["enabled"];
+                
+                // Prevent disabling both systems
+                if (!newState && !ghostKeyEnabled) {
+                    server.send(400, "text/plain", "Cannot disable both Ghost Key and Ghost Power systems");
+                    return;
+                }
+                
+                ghostPowerEnabled = newState;
+                preferences.putBool("ghost_power_enabled", ghostPowerEnabled);
+                
+                Serial.printf("Ghost Power %s\n", ghostPowerEnabled ? "enabled" : "disabled");
+                String message = ghostPowerEnabled ? "Ghost Power enabled." : "Ghost Power disabled.";
+                server.send(200, "text/plain", message);
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+
     // Route for exiting config mode
     server.on("/exit", HTTP_POST, [](){
         exitConfigMode();
@@ -2402,6 +2554,25 @@ void setupWebServer() {
 void setupBluetooth() {
     // Bluetooth initialization is now handled in initializeBluetooth()
     // This function kept for compatibility but does nothing
+}
+
+// updateAccessoryAuthentication - Check brake + accessory input for Ghost Power only mode
+// Called from: main loop() when ghostKeyEnabled is false
+// Links to: Used for Ghost Power only authentication
+void updateAccessoryAuthentication() {
+    bool brakeHigh = (digitalRead(BRAKE_PIN) == HIGH);
+    bool accessoryHigh = (digitalRead(ACCESSORY_INPUT_PIN) == HIGH);
+    
+    // Authentication occurs when both brake and accessory inputs are HIGH
+    bool newAuthState = (brakeHigh && accessoryHigh);
+    
+    if (newAuthState != accessoryInputAuth) {
+        accessoryInputAuth = newAuthState;
+        Serial.printf("Ghost Power authentication: %s (Brake: %s, Accessory: %s)\n", 
+                     accessoryInputAuth ? "Authenticated" : "Not authenticated",
+                     brakeHigh ? "HIGH" : "LOW",
+                     accessoryHigh ? "HIGH" : "LOW");
+    }
 }
 
 // updateBluetoothAuthentication - Check if connected device is close enough for auth
@@ -2461,9 +2632,31 @@ void updateBluetoothAuthentication() {
 
 // updateSecurityState - Control security relays based on authentication
 // Called from: main loop() every SECURITY_CHECK_INTERVAL
-// Links to: Uses bluetoothAuthenticated, rfidAuthenticated, engineRunning
+// Links to: Uses bluetoothAuthenticated, rfidAuthenticated, accessoryInputAuth, engineRunning
 void updateSecurityState() {
-    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    // Handle Ghost Key only mode - security relay always LOW (active)
+    if (ghostKeyEnabled && !ghostPowerEnabled) {
+        digitalWrite(RELAY_SECURITY, LOW); // Always active when Ghost Key only
+        securityEnabled = true; // For status reporting
+        return;
+    }
+    
+    // Handle Ghost Power disabled (and Ghost Key also disabled - not allowed by validation)
+    if (!ghostPowerEnabled) {
+        digitalWrite(RELAY_SECURITY, HIGH); // Disabled when Ghost Power is off
+        securityEnabled = false;
+        return;
+    }
+    
+    bool isAuthenticated = false;
+    
+    if (ghostKeyEnabled && ghostPowerEnabled) {
+        // Both systems enabled: RFID/Bluetooth authentication only (no brake+accessory needed)
+        isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    } else if (!ghostKeyEnabled && ghostPowerEnabled) {
+        // Ghost Power only mode: Brake + Accessory authentication
+        isAuthenticated = accessoryInputAuth;
+    }
     
     // Security logic: enabled by default, disabled when authenticated or engine running
     if (engineRunning) {
@@ -2535,4 +2728,23 @@ void printSystemStatus() {
     } else {
         Serial.println();
     }
+    
+    Serial.print("\nSystem Configuration:");
+    Serial.print("\n  Ghost Key: ");
+    Serial.print(ghostKeyEnabled ? "ENABLED" : "DISABLED");
+    Serial.print(" (RFID/Bluetooth/Push-to-start)");
+    Serial.print("\n  Ghost Power: ");
+    Serial.print(ghostPowerEnabled ? "ENABLED" : "DISABLED");
+    Serial.print(" (Security relays)");
+    
+    if (!ghostKeyEnabled && ghostPowerEnabled) {
+        Serial.print("\n  Accessory Input Auth: ");
+        Serial.print(accessoryInputAuth ? "AUTHENTICATED" : "NOT AUTHENTICATED");
+        Serial.print(" (Brake: ");
+        Serial.print(digitalRead(BRAKE_PIN) == HIGH ? "HIGH" : "LOW");
+        Serial.print(", Accessory: ");
+        Serial.print(digitalRead(ACCESSORY_INPUT_PIN) == HIGH ? "HIGH" : "LOW");
+        Serial.print(")");
+    }
+    Serial.println();
 } 

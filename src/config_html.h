@@ -676,6 +676,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 } else if (sectionName === 'rfid') {
                     loadRfidKeys();
                 } else if (sectionName === 'security') {
+                    loadSystemConfig();
                     loadWifiPassword();
                 }
             }
@@ -736,9 +737,131 @@ const char config_html[] PROGMEM = R"rawliteral(
                         document.getElementById('autoLockTime').value = Math.round(data.autoLockTimeout / 1000);
                     }
                 }
+                
+                // Load system configuration status
+                await loadSystemConfig();
+                
             } catch (error) {
                 console.error('Error loading system status:', error);
                 showNotification('Error loading system status', 'error');
+            }
+        }
+
+        // Ghost Key/Power system management
+        async function loadSystemConfig() {
+            try {
+                const response = await fetch('/system_status');
+                if (response.ok) {
+                    const data = await response.json();
+                    document.getElementById('ghostKeyEnabled').checked = data.ghostKeyEnabled;
+                    document.getElementById('ghostPowerEnabled').checked = data.ghostPowerEnabled;
+                    updateUIVisibility(data.ghostKeyEnabled, data.ghostPowerEnabled);
+                }
+            } catch (error) {
+                console.error('Error loading system configuration:', error);
+            }
+        }
+
+        async function toggleGhostKey() {
+            const enabled = document.getElementById('ghostKeyEnabled').checked;
+            const ghostPowerEnabled = document.getElementById('ghostPowerEnabled').checked;
+            
+            // Prevent disabling both systems
+            if (!enabled && !ghostPowerEnabled) {
+                document.getElementById('ghostKeyEnabled').checked = true;
+                showNotification('Cannot disable both Ghost Key and Ghost Power systems', 'error');
+                return;
+            }
+            
+            if (!enabled && !confirm('Are you sure you want to disable Ghost Key? This will remove RFID/Bluetooth authentication and push-to-start functionality.')) {
+                document.getElementById('ghostKeyEnabled').checked = true;
+                return;
+            }
+            
+            try {
+                const response = await fetch('/toggle_ghost_key', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: enabled })
+                });
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(errorText);
+                }
+                
+                const message = enabled ? 'Ghost Key enabled.' : 'Ghost Key disabled.';
+                showNotification(message);
+                updateUIVisibility(enabled, ghostPowerEnabled);
+                
+            } catch (error) {
+                document.getElementById('ghostKeyEnabled').checked = !enabled;
+                showNotification('Error: ' + error.message, 'error');
+            }
+        }
+
+        async function toggleGhostPower() {
+            const enabled = document.getElementById('ghostPowerEnabled').checked;
+            const ghostKeyEnabled = document.getElementById('ghostKeyEnabled').checked;
+            
+            // Prevent disabling both systems
+            if (!enabled && !ghostKeyEnabled) {
+                document.getElementById('ghostPowerEnabled').checked = true;
+                showNotification('Cannot disable both Ghost Key and Ghost Power systems', 'error');
+                return;
+            }
+            
+            if (!enabled && !confirm('Are you sure you want to disable Ghost Power? This will remove security relay functionality.')) {
+                document.getElementById('ghostPowerEnabled').checked = true;
+                return;
+            }
+            
+            try {
+                const response = await fetch('/toggle_ghost_power', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: enabled })
+                });
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(errorText);
+                }
+                
+                const message = enabled ? 'Ghost Power enabled.' : 'Ghost Power disabled.';
+                showNotification(message);
+                updateUIVisibility(ghostKeyEnabled, enabled);
+                
+            } catch (error) {
+                document.getElementById('ghostPowerEnabled').checked = !enabled;
+                showNotification('Error: ' + error.message, 'error');
+            }
+        }
+
+        function updateUIVisibility(ghostKeyEnabled, ghostPowerEnabled) {
+            // Navigation visibility
+            const configNav = document.getElementById('configNav');
+            const bluetoothNav = document.getElementById('bluetoothNav');
+            const rfidNav = document.getElementById('rfidNav');
+            
+            if (ghostKeyEnabled) {
+                // Show full interface for Ghost Key
+                configNav.style.display = 'flex';
+                bluetoothNav.style.display = 'flex';
+                rfidNav.style.display = 'flex';
+            } else {
+                // Hide Ghost Key sections if only Ghost Power
+                configNav.style.display = 'none';
+                bluetoothNav.style.display = 'none';
+                rfidNav.style.display = 'none';
+                
+                // If we're currently viewing a hidden section, switch to security
+                const activeSection = document.querySelector('.content-section.active');
+                if (activeSection && (activeSection.id === 'configSection' || 
+                                    activeSection.id === 'bluetoothSection' || 
+                                    activeSection.id === 'rfidSection')) {
+                    showSection('security');
+                }
             }
         }
 
@@ -1165,6 +1288,13 @@ const char config_html[] PROGMEM = R"rawliteral(
         document.addEventListener('DOMContentLoaded', () => {
             checkAuth();
             
+            // Load system configuration on page load to set UI visibility
+            setTimeout(() => {
+                if (isAuthenticated) {
+                    loadSystemConfig();
+                }
+            }, 1000);
+            
             // Refresh data every 15 seconds when authenticated
             setInterval(() => {
                 if (isAuthenticated) {
@@ -1177,6 +1307,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                     } else if (activeSection && activeSection.id === 'rfidSection') {
                         loadRfidKeys();
                     } else if (activeSection && activeSection.id === 'securitySection') {
+                        loadSystemConfig();
                         loadWifiPassword();
                     }
                 }
@@ -1340,6 +1471,37 @@ const char config_html[] PROGMEM = R"rawliteral(
 
                 <!-- Security Section -->
                 <section class="content-section" id="securitySection">
+                    <div class="card">
+                        <h2 class="card-title">System Configuration</h2>
+                        <div class="form-group" style="margin-bottom: 2rem;">
+                            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
+                                <label class="form-label" for="ghostKeyEnabled" style="margin-bottom: 0;">Enable Ghost Key</label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="ghostKeyEnabled" onchange="toggleGhostKey()">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
+                                RFID/Bluetooth authentication and push-to-start functionality.
+                            </p>
+                            
+                            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
+                                <label class="form-label" for="ghostPowerEnabled" style="margin-bottom: 0;">Enable Ghost Power</label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="ghostPowerEnabled" onchange="toggleGhostPower()">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
+                                Security relay control and immobilization features.
+                            </p>
+                            
+                            <p style="font-size: 0.9rem; color: #ff6b6b; font-weight: 600;">
+                                ⚠️ At least one system must remain enabled
+                            </p>
+                        </div>
+                    </div>
+                    
                     <div class="card">
                         <h2 class="card-title">Web Interface Password</h2>
                         <div class="form-group">

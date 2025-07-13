@@ -714,6 +714,10 @@ const char config_html[] PROGMEM = R"rawliteral(
                 } else if (sectionName === 'bluetooth') {
                     loadBluetoothStatus();
                     updateDevices();
+                } else if (sectionName === 'confidence') {
+                    loadConfidenceMonitoring();
+                } else if (sectionName === 'plot') {
+                    loadPlottingInterface();
                 } else if (sectionName === 'rfid') {
                     loadRfidKeys();
                 } else if (sectionName === 'security') {
@@ -905,23 +909,31 @@ const char config_html[] PROGMEM = R"rawliteral(
             // Navigation visibility
             const configNav = document.getElementById('configNav');
             const bluetoothNav = document.getElementById('bluetoothNav');
+            const confidenceNav = document.getElementById('confidenceNav');
+            const plotNav = document.getElementById('plotNav');
             const rfidNav = document.getElementById('rfidNav');
             
             if (ghostKeyEnabled) {
                 // Show full interface for Ghost Key
                 configNav.style.display = 'flex';
                 bluetoothNav.style.display = 'flex';
+                confidenceNav.style.display = 'flex';
+                plotNav.style.display = 'flex';
                 rfidNav.style.display = 'flex';
             } else {
                 // Hide Ghost Key sections if only Ghost Power
                 configNav.style.display = 'none';
                 bluetoothNav.style.display = 'none';
+                confidenceNav.style.display = 'none';
+                plotNav.style.display = 'none';
                 rfidNav.style.display = 'none';
                 
                 // If we're currently viewing a hidden section, switch to security
                 const activeSection = document.querySelector('.content-section.active');
                 if (activeSection && (activeSection.id === 'configSection' || 
                                     activeSection.id === 'bluetoothSection' || 
+                                    activeSection.id === 'confidenceSection' ||
+                                    activeSection.id === 'plotSection' ||
                                     activeSection.id === 'rfidSection')) {
                     showSection('security');
                 }
@@ -1336,6 +1348,262 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
         }
 
+        // Confidence Monitoring Functions
+        async function loadConfidenceMonitoring() {
+            try {
+                const response = await fetchWithTimeout('/rssi_analysis');
+                if (response.ok) {
+                    const data = await response.json();
+                    updateConfidenceUI(data);
+                }
+            } catch (error) {
+                console.error('Error loading confidence data:', error);
+            }
+        }
+
+        // Update confidence monitoring UI
+        function updateConfidenceUI(data) {
+            document.getElementById('totalConfidence').textContent = data.confidence + '%';
+            document.getElementById('stabilityScore').textContent = data.stabilityScore.toFixed(1) + '/35';
+            document.getElementById('trendScore').textContent = data.trendScore.toFixed(1) + '/25';
+            document.getElementById('strengthScore').textContent = data.strengthScore.toFixed(1) + '/40';
+            document.getElementById('signalMean').textContent = data.mean.toFixed(1) + ' dBm';
+
+            // Movement status
+            let movementText = 'Stable';
+            if (data.isApproaching) {
+                movementText = '🚶 Approaching';
+            } else if (!data.isStable) {
+                movementText = '📱 Moving';
+            }
+            document.getElementById('movementStatus').textContent = movementText;
+
+            // Authentication status with color coding
+            const authStatus = document.getElementById('authenticationStatus');
+            const isAuthenticated = data.confidence >= data.authThreshold;
+            
+            if (isAuthenticated) {
+                authStatus.innerHTML = '<span style="color: #28a745;">🟢 Authenticated</span>';
+            } else {
+                const percentage = (data.confidence / data.authThreshold * 100).toFixed(0);
+                authStatus.innerHTML = `<span style="color: #dc3545;">⚫ Not Authenticated (${percentage}% of required)</span>`;
+            }
+
+            // Color-code confidence based on level
+            const confidenceElement = document.getElementById('totalConfidence');
+            if (data.confidence >= 65) {
+                confidenceElement.style.color = '#28a745'; // Green - authenticated
+            } else if (data.confidence >= 45) {
+                confidenceElement.style.color = '#ffc107'; // Yellow - close to authentication
+            } else {
+                confidenceElement.style.color = '#dc3545'; // Red - not authenticated
+            }
+        }
+
+        // Confidence Plotting Functions
+        let plotData = [];
+        let isPlotting = false;
+        let plotInterval = null;
+        let chart = null;
+
+        async function loadPlottingInterface() {
+            // Initialize chart if not already done
+            if (!chart) {
+                initializeChart();
+            }
+            
+            // Update status
+            updatePlotStatus();
+        }
+
+        function initializeChart() {
+            const canvas = document.getElementById('confidenceChart');
+            const ctx = canvas.getContext('2d');
+            
+            // Set canvas size
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            
+            // Initialize chart
+            chart = {
+                canvas: canvas,
+                ctx: ctx,
+                width: canvas.width,
+                height: canvas.height,
+                padding: 40
+            };
+            
+            drawChart();
+        }
+
+        function drawChart() {
+            if (!chart) return;
+            
+            const ctx = chart.ctx;
+            const width = chart.width;
+            const height = chart.height;
+            const padding = chart.padding;
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, width, height);
+            
+            if (plotData.length === 0) {
+                // Show overlay message
+                document.getElementById('chartOverlay').style.display = 'block';
+                return;
+            }
+            
+            document.getElementById('chartOverlay').style.display = 'none';
+            
+            // Calculate scales
+            const maxConfidence = Math.max(...plotData.map(d => d.confidence), 100);
+            const minConfidence = Math.min(...plotData.map(d => d.confidence), 0);
+            const timeRange = plotData.length > 1 ? 
+                plotData[plotData.length - 1].timestamp - plotData[0].timestamp : 60000;
+            
+            // Draw grid
+            ctx.strokeStyle = '#f0f0f0';
+            ctx.lineWidth = 1;
+            
+            // Horizontal grid lines (confidence levels)
+            for (let i = 0; i <= 10; i++) {
+                const y = padding + (height - 2 * padding) * (1 - i / 10);
+                ctx.beginPath();
+                ctx.moveTo(padding, y);
+                ctx.lineTo(width - padding, y);
+                ctx.stroke();
+                
+                // Confidence labels
+                ctx.fillStyle = '#999';
+                ctx.font = '12px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText((i * 10) + '%', padding - 10, y + 4);
+            }
+            
+            // Draw threshold lines
+            ctx.strokeStyle = '#28a745';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            const authY = padding + (height - 2 * padding) * (1 - 0.65);
+            ctx.beginPath();
+            ctx.moveTo(padding, authY);
+            ctx.lineTo(width - padding, authY);
+            ctx.stroke();
+            
+            ctx.strokeStyle = '#ffc107';
+            const deauthY = padding + (height - 2 * padding) * (1 - 0.45);
+            ctx.beginPath();
+            ctx.moveTo(padding, deauthY);
+            ctx.lineTo(width - padding, deauthY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            
+            // Draw data line
+            if (plotData.length > 1) {
+                ctx.strokeStyle = '#667eea';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                
+                for (let i = 0; i < plotData.length; i++) {
+                    const x = padding + (width - 2 * padding) * (i / (plotData.length - 1));
+                    const y = padding + (height - 2 * padding) * (1 - plotData[i].confidence / 100);
+                    
+                    if (i === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                }
+                ctx.stroke();
+                
+                // Draw data points
+                ctx.fillStyle = '#667eea';
+                for (let i = 0; i < plotData.length; i++) {
+                    const x = padding + (width - 2 * padding) * (i / (plotData.length - 1));
+                    const y = padding + (height - 2 * padding) * (1 - plotData[i].confidence / 100);
+                    
+                    ctx.beginPath();
+                    ctx.arc(x, y, 3, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            }
+        }
+
+        function updatePlotStatus() {
+            document.getElementById('plotStatus').textContent = isPlotting ? 'Recording' : 'Stopped';
+            document.getElementById('plotDataPoints').textContent = plotData.length;
+            
+            if (plotData.length > 0) {
+                const latest = plotData[plotData.length - 1];
+                document.getElementById('plotCurrentConfidence').textContent = latest.confidence.toFixed(1) + '%';
+            } else {
+                document.getElementById('plotCurrentConfidence').textContent = '0%';
+            }
+        }
+
+        async function startPlotting() {
+            if (isPlotting) return;
+            
+            isPlotting = true;
+            document.getElementById('startPlotBtn').disabled = true;
+            document.getElementById('stopPlotBtn').disabled = false;
+            
+            // Clear old data
+            plotData = [];
+            updatePlotStatus();
+            drawChart();
+            
+            // Start polling
+            plotInterval = setInterval(async () => {
+                try {
+                    const response = await fetchWithTimeout('/rssi_analysis');
+                    if (response.ok) {
+                        const data = await response.json();
+                        
+                        // Add data point
+                        plotData.push({
+                            timestamp: Date.now(),
+                            confidence: data.confidence
+                        });
+                        
+                        // Keep only last 60 seconds of data
+                        const cutoffTime = Date.now() - 60000;
+                        plotData = plotData.filter(d => d.timestamp > cutoffTime);
+                        
+                        updatePlotStatus();
+                        drawChart();
+                    }
+                } catch (error) {
+                    console.error('Error fetching plot data:', error);
+                }
+            }, 1000); // Update every second
+            
+            showNotification('Started recording confidence data');
+        }
+
+        function stopPlotting() {
+            if (!isPlotting) return;
+            
+            isPlotting = false;
+            document.getElementById('startPlotBtn').disabled = false;
+            document.getElementById('stopPlotBtn').disabled = true;
+            
+            if (plotInterval) {
+                clearInterval(plotInterval);
+                plotInterval = null;
+            }
+            
+            updatePlotStatus();
+            showNotification('Stopped recording confidence data');
+        }
+
+        function clearPlot() {
+            plotData = [];
+            updatePlotStatus();
+            drawChart();
+            showNotification('Cleared plot data');
+        }
+
         async function exitConfig() {
             try {
                 // Show exit splash screen
@@ -1378,6 +1646,8 @@ const char config_html[] PROGMEM = R"rawliteral(
                     } else if (activeSection && activeSection.id === 'bluetoothSection') {
                         loadBluetoothStatus();
                         updateDevices();
+                    } else if (activeSection && activeSection.id === 'confidenceSection') {
+                        loadConfidenceMonitoring();
                     } else if (activeSection && activeSection.id === 'rfidSection') {
                         loadRfidKeys();
                     } else if (activeSection && activeSection.id === 'securitySection') {
@@ -1436,6 +1706,12 @@ const char config_html[] PROGMEM = R"rawliteral(
                 <div class="nav-item" id="bluetoothNav" onclick="showSection('bluetooth')">
                     <span>Bluetooth</span>
                 </div>
+                <div class="nav-item" id="confidenceNav" onclick="showSection('confidence')">
+                    <span>Authentication Status</span>
+                </div>
+                <div class="nav-item" id="plotNav" onclick="showSection('plot')">
+                    <span>Confidence Plot</span>
+                </div>
                 <div class="nav-item" id="rfidNav" onclick="showSection('rfid')">
                     <span>RFID Keys</span>
                 </div>
@@ -1483,7 +1759,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                                 </label>
                             </div>
                             <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
-                                When disabled, Bluetooth authentication will be completely turned off to save power and improve security.
+                                When disabled, Bluetooth authentication will be completely turned off to save power and improve security. Changes take effect immediately.
                             </p>
                         </div>
                     </div>
@@ -1501,6 +1777,53 @@ const char config_html[] PROGMEM = R"rawliteral(
                     
                     <div id="devicesList">
                         <div class="card">Loading devices...</div>
+                    </div>
+                </section>
+
+                <!-- Confidence Monitoring Section (moved from calibration) -->
+                <section class="content-section" id="confidenceSection">
+                    <div class="card">
+                        <h2 class="card-title">📊 Confidence-Based Authentication</h2>
+                        <div style="margin-bottom: 1.5rem;">
+                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+                                Real-time confidence analysis for statistical authentication. The system uses stability, trend, and signal strength to determine proximity authentication.
+                            </p>
+                            <div class="status-grid">
+                                <div class="status-item">
+                                    <div class="status-label">Total Confidence</div>
+                                    <div class="status-value" id="totalConfidence">0%</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-label">Stability Score</div>
+                                    <div class="status-value" id="stabilityScore">0/35</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-label">Trend Score</div>
+                                    <div class="status-value" id="trendScore">0/25</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-label">Strength Score</div>
+                                    <div class="status-value" id="strengthScore">0/40</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-label">Movement Status</div>
+                                    <div class="status-value" id="movementStatus">Unknown</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-label">Signal Mean</div>
+                                    <div class="status-value" id="signalMean">-99 dBm</div>
+                                </div>
+                            </div>
+                            <div style="margin-top: 1rem; padding: 1rem; background: #f8f9ff; border-radius: 12px;">
+                                <div style="font-size: 0.9rem; color: #667eea; font-weight: 600;">Authentication Status:</div>
+                                <div id="authenticationStatus" style="font-size: 1.1rem; margin-top: 0.5rem;">
+                                    <span style="color: #dc3545;">⚫ Not Authenticated</span>
+                                </div>
+                                <div style="font-size: 0.8rem; color: #666; margin-top: 0.5rem;">
+                                    Requires 65% confidence to authenticate, 45% to maintain authentication.
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </section>
 
@@ -1621,6 +1944,69 @@ const char config_html[] PROGMEM = R"rawliteral(
                         <p style="font-size: 0.9rem; color: #666; margin-top: 1rem;">
                             Lock the configuration interface. You'll need to enter the password again to access settings.
                         </p>
+                    </div>
+                </section>
+                
+                <!-- Confidence Plotting Section -->
+                <section class="content-section" id="plotSection">
+                    <div class="card">
+                        <h2 class="card-title">📈 Confidence Over Time</h2>
+                        <div style="margin-bottom: 1.5rem;">
+                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+                                Real-time plotting of confidence percentage. Click start to begin recording, stop to end. Data shows the last 60 seconds.
+                            </p>
+                            <div style="display: flex; gap: 1rem; margin-bottom: 1.5rem;">
+                                <button onclick="startPlotting()" class="btn btn-primary" id="startPlotBtn">
+                                    ▶️ Start Recording
+                                </button>
+                                <button onclick="stopPlotting()" class="btn btn-secondary" id="stopPlotBtn" disabled>
+                                    ⏹️ Stop Recording
+                                </button>
+                                <button onclick="clearPlot()" class="btn btn-secondary">
+                                    🗑️ Clear Data
+                                </button>
+                            </div>
+                            <div style="background: #f8f9ff; padding: 1rem; border-radius: 12px; margin-bottom: 1rem;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                                    <span>Recording Status:</span>
+                                    <span id="plotStatus">Stopped</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                                    <span>Data Points:</span>
+                                    <span id="plotDataPoints">0</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span>Current Confidence:</span>
+                                    <span id="plotCurrentConfidence">0%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h3 class="card-title">Confidence Graph</h3>
+                        <div style="background: #fff; border: 1px solid #e1e5e9; border-radius: 12px; padding: 1rem; height: 300px; position: relative;">
+                            <canvas id="confidenceChart" width="800" height="280" style="width: 100%; height: 100%;"></canvas>
+                            <div id="chartOverlay" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #999; font-size: 1.1rem;">
+                                Click "Start Recording" to begin plotting
+                            </div>
+                        </div>
+                        <div style="margin-top: 1rem; font-size: 0.9rem; color: #666;">
+                            <div style="display: flex; gap: 2rem; justify-content: center;">
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <div style="width: 12px; height: 12px; background: #667eea; border-radius: 2px;"></div>
+                                    <span>Confidence %</span>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <div style="width: 12px; height: 12px; background: #28a745; border-radius: 2px;"></div>
+                                    <span>Auth Threshold (65%)</span>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <div style="width: 12px; height: 12px; background: #ffc107; border-radius: 2px;"></div>
+                                    <span>Deauth Threshold (45%)</span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </section>
             </main>

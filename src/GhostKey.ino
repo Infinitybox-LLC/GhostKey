@@ -145,14 +145,40 @@ const char jdi_logo_svg[] PROGMEM = R"(<?xml version="1.0" encoding="UTF-8"?>
 #define DEVICE_PRIORITY_KEY "dev_priority_"
 #define MAX_RSSI -30
 #define MIN_RSSI -100
-#define RSSI_AUTH_THRESHOLD -68
-#define RSSI_DEAUTH_THRESHOLD -73
 #define RSSI_UPDATE_INTERVAL 5000
 #define CONNECTION_TIMEOUT 30000
 #define MIN_CONN_INTERVAL 0x10
 #define MAX_CONN_INTERVAL 0x20
 #define SLAVE_LATENCY 0
 #define SUPERVISION_TIMEOUT 0x100
+
+// RSSI validation constants
+#define RSSI_MIN_VALID -100      // Minimum valid RSSI value for BLE
+#define RSSI_MAX_VALID -10       // Maximum valid RSSI value for BLE
+#define RSSI_INVALID_VALUE -99   // Value to use for invalid RSSI
+
+// Statistical RSSI Analysis constants (CONFIDENCE-BASED AUTHENTICATION)
+#define RSSI_SHORT_TERM_SIZE 10       // 1 second of readings (100ms intervals)
+#define RSSI_MEDIUM_TERM_SIZE 50      // 5 seconds of readings  
+#define RSSI_LONG_TERM_SIZE 300       // 30 seconds of readings
+#define CONFIDENCE_AUTH_THRESHOLD 65.0f    // Minimum confidence % for authentication
+#define CONFIDENCE_DEAUTH_THRESHOLD 45.0f  // Confidence % to lose authentication
+#define STABILITY_WEIGHT 35.0f        // Max points for stability (35%)
+#define TREND_WEIGHT 25.0f           // Max points for trend analysis (25%)
+#define STRENGTH_WEIGHT 40.0f        // Max points for signal strength (40%)
+#define MIN_READINGS_FOR_ANALYSIS 5  // Minimum readings before analysis
+#define TREND_WINDOW_MS 3000         // 3 seconds for trend analysis
+#define STABILITY_THRESHOLD 12.0f    // Max std deviation for "stable" (increased tolerance)
+#define STRONG_SIGNAL_THRESHOLD -60  // RSSI above this = strong signal
+#define WEAK_SIGNAL_THRESHOLD -80    // RSSI below this = weak signal
+#define VERY_STRONG_SIGNAL_THRESHOLD -50  // RSSI above this = very strong signal
+#define PROXIMITY_BONUS_THRESHOLD -55     // RSSI above this gets proximity bonus
+
+// Enhanced confidence calculation constants
+#define STATIONARY_BONUS_POINTS 10.0f     // Bonus for stationary strong signal
+#define CONFIDENCE_MOMENTUM_RATE 0.3f     // 30% change rate for smoothing
+#define STATIONARY_MIN_SAMPLES 8          // Minimum samples for stationary detection
+#define STATIONARY_MAX_STDDEV 6.0f        // Max std dev for "stationary" signal
 
 // ========================================
 // CURRENT MONITORING (Future Use)
@@ -187,6 +213,60 @@ struct ButtonState {
 };
 
 // Data structures for system state management
+
+// RSSI Calibration data structure - REMOVED (using confidence-based auth only)
+
+// Statistical RSSI Analysis structures
+struct RSSIStatistics {
+    float mean = 0.0f;
+    float standardDeviation = 0.0f;
+    float variance = 0.0f;
+    int8_t minimum = 0;
+    int8_t maximum = -100;
+    int validSamples = 0;
+};
+
+struct RSSIReading {
+    int8_t rssi = -99;
+    unsigned long timestamp = 0;
+    bool valid = false;
+};
+
+struct RSSIAnalysis {
+    // Circular buffers for different time windows
+    RSSIReading shortTerm[RSSI_SHORT_TERM_SIZE];
+    RSSIReading mediumTerm[RSSI_MEDIUM_TERM_SIZE];
+    RSSIReading longTerm[RSSI_LONG_TERM_SIZE];
+    
+    // Buffer indices (circular)
+    int shortTermIndex = 0;
+    int mediumTermIndex = 0;
+    int longTermIndex = 0;
+    
+    // Statistical analysis results
+    RSSIStatistics shortTermStats;
+    RSSIStatistics mediumTermStats;
+    RSSIStatistics longTermStats;
+    
+    // Confidence scoring components
+    float stabilityScore = 0.0f;      // 0-40 points
+    float trendScore = 0.0f;          // 0-30 points  
+    float strengthScore = 0.0f;       // 0-30 points
+    float totalConfidence = 0.0f;     // 0-100 points
+    
+    // Trend analysis
+    float trendDirection = 0.0f;      // Positive = improving, negative = degrading
+    bool isApproaching = false;       // Detected approach pattern
+    bool isStable = false;            // Signal is stable (parked)
+    
+    // Timing
+    unsigned long lastUpdate = 0;
+    unsigned long lastAnalysis = 0;
+    
+    // Device tracking
+    esp_bd_addr_t deviceAddress = {0};
+    bool hasDevice = false;
+};
 
 // ========================================
 // GLOBAL VARIABLES
@@ -354,6 +434,12 @@ bool wifiEnabled = false;
 // Factory reset tracking
 unsigned long factoryResetStartTime = 0;
 bool factoryResetInProgress = false;
+
+// Statistical RSSI Analysis global instance (confidence-based authentication)
+RSSIAnalysis rssiAnalysis;
+
+// Confidence momentum tracking for smoothing
+static float lastConfidence = 0.0f;
 
 // ========================================
 // BLUETOOTH FUNCTIONS
@@ -531,8 +617,20 @@ bool getDeviceName(esp_bd_addr_t address, char* name, size_t max_len) {
     return false;
 }
 
+// Function to validate RSSI value
+bool isRSSIValid(int8_t rssi) {
+    return (rssi >= RSSI_MIN_VALID && rssi <= RSSI_MAX_VALID && rssi != 0);
+}
+
 // Function to save device RSSI in memory cache only
 void saveDeviceRSSI(esp_bd_addr_t address, int8_t rssi) {
+    // Validate RSSI value before storing
+    if (!isRSSIValid(rssi)) {
+        Serial.printf("BLE: Invalid RSSI value %d dBm from device %02x:%02x:%02x:%02x:%02x:%02x - ignoring\n", 
+                     rssi, address[0], address[1], address[2], address[3], address[4], address[5]);
+        return;
+    }
+    
     int targetIndex = -1;
     unsigned long oldestTime = ULONG_MAX;
     
@@ -558,6 +656,19 @@ void saveDeviceRSSI(esp_bd_addr_t address, int8_t rssi) {
         rssiCache[targetIndex].rssi = rssi;
         rssiCache[targetIndex].lastUpdate = millis();
         rssiCache[targetIndex].valid = true;
+        
+        // Log RSSI updates only for significant changes (>5 dBm difference) to reduce spam
+        static int8_t lastLoggedRSSI = RSSI_INVALID_VALUE;
+        static esp_bd_addr_t lastLoggedAddr = {0};
+        if (memcmp(lastLoggedAddr, address, sizeof(esp_bd_addr_t)) != 0 || 
+            abs(rssi - lastLoggedRSSI) > 5) {
+            Serial.printf("BLE: RSSI cached: %d dBm (valid range: %d to %d dBm)\n", 
+                         rssi, RSSI_MIN_VALID, RSSI_MAX_VALID);
+            lastLoggedRSSI = rssi;
+            memcpy(lastLoggedAddr, address, sizeof(esp_bd_addr_t));
+        }
+    } else {
+        Serial.println("BLE: Warning - RSSI cache full, could not store RSSI value");
     }
 }
 
@@ -832,12 +943,14 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
                     if (bondedDevices) {
                         for (int i = 0; i < bondedCount; i++) {
                             if (memcmp(bondedDevices[i].bd_addr, param->scan_rst.bda, sizeof(esp_bd_addr_t)) == 0) {
-                                saveDeviceRSSI(param->scan_rst.bda, param->scan_rst.rssi);
-                                // Only log significant RSSI changes (>10 dBm difference)
-                                static int8_t lastLoggedRSSI = -99;
-                                if (abs(param->scan_rst.rssi - lastLoggedRSSI) > 10) {
-                                    Serial.printf("BLE: RSSI update: %d dBm\n", param->scan_rst.rssi);
-                                    lastLoggedRSSI = param->scan_rst.rssi;
+                                // Validate RSSI before processing
+                                if (isRSSIValid(param->scan_rst.rssi)) {
+                                    // Add to confidence-based statistical analysis system
+                                    addRSSIReading(param->scan_rst.rssi, param->scan_rst.bda);
+                                    // Keep RSSI caching for web interface
+                                    saveDeviceRSSI(param->scan_rst.bda, param->scan_rst.rssi);
+                                } else {
+                                    Serial.printf("BLE: Discarded invalid RSSI %d dBm from scan result\n", param->scan_rst.rssi);
                                 }
                                 break;
                             }
@@ -1020,6 +1133,60 @@ void stopRSSIScan() {
     esp_ble_gap_stop_scanning();
     // Reduced logging - comment out the stop message
     // Serial.println("BLE: RSSI scanning stopped");
+}
+
+// Function to properly shutdown Bluetooth
+void shutdownBluetooth() {
+    if (!bluetoothInitialized) {
+        return;
+    }
+    
+    Serial.println("=== SHUTTING DOWN BLUETOOTH ===");
+    
+    // Stop any ongoing operations first
+    stopRSSIScan();
+    
+    // Reset state variables
+    isBleConnected = false;
+    bluetoothAuthenticated = false;
+    hasConnectedDevice = false;
+    isPairingMode = false;
+    pairingModeStartTime = 0;
+    
+    // Clear connected device address
+    memset(connectedDeviceAddr, 0, sizeof(connectedDeviceAddr));
+    
+    // Stop advertising safely
+    if (pServer != nullptr) {
+        stopBLEAdvertising();
+        delay(100); // Give time for advertising to stop
+    }
+    
+    // Mark as not initialized but don't deinitialize aggressively
+    bluetoothInitialized = false;
+    
+    // Reset RSSI analysis when Bluetooth is disabled
+    resetRSSIAnalysis();
+    
+    Serial.println("=== BLUETOOTH SHUTDOWN COMPLETE ===");
+}
+
+// Function to restart Bluetooth after shutdown
+void restartBluetooth() {
+    if (bluetoothInitialized) {
+        return;
+    }
+    
+    Serial.println("=== RESTARTING BLUETOOTH ===");
+    
+    // Small delay to ensure clean state
+    delay(200);
+    
+    // Reinitialize Bluetooth (this will handle BLE setup)
+    initializeBluetooth();
+    bluetoothInitialized = true;
+    
+    Serial.println("=== BLUETOOTH RESTART COMPLETE ===");
 }
 
 // ========================================
@@ -1410,9 +1577,12 @@ void setup() {
     autoLockTimeout = preferences.getULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
     ap_password = preferences.getString("wifi_password", "123456789");
     web_password = preferences.getString("web_password", "1234");
-    bluetoothEnabled = preferences.getBool("bluetooth_enabled", true);
+    bluetoothEnabled = preferences.getBool("bt_enabled", true);
     ghostKeyEnabled = preferences.getBool("ghost_key_enabled", true);
     ghostPowerEnabled = preferences.getBool("ghost_power_enabled", true);
+    
+    // Legacy RSSI calibration removed - using confidence-based authentication only
+    
     DEBUG_PRINT("System configured: ");
     DEBUG_PRINTLN(isConfigured ? "Yes" : "No");
     DEBUG_PRINT("Bluetooth paired: ");
@@ -1453,35 +1623,38 @@ void setup() {
         priorityCache[i].valid = false;
     }
     
+    // Initialize RSSI analysis system
+    resetRSSIAnalysis();
+    
     // Initialize BLE only if enabled
     if (bluetoothEnabled) {
-        bluetoothInitStartTime = millis();
-        DEBUG_PRINT("Starting Bluetooth initialization at: ");
-        DEBUG_PRINT(bluetoothInitStartTime);
-        DEBUG_PRINTLN("ms");
-        
-        initializeBluetooth();
+    bluetoothInitStartTime = millis();
+    DEBUG_PRINT("Starting Bluetooth initialization at: ");
+    DEBUG_PRINT(bluetoothInitStartTime);
+    DEBUG_PRINTLN("ms");
+    
+    initializeBluetooth();
         bluetoothInitialized = true;
-        
-        bluetoothInitCompleteTime = millis();
-        DEBUG_PRINT("Bluetooth initialization complete at: ");
-        DEBUG_PRINT(bluetoothInitCompleteTime);
-        DEBUG_PRINTLN("ms");
-        DEBUG_PRINT("Bluetooth init duration: ");
-        DEBUG_PRINT(bluetoothInitCompleteTime - bluetoothInitStartTime);
-        DEBUG_PRINTLN("ms");
-        
-        // Start RSSI scanning for bonded devices
-        firstRSSIScanStartTime = millis();
-        DEBUG_PRINT("Starting first RSSI scan at: ");
-        DEBUG_PRINT(firstRSSIScanStartTime);
-        DEBUG_PRINTLN("ms");
-        DEBUG_PRINT("Time from boot to RSSI scan start: ");
-        DEBUG_PRINT(firstRSSIScanStartTime - systemBootTime);
-        DEBUG_PRINTLN("ms");
-        
-        startRSSIScan();
-        DEBUG_PRINTLN("RSSI scanning started");
+    
+    bluetoothInitCompleteTime = millis();
+    DEBUG_PRINT("Bluetooth initialization complete at: ");
+    DEBUG_PRINT(bluetoothInitCompleteTime);
+    DEBUG_PRINTLN("ms");
+    DEBUG_PRINT("Bluetooth init duration: ");
+    DEBUG_PRINT(bluetoothInitCompleteTime - bluetoothInitStartTime);
+    DEBUG_PRINTLN("ms");
+    
+    // Start RSSI scanning for bonded devices
+    firstRSSIScanStartTime = millis();
+    DEBUG_PRINT("Starting first RSSI scan at: ");
+    DEBUG_PRINT(firstRSSIScanStartTime);
+    DEBUG_PRINTLN("ms");
+    DEBUG_PRINT("Time from boot to RSSI scan start: ");
+    DEBUG_PRINT(firstRSSIScanStartTime - systemBootTime);
+    DEBUG_PRINTLN("ms");
+    
+    startRSSIScan();
+    DEBUG_PRINTLN("RSSI scanning started");
     } else {
         DEBUG_PRINTLN("Bluetooth disabled - skipping initialization");
         bluetoothInitialized = false;
@@ -1509,7 +1682,7 @@ void loop() {
     if (ghostKeyEnabled) {
         // Ghost Key enabled: RFID/Bluetooth authentication and push-to-start
         if (bluetoothEnabled && bluetoothInitialized) {
-            updateBluetoothAuthentication();
+    updateBluetoothAuthentication();
         }
         // RFID scanning handled in main loop below
         handleButtonPress(); // Push-to-start functionality
@@ -1544,24 +1717,26 @@ void loop() {
     
     // Update BLE connection status (only if Bluetooth is enabled)
     if (bluetoothEnabled && bluetoothInitialized) {
-        isBleConnected = bleKeyboard.isConnected();
-        
-        // RSSI scanning (only when needed)
-        static unsigned long lastRSSIScan = 0;
-        if (millis() - lastRSSIScan >= RSSI_UPDATE_INTERVAL) {
-            int bondedCount = esp_ble_get_bond_device_num();
-            if (bondedCount > 0 && (isBleConnected || isPairingMode)) {
-                startRSSIScan();
-            }
-            lastRSSIScan = millis();
+    isBleConnected = bleKeyboard.isConnected();
+    
+    // RSSI scanning (only when needed)
+    static unsigned long lastRSSIScan = 0;
+    if (millis() - lastRSSIScan >= RSSI_UPDATE_INTERVAL) {
+        int bondedCount = esp_ble_get_bond_device_num();
+        if (bondedCount > 0 && (isBleConnected || isPairingMode)) {
+            startRSSIScan();
         }
+        lastRSSIScan = millis();
+    }
         
-        // Pairing mode timeout check
-        if (isPairingMode && pairingModeStartTime > 0) {
-            if (millis() - pairingModeStartTime >= PAIRING_MODE_TIMEOUT) {
-                Serial.println("PAIRING: Timeout reached - disabling pairing mode");
-                disablePairingMode();
-            }
+        // Legacy RSSI calibration removed - using confidence-based authentication only;
+    
+    // Pairing mode timeout check
+    if (isPairingMode && pairingModeStartTime > 0) {
+        if (millis() - pairingModeStartTime >= PAIRING_MODE_TIMEOUT) {
+            Serial.println("PAIRING: Timeout reached - disabling pairing mode");
+            disablePairingMode();
+        }
         }
     } else {
         // Reset Bluetooth state if disabled
@@ -1581,24 +1756,24 @@ void loop() {
     // RFID scanning - only when Ghost Key is enabled
     if (ghostKeyEnabled) {
         // Track first scan timing
-        static bool firstRfidScanStarted = false;
-        if (!firstRfidScanStarted) {
-            firstRfidScanStartTime = millis();
-            firstRfidScanStarted = true;
-            Serial.println("=== STARTING FIRST RFID SCAN ===");
-            Serial.print("First RFID scan started at: ");
-            Serial.print(firstRfidScanStartTime);
-            Serial.println("ms");
-            Serial.print("Time from boot to RFID scan start: ");
-            Serial.print(firstRfidScanStartTime - systemBootTime);
-            Serial.println("ms");
-            Serial.print("Time from RFID init to scan start: ");
-            Serial.print(firstRfidScanStartTime - rfidInitCompleteTime);
-            Serial.println("ms");
-            Serial.println("==============================");
-        }
-        
-        if(scanForTag(tagData) == true) {
+    static bool firstRfidScanStarted = false;
+    if (!firstRfidScanStarted) {
+        firstRfidScanStartTime = millis();
+        firstRfidScanStarted = true;
+        Serial.println("=== STARTING FIRST RFID SCAN ===");
+        Serial.print("First RFID scan started at: ");
+        Serial.print(firstRfidScanStartTime);
+        Serial.println("ms");
+        Serial.print("Time from boot to RFID scan start: ");
+        Serial.print(firstRfidScanStartTime - systemBootTime);
+        Serial.println("ms");
+        Serial.print("Time from RFID init to scan start: ");
+        Serial.print(firstRfidScanStartTime - rfidInitCompleteTime);
+        Serial.println("ms");
+        Serial.println("==============================");
+    }
+    
+    if(scanForTag(tagData) == true) {
         // Record first RFID read completion time
         if (!firstRfidReadDone) {
             firstRfidReadCompleteTime = millis();
@@ -1670,7 +1845,7 @@ void loop() {
 } else {
     // Ghost Key disabled: Reset RFID authentication state
     rfidAuthenticated = false;
-}
+    }
     
     // Check for RSSI scan timeout (if no results after 10 seconds)
     static bool rssiTimeoutChecked = false;
@@ -2219,8 +2394,8 @@ void setupWebServer() {
             Serial.println("Serving first-time setup page");
             server.send_P(200, "text/html", setup_html);
         } else {
-            Serial.println("Serving main configuration page");
-            server.send_P(200, "text/html", config_html);
+        Serial.println("Serving main configuration page");
+        server.send_P(200, "text/html", config_html);
         }
     });
     
@@ -2530,14 +2705,37 @@ void setupWebServer() {
             
             if (!error) {
                 bool newState = doc["enabled"];
-                bluetoothEnabled = newState;
-                preferences.putBool("bluetooth_enabled", bluetoothEnabled);
                 
-                Serial.printf("Bluetooth %s (restart required)\n", bluetoothEnabled ? "enabled" : "disabled");
-                
-                String message = bluetoothEnabled ? "Bluetooth enabled. Restart required to take effect." 
-                                                 : "Bluetooth disabled. Restart required to take effect.";
-                server.send(200, "text/plain", message);
+                // Apply the change immediately
+                if (newState && !bluetoothEnabled) {
+                    // Enabling Bluetooth
+                                         bluetoothEnabled = true;
+                     preferences.putBool("bt_enabled", bluetoothEnabled);
+                    
+                    if (!bluetoothInitialized) {
+                        restartBluetooth();
+                    }
+                    
+                    Serial.println("Bluetooth enabled and started immediately");
+                    server.send(200, "text/plain", "Bluetooth enabled successfully");
+                    
+                } else if (!newState && bluetoothEnabled) {
+                    // Disabling Bluetooth
+                                         bluetoothEnabled = false;
+                     preferences.putBool("bt_enabled", bluetoothEnabled);
+                    
+                    if (bluetoothInitialized) {
+                        shutdownBluetooth();
+                    }
+                    
+                    Serial.println("Bluetooth disabled and stopped immediately");
+                    server.send(200, "text/plain", "Bluetooth disabled successfully");
+                    
+                } else {
+                    // No change needed
+                    String status = bluetoothEnabled ? "enabled" : "disabled";
+                    server.send(200, "text/plain", "Bluetooth already " + status);
+                }
                 return;
             }
         }
@@ -2644,7 +2842,7 @@ void setupWebServer() {
                 
                 preferences.putBool("ghost_key_enabled", ghostKeyEnabled);
                 preferences.putBool("ghost_power_enabled", ghostPowerEnabled);
-                preferences.putBool("bluetooth_enabled", bluetoothEnabled);
+                preferences.putBool("bt_enabled", bluetoothEnabled);
                 preferences.putString("wifi_password", ap_password);
                 preferences.putString("web_password", web_password);
                 
@@ -2658,6 +2856,15 @@ void setupWebServer() {
             }
         }
         server.send(400, "text/plain", "Invalid request");
+    });
+
+    // Legacy RSSI Calibration endpoints removed - using confidence-based authentication only
+
+    // RSSI analysis endpoint for confidence-based authentication monitoring
+    server.on("/rssi_analysis", HTTP_GET, [](){
+        Serial.println("RSSI analysis status request received");
+        String json = getRSSIAnalysisJson();
+        server.send(200, "application/json", json);
     });
 
     // Start server
@@ -2717,18 +2924,8 @@ void updateBluetoothAuthentication() {
         }
         
         if (hasValidAddress) {
-            // RSSI proximity check with hysteresis to prevent flapping
-            int8_t rssi = 0;
-            if (getDeviceRSSI(connectedDeviceAddr, &rssi)) {
-                if (!bluetoothAuthenticated && rssi >= RSSI_AUTH_THRESHOLD) {
-                    bluetoothAuthenticated = true;
-                } else if (bluetoothAuthenticated && rssi < RSSI_DEAUTH_THRESHOLD) {
-                    bluetoothAuthenticated = false;
-                }
-                // Between thresholds = maintain current state (hysteresis)
-            } else {
-                bluetoothAuthenticated = false;
-            }
+            // Use confidence-based authentication exclusively
+            bluetoothAuthenticated = authenticateByConfidence();
         }
     }
     
@@ -2931,7 +3128,7 @@ void performFactoryReset() {
     preferences.putULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
     preferences.putString("wifi_password", "123456789");
     preferences.putString("web_password", "1234");
-    preferences.putBool("bluetooth_enabled", true);
+    preferences.putBool("bt_enabled", true);
     preferences.putBool("ghost_key_enabled", true);
     preferences.putBool("ghost_power_enabled", true);
     
@@ -2951,3 +3148,364 @@ void performFactoryReset() {
     // Restart the system
     ESP.restart();
 }
+
+// ========================================
+// LEGACY RSSI CALIBRATION FUNCTIONS REMOVED
+// ========================================
+// All RSSI calibration functions have been removed.
+// System now uses confidence-based authentication exclusively.
+
+// ========================================
+// STATISTICAL RSSI ANALYSIS FUNCTIONS  
+// ========================================
+
+// Add RSSI reading to analysis buffers
+void addRSSIReading(int8_t rssi, esp_bd_addr_t address) {
+    if (!isRSSIValid(rssi)) {
+        return;
+    }
+    
+    unsigned long now = millis();
+    
+    // Set up device tracking if not already set
+    if (!rssiAnalysis.hasDevice) {
+        memcpy(rssiAnalysis.deviceAddress, address, sizeof(esp_bd_addr_t));
+        rssiAnalysis.hasDevice = true;
+    } else if (memcmp(rssiAnalysis.deviceAddress, address, sizeof(esp_bd_addr_t)) != 0) {
+        // Different device - reset analysis
+        resetRSSIAnalysis();
+        memcpy(rssiAnalysis.deviceAddress, address, sizeof(esp_bd_addr_t));
+        rssiAnalysis.hasDevice = true;
+    }
+    
+    // Create new reading
+    RSSIReading reading;
+    reading.rssi = rssi;
+    reading.timestamp = now;
+    reading.valid = true;
+    
+    // Add to short term buffer (1 second)
+    rssiAnalysis.shortTerm[rssiAnalysis.shortTermIndex] = reading;
+    rssiAnalysis.shortTermIndex = (rssiAnalysis.shortTermIndex + 1) % RSSI_SHORT_TERM_SIZE;
+    
+    // Add to medium term buffer (5 seconds) 
+    rssiAnalysis.mediumTerm[rssiAnalysis.mediumTermIndex] = reading;
+    rssiAnalysis.mediumTermIndex = (rssiAnalysis.mediumTermIndex + 1) % RSSI_MEDIUM_TERM_SIZE;
+    
+    // Add to long term buffer (30 seconds)
+    rssiAnalysis.longTerm[rssiAnalysis.longTermIndex] = reading;
+    rssiAnalysis.longTermIndex = (rssiAnalysis.longTermIndex + 1) % RSSI_LONG_TERM_SIZE;
+    
+    rssiAnalysis.lastUpdate = now;
+    
+    // Trigger analysis if enough time has passed
+    if (now - rssiAnalysis.lastAnalysis >= 500) { // Analyze every 500ms
+        performRSSIAnalysis();
+        rssiAnalysis.lastAnalysis = now;
+    }
+}
+
+// Calculate statistics for a buffer
+RSSIStatistics calculateBufferStatistics(RSSIReading* buffer, int bufferSize, unsigned long maxAge) {
+    RSSIStatistics stats;
+    unsigned long now = millis();
+    
+    float sum = 0.0f;
+    int validCount = 0;
+    stats.minimum = 0;
+    stats.maximum = -100;
+    
+    // First pass: calculate mean and find min/max
+    for (int i = 0; i < bufferSize; i++) {
+        if (buffer[i].valid && (now - buffer[i].timestamp) <= maxAge) {
+            float rssi = (float)buffer[i].rssi;
+            sum += rssi;
+            validCount++;
+            
+            if (validCount == 1 || buffer[i].rssi > stats.maximum) {
+                stats.maximum = buffer[i].rssi;
+            }
+            if (validCount == 1 || buffer[i].rssi < stats.minimum) {
+                stats.minimum = buffer[i].rssi;
+            }
+        }
+    }
+    
+    stats.validSamples = validCount;
+    
+    if (validCount < MIN_READINGS_FOR_ANALYSIS) {
+        return stats; // Not enough data
+    }
+    
+    stats.mean = sum / validCount;
+    
+    // Second pass: calculate variance and standard deviation
+    float varianceSum = 0.0f;
+    for (int i = 0; i < bufferSize; i++) {
+        if (buffer[i].valid && (now - buffer[i].timestamp) <= maxAge) {
+            float diff = (float)buffer[i].rssi - stats.mean;
+            varianceSum += diff * diff;
+        }
+    }
+    
+    stats.variance = varianceSum / validCount;
+    stats.standardDeviation = sqrt(stats.variance);
+    
+    return stats;
+}
+
+// Get adaptive stability threshold based on signal strength
+float getAdaptiveStabilityThreshold(float meanRSSI) {
+    if (meanRSSI >= -50) return 15.0f;      // Very close: allow more variance
+    if (meanRSSI >= -65) return 12.0f;      // Close: current tolerance
+    if (meanRSSI >= -75) return 8.0f;       // Medium: less tolerance
+    return 5.0f;                            // Far: strict tolerance
+}
+
+// Detect stationary phone with strong signal
+bool isStationaryStrongSignal(const RSSIStatistics& stats) {
+    return (stats.mean >= -55 && 
+            stats.standardDeviation <= STATIONARY_MAX_STDDEV && 
+            stats.validSamples >= STATIONARY_MIN_SAMPLES);
+}
+
+// Calculate stability score (0-35 points) with adaptive threshold
+float calculateStabilityScore() {
+    // Use short-term statistics for stability
+    if (rssiAnalysis.shortTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return 0.0f;
+    }
+    
+    float meanRSSI = rssiAnalysis.shortTermStats.mean;
+    float stdDev = rssiAnalysis.shortTermStats.standardDeviation;
+    
+    // Get adaptive threshold based on signal strength
+    float adaptiveThreshold = getAdaptiveStabilityThreshold(meanRSSI);
+    
+    // Calculate stability based on adaptive standard deviation
+    float score = 0.0f;
+    
+    if (stdDev <= adaptiveThreshold) {
+        // Signal is stable - full points
+        score = STABILITY_WEIGHT;
+    } else {
+        // Signal is unstable - reduce points proportionally
+        float stabilityRatio = adaptiveThreshold / stdDev;
+        score = STABILITY_WEIGHT * stabilityRatio;
+    }
+    
+    // Ensure score doesn't go negative
+    if (score < 0.0f) {
+        score = 0.0f;
+    }
+    
+    return score;
+}
+
+// Calculate trend score (0-25 points) - Updated to be friendlier to stationary phones
+float calculateTrendScore() {
+    // Need medium-term data for trend analysis
+    if (rssiAnalysis.mediumTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return 0.0f;
+    }
+    
+    // Calculate trend direction using linear regression over recent readings
+    unsigned long now = millis();
+    float sumX = 0.0f, sumY = 0.0f, sumXY = 0.0f, sumXX = 0.0f;
+    int trendSamples = 0;
+    
+    for (int i = 0; i < RSSI_MEDIUM_TERM_SIZE; i++) {
+        if (rssiAnalysis.mediumTerm[i].valid && 
+            (now - rssiAnalysis.mediumTerm[i].timestamp) <= TREND_WINDOW_MS) {
+            
+            float x = (float)(now - rssiAnalysis.mediumTerm[i].timestamp); // Time ago
+            float y = (float)rssiAnalysis.mediumTerm[i].rssi;
+            
+            sumX += x;
+            sumY += y;
+            sumXY += x * y;
+            sumXX += x * x;
+            trendSamples++;
+        }
+    }
+    
+    if (trendSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return 0.0f;
+    }
+    
+    // Linear regression slope calculation
+    float slope = (trendSamples * sumXY - sumX * sumY) / (trendSamples * sumXX - sumX * sumX);
+    rssiAnalysis.trendDirection = slope;
+    
+    // Positive slope = signal getting stronger (approaching)
+    // Negative slope = signal getting weaker (leaving)
+    rssiAnalysis.isApproaching = (slope > 0.001f); // Small threshold for noise
+    
+    // Score based on trend strength and direction
+    float trendStrength = abs(slope) * 1000.0f; // Scale for scoring
+    float score = 0.0f;
+    
+    // Check if signal is very strong (close proximity)
+    float meanRSSI = rssiAnalysis.mediumTermStats.mean;
+    bool isVeryClose = (meanRSSI >= VERY_STRONG_SIGNAL_THRESHOLD);
+    
+    if (rssiAnalysis.isApproaching) {
+        // Reward positive trends (approaching)
+        score = TREND_WEIGHT * min(1.0f, trendStrength / 5.0f);
+    } else if (isVeryClose && trendStrength < 2.0f) {
+        // Give high points for stable signal when very close (stationary phone bonus)
+        score = TREND_WEIGHT * 0.8f; // 80% of trend points for stable close proximity
+    } else {
+        // Penalize negative trends (leaving), but give some points for stability
+        score = TREND_WEIGHT * 0.4f * max(0.0f, 1.0f - trendStrength / 5.0f);
+    }
+    
+    return score;
+}
+
+// Calculate signal strength score (0-40 points) - Enhanced with proximity bonus
+float calculateStrengthScore() {
+    if (rssiAnalysis.shortTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return 0.0f;
+    }
+    
+    float meanRSSI = rssiAnalysis.shortTermStats.mean;
+    float score = 0.0f;
+    
+    if (meanRSSI >= VERY_STRONG_SIGNAL_THRESHOLD) {
+        // Very strong signal (very close) = full points + proximity bonus
+        score = STRENGTH_WEIGHT; // Full 40 points
+    } else if (meanRSSI >= STRONG_SIGNAL_THRESHOLD) {
+        // Strong signal = high points
+        float range = VERY_STRONG_SIGNAL_THRESHOLD - STRONG_SIGNAL_THRESHOLD;
+        float position = meanRSSI - STRONG_SIGNAL_THRESHOLD;
+        score = STRENGTH_WEIGHT * (0.7f + 0.3f * (position / range)); // 70-100% of points
+    } else if (meanRSSI >= WEAK_SIGNAL_THRESHOLD) {
+        // Medium signal = proportional points
+        float range = STRONG_SIGNAL_THRESHOLD - WEAK_SIGNAL_THRESHOLD;
+        float position = meanRSSI - WEAK_SIGNAL_THRESHOLD;
+        score = STRENGTH_WEIGHT * (0.3f + 0.4f * (position / range)); // 30-70% of points
+    } else {
+        // Weak signal = minimal points
+        score = STRENGTH_WEIGHT * 0.1f;
+    }
+    
+    return score;
+}
+
+// Perform complete RSSI analysis and confidence calculation
+void performRSSIAnalysis() {
+    unsigned long now = millis();
+    
+    // Calculate statistics for each time window
+    rssiAnalysis.shortTermStats = calculateBufferStatistics(
+        rssiAnalysis.shortTerm, RSSI_SHORT_TERM_SIZE, 2000); // 2 second max age
+    
+    rssiAnalysis.mediumTermStats = calculateBufferStatistics(
+        rssiAnalysis.mediumTerm, RSSI_MEDIUM_TERM_SIZE, 10000); // 10 second max age
+    
+    rssiAnalysis.longTermStats = calculateBufferStatistics(
+        rssiAnalysis.longTerm, RSSI_LONG_TERM_SIZE, 60000); // 60 second max age
+    
+    // Calculate confidence components
+    rssiAnalysis.stabilityScore = calculateStabilityScore();
+    rssiAnalysis.trendScore = calculateTrendScore();
+    rssiAnalysis.strengthScore = calculateStrengthScore();
+    
+    // Calculate base confidence
+    float baseConfidence = rssiAnalysis.stabilityScore + 
+                          rssiAnalysis.trendScore + 
+                          rssiAnalysis.strengthScore;
+    
+    // Apply stationary strong signal bonus (Solution 2)
+    if (isStationaryStrongSignal(rssiAnalysis.shortTermStats)) {
+        baseConfidence += STATIONARY_BONUS_POINTS;
+    }
+    
+    // Apply confidence momentum smoothing (Solution 3)
+    float confidenceDelta = baseConfidence - lastConfidence;
+    rssiAnalysis.totalConfidence = lastConfidence + (confidenceDelta * CONFIDENCE_MOMENTUM_RATE);
+    lastConfidence = rssiAnalysis.totalConfidence;
+    
+    // Ensure confidence stays within bounds
+    if (rssiAnalysis.totalConfidence < 0.0f) rssiAnalysis.totalConfidence = 0.0f;
+    if (rssiAnalysis.totalConfidence > 100.0f) rssiAnalysis.totalConfidence = 100.0f;
+    
+    // Update stability flag using adaptive threshold
+    float adaptiveThreshold = getAdaptiveStabilityThreshold(rssiAnalysis.shortTermStats.mean);
+    rssiAnalysis.isStable = (rssiAnalysis.shortTermStats.standardDeviation <= adaptiveThreshold);
+    
+    // Debug logging (reduced frequency)
+    static unsigned long lastDebugLog = 0;
+    if (now - lastDebugLog >= 5000) { // Log every 5 seconds
+        Serial.printf("RSSI Analysis: Confidence=%.1f%% (Stability=%.1f, Trend=%.1f, Strength=%.1f) "
+                     "Mean=%.1f, StdDev=%.1f, Trending=%s\n",
+                     rssiAnalysis.totalConfidence,
+                     rssiAnalysis.stabilityScore,
+                     rssiAnalysis.trendScore, 
+                     rssiAnalysis.strengthScore,
+                     rssiAnalysis.shortTermStats.mean,
+                     rssiAnalysis.shortTermStats.standardDeviation,
+                     rssiAnalysis.isApproaching ? "Approaching" : "Stable/Leaving");
+        lastDebugLog = now;
+    }
+}
+
+// Check if device should be authenticated based on confidence
+bool authenticateByConfidence() {
+    // Need minimum data for analysis
+    if (rssiAnalysis.shortTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return false;
+    }
+    
+    // Use hysteresis for authentication decisions
+    static bool wasAuthenticated = false;
+    float threshold = wasAuthenticated ? CONFIDENCE_DEAUTH_THRESHOLD : CONFIDENCE_AUTH_THRESHOLD;
+    
+    bool shouldAuthenticate = (rssiAnalysis.totalConfidence >= threshold);
+    
+    // Update state
+    wasAuthenticated = shouldAuthenticate;
+    
+    return shouldAuthenticate;
+}
+
+// Reset RSSI analysis (when device changes or system resets)
+void resetRSSIAnalysis() {
+    memset(&rssiAnalysis, 0, sizeof(rssiAnalysis));
+    
+    // Reset statistics
+    for (int i = 0; i < RSSI_SHORT_TERM_SIZE; i++) {
+        rssiAnalysis.shortTerm[i].valid = false;
+    }
+    for (int i = 0; i < RSSI_MEDIUM_TERM_SIZE; i++) {
+        rssiAnalysis.mediumTerm[i].valid = false;
+    }
+    for (int i = 0; i < RSSI_LONG_TERM_SIZE; i++) {
+        rssiAnalysis.longTerm[i].valid = false;
+    }
+    
+    Serial.println("RSSI Analysis: Reset for new device or system restart");
+}
+
+// Get RSSI analysis status as JSON for web interface
+String getRSSIAnalysisJson() {
+    String json = "{";
+    json += "\"confidence\":" + String(rssiAnalysis.totalConfidence, 1) + ",";
+    json += "\"stabilityScore\":" + String(rssiAnalysis.stabilityScore, 1) + ",";
+    json += "\"trendScore\":" + String(rssiAnalysis.trendScore, 1) + ",";
+    json += "\"strengthScore\":" + String(rssiAnalysis.strengthScore, 1) + ",";
+    json += "\"isApproaching\":" + String(rssiAnalysis.isApproaching ? "true" : "false") + ",";
+    json += "\"isStable\":" + String(rssiAnalysis.isStable ? "true" : "false") + ",";
+    json += "\"mean\":" + String(rssiAnalysis.shortTermStats.mean, 1) + ",";
+    json += "\"stdDev\":" + String(rssiAnalysis.shortTermStats.standardDeviation, 1) + ",";
+    json += "\"samples\":" + String(rssiAnalysis.shortTermStats.validSamples) + ",";
+    json += "\"authThreshold\":" + String(CONFIDENCE_AUTH_THRESHOLD, 1) + ",";
+    json += "\"deauthThreshold\":" + String(CONFIDENCE_DEAUTH_THRESHOLD, 1);
+    json += "}";
+    return json;
+}
+
+// ========================================
+// BLE SERVER CALLBACK CLASS
+// ========================================

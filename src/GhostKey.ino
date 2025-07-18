@@ -83,32 +83,8 @@ const char manifest_json[] PROGMEM = R"({
   "icons": [
     {
       "src": "/logo",
-      "sizes": "152x152",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/logo",
-      "sizes": "167x167",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/logo",
-      "sizes": "180x180",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/logo",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "/logo",
-      "sizes": "512x512", 
-      "type": "image/png",
+      "sizes": "any",
+      "type": "image/svg+xml",
       "purpose": "any maskable"
     }
   ]

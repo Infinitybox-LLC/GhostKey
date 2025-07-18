@@ -645,25 +645,26 @@ const char config_html[] PROGMEM = R"rawliteral(
                 width: 100%;
                 margin: 0;
                 position: sticky;
-                top: 60px;
+                top: 59px;
                 display: flex;
                 flex-direction: row !important;
                 overflow-x: auto;
                 overflow-y: hidden;
-                padding: 0.75rem 1rem;
+                padding: 0.5rem 1rem;
                 max-width: 100vw;
                 box-sizing: border-box;
                 background: rgba(255,255,255,0.98);
                 backdrop-filter: blur(30px);
                 border-bottom: 1px solid rgba(102, 126, 234, 0.1);
-                gap: 0.75rem;
+                gap: 0.5rem;
                 -webkit-overflow-scrolling: touch;
                 scroll-snap-type: x mandatory;
                 scrollbar-width: none;
                 -ms-overflow-style: none;
-                z-index: 99;
+                z-index: 200;
                 border-radius: 0;
                 box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                margin-top: -1px;
             }
             
             .sidebar::-webkit-scrollbar {
@@ -714,9 +715,10 @@ const char config_html[] PROGMEM = R"rawliteral(
                 background: rgba(220, 53, 69, 0.1) !important;
                 color: #dc3545 !important;
                 border-color: rgba(220, 53, 69, 0.2) !important;
-                min-width: 80px !important;
-                max-width: 100px !important;
-                font-size: 0.8rem !important;
+                min-width: 70px !important;
+                max-width: 90px !important;
+                font-size: 0.75rem !important;
+                padding: 0.5rem 0.75rem !important;
             }
             
             .exit-nav:hover:not(.active) {
@@ -737,7 +739,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 box-sizing: border-box;
                 margin-top: 0;
                 position: relative;
-                z-index: 1;
+                z-index: 10;
             }
             
             .card {
@@ -747,6 +749,8 @@ const char config_html[] PROGMEM = R"rawliteral(
                 overflow-x: hidden;
                 box-sizing: border-box;
                 margin-bottom: 1rem;
+                position: relative;
+                z-index: 5;
             }
             
             .status-grid {
@@ -1913,19 +1917,19 @@ const char config_html[] PROGMEM = R"rawliteral(
                     // Scrolling down
                     if (scrollTop > 100) {
                         header.className = 'app-header minimal';
-                        if (sidebar) sidebar.style.top = '40px';
+                        if (sidebar) sidebar.style.top = '39px';
                     } else {
                         header.className = 'app-header collapsed';
-                        if (sidebar) sidebar.style.top = '45px';
+                        if (sidebar) sidebar.style.top = '44px';
                     }
                 } else if (scrollTop < lastScrollTop - 20) {
                     // Scrolling up
                     if (scrollTop < 30) {
                         header.className = 'app-header';
-                        if (sidebar) sidebar.style.top = '60px';
+                        if (sidebar) sidebar.style.top = '59px';
                     } else {
                         header.className = 'app-header collapsed';
-                        if (sidebar) sidebar.style.top = '45px';
+                        if (sidebar) sidebar.style.top = '44px';
                     }
                 }
                 
@@ -1946,7 +1950,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                     const header = document.querySelector('.app-header');
                     const sidebar = document.querySelector('.sidebar');
                     header.className = 'app-header';
-                    if (sidebar) sidebar.style.top = '60px';
+                    if (sidebar) sidebar.style.top = '59px';
                 }
             });
             
@@ -2041,7 +2045,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                     <span>Security</span>
                 </div>
                 <div class="nav-item exit-nav" onclick="exitConfig()">
-                    <span>Exit Configuration Mode</span>
+                    <span>Exit</span>
                 </div>
             </nav>
 

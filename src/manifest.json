@@ -1,0 +1,25 @@
+{
+  "name": "Ghost Key Configuration",
+  "short_name": "Ghost Key",
+  "description": "Secure Vehicle Access System Configuration",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#764ba2",
+  "theme_color": "#667eea",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/logo",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/logo",
+      "sizes": "512x512", 
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+} 

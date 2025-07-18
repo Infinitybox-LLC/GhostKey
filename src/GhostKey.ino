@@ -67,6 +67,35 @@ const char jdi_logo_svg[] PROGMEM = R"(<?xml version="1.0" encoding="UTF-8"?>
 </svg>)";
 
 // ========================================
+// PWA MANIFEST JSON - STORED IN PROGMEM
+// ========================================
+const char manifest_json[] PROGMEM = R"({
+  "name": "Ghost Key Configuration",
+  "short_name": "Ghost Key",
+  "description": "Secure Vehicle Access System Configuration",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#764ba2",
+  "theme_color": "#667eea",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/logo",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/logo",
+      "sizes": "512x512", 
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+})";
+
+// ========================================
 // DEBUG SYSTEM - DEFINED EARLY FOR ALL FUNCTIONS
 // ========================================
 #define DEBUG_SYSTEM 1
@@ -2451,6 +2480,12 @@ void setupWebServer() {
     server.on("/logo", HTTP_GET, [](){
         Serial.println("Logo request received - serving JDI logo from PROGMEM");
         server.send_P(200, "image/svg+xml", jdi_logo_svg);
+    });
+    
+    // Handle manifest.json requests - serve PWA manifest from PROGMEM
+    server.on("/manifest.json", HTTP_GET, [](){
+        Serial.println("Manifest request received - serving PWA manifest from PROGMEM");
+        server.send_P(200, "application/json", manifest_json);
     });
     
     // System status endpoint

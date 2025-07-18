@@ -15,9 +15,14 @@ const char setup_html[] PROGMEM = R"rawliteral(
     <!-- PWA Meta Tags -->
     <meta name="theme-color" content="#667eea">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Ghost Key">
+    <meta name="apple-touch-fullscreen" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
     <link rel="apple-touch-icon" href="/logo">
+    <link rel="apple-touch-icon" sizes="152x152" href="/logo">
+    <link rel="apple-touch-icon" sizes="167x167" href="/logo">
+    <link rel="apple-touch-icon" sizes="180x180" href="/logo">
     
     <style>
         /* Base styling matching current interface */

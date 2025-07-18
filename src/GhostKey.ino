@@ -72,6 +72,7 @@ const char jdi_logo_svg[] PROGMEM = R"(<?xml version="1.0" encoding="UTF-8"?>
 const char manifest_json[] PROGMEM = R"({
   "name": "Ghost Key Configuration",
   "short_name": "Ghost Key",
+  "id": "/",
   "description": "Secure Vehicle Access System Configuration",
   "start_url": "/",
   "display": "standalone",
@@ -82,14 +83,32 @@ const char manifest_json[] PROGMEM = R"({
   "icons": [
     {
       "src": "/logo",
+      "sizes": "152x152",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo",
+      "sizes": "167x167",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo",
       "sizes": "192x192",
-      "type": "image/svg+xml",
+      "type": "image/png",
       "purpose": "any maskable"
     },
     {
       "src": "/logo",
       "sizes": "512x512", 
-      "type": "image/svg+xml",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ]

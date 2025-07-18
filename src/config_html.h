@@ -581,13 +581,14 @@ const char config_html[] PROGMEM = R"rawliteral(
                 overflow-x: hidden;
                 width: 100%;
                 max-width: 100%;
+                position: relative;
             }
             
             /* Mobile Header - Collapsible */
             .app-header {
                 background: rgba(255,255,255,0.98);
                 backdrop-filter: blur(30px);
-                padding: 0.75rem 1rem;
+                padding: 0.5rem 1rem;
                 overflow-x: hidden;
                 width: 100%;
                 max-width: 100%;
@@ -597,15 +598,20 @@ const char config_html[] PROGMEM = R"rawliteral(
                 top: 0;
                 z-index: 100;
                 border-bottom: 1px solid rgba(102, 126, 234, 0.1);
+                height: 60px;
+                display: flex;
+                align-items: center;
             }
             
             /* Collapsible header states */
             .app-header.collapsed {
-                padding: 0.5rem 1rem;
+                padding: 0.25rem 1rem;
+                height: 45px;
             }
             
             .app-header.minimal {
                 padding: 0.25rem 1rem;
+                height: 40px;
             }
             
             .app-logo {
@@ -639,21 +645,25 @@ const char config_html[] PROGMEM = R"rawliteral(
                 width: 100%;
                 margin: 0;
                 position: sticky;
-                top: 80px;
+                top: 60px;
                 display: flex;
+                flex-direction: row !important;
                 overflow-x: auto;
                 overflow-y: hidden;
-                padding: 1rem;
+                padding: 0.75rem 1rem;
                 max-width: 100vw;
                 box-sizing: border-box;
                 background: rgba(255,255,255,0.98);
                 backdrop-filter: blur(30px);
                 border-bottom: 1px solid rgba(102, 126, 234, 0.1);
-                gap: 0.5rem;
+                gap: 0.75rem;
                 -webkit-overflow-scrolling: touch;
                 scroll-snap-type: x mandatory;
                 scrollbar-width: none;
                 -ms-overflow-style: none;
+                z-index: 99;
+                border-radius: 0;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             }
             
             .sidebar::-webkit-scrollbar {
@@ -662,16 +672,18 @@ const char config_html[] PROGMEM = R"rawliteral(
             
             /* Navigation Pills */
             .nav-item {
-                min-width: 120px;
-                max-width: 140px;
+                min-width: 100px;
+                max-width: 120px;
+                display: flex;
                 justify-content: center;
-                padding: 1rem 1.5rem;
+                align-items: center;
+                padding: 0.75rem 1rem;
                 margin: 0;
-                border-radius: 25px;
+                border-radius: 20px;
                 text-align: center;
                 flex-shrink: 0;
                 font-weight: 600;
-                font-size: 0.9rem;
+                font-size: 0.85rem;
                 background: rgba(102, 126, 234, 0.08);
                 color: #667eea;
                 border: 2px solid transparent;
@@ -679,6 +691,8 @@ const char config_html[] PROGMEM = R"rawliteral(
                 scroll-snap-align: start;
                 white-space: nowrap;
                 box-shadow: 0 2px 8px rgba(102, 126, 234, 0.1);
+                height: 44px;
+                cursor: pointer;
             }
             
             .nav-item:hover:not(.active) {
@@ -700,6 +714,9 @@ const char config_html[] PROGMEM = R"rawliteral(
                 background: rgba(220, 53, 69, 0.1) !important;
                 color: #dc3545 !important;
                 border-color: rgba(220, 53, 69, 0.2) !important;
+                min-width: 80px !important;
+                max-width: 100px !important;
+                font-size: 0.8rem !important;
             }
             
             .exit-nav:hover:not(.active) {
@@ -718,6 +735,9 @@ const char config_html[] PROGMEM = R"rawliteral(
                 max-width: 100%;
                 overflow-x: hidden;
                 box-sizing: border-box;
+                margin-top: 0;
+                position: relative;
+                z-index: 1;
             }
             
             .card {
@@ -830,7 +850,10 @@ const char config_html[] PROGMEM = R"rawliteral(
                 
                 // Load data for the section
                 if (sectionName === 'config') {
-                    loadSystemStatus(); // Load config values
+                    // Only load the config-specific data (pulse time, auto lock)
+                    loadSystemStatus().catch(error => {
+                        console.log('Config section: some status elements may not be available');
+                    });
                 } else if (sectionName === 'bluetooth') {
                     loadBluetoothStatus();
                     updateDevices();
@@ -838,7 +861,10 @@ const char config_html[] PROGMEM = R"rawliteral(
                     loadPlottingInterface(); // Load plotting interface when showing bluetooth
                 } else if (sectionName === 'rfid') {
                     loadRfidKeys();
-                    loadSystemStatus(); // Load to get RFID status and stored keys
+                    // Load RFID status and stored keys
+                    loadSystemStatus().catch(error => {
+                        console.log('RFID section: some status elements may not be available');
+                    });
                 } else if (sectionName === 'security') {
                     loadSystemConfig();
                     loadWifiPassword();
@@ -909,19 +935,33 @@ const char config_html[] PROGMEM = R"rawliteral(
         async function loadSystemStatus() {
             try {
                 const response = await fetch('/status');
-                if (response.ok) {
-                    const data = await response.json();
-                    document.getElementById('rfidStatus').textContent = data.rfid ? 'Authenticated' : 'Not Authenticated';
-                    document.getElementById('bluetoothStatus').textContent = data.bluetooth ? 'Authenticated' : 'Not Authenticated';
-                    document.getElementById('storedKeys').textContent = data.keys || '0';
-                    
-                    // Update form values - convert from milliseconds to seconds
-                    if (data.starterPulse) {
-                        document.getElementById('pulseTime').value = (data.starterPulse / 1000).toFixed(1);
-                    }
-                    if (data.autoLockTimeout) {
-                        document.getElementById('autoLockTime').value = Math.round(data.autoLockTimeout / 1000);
-                    }
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // Update RFID status (only if element exists - in RFID section)
+                const rfidStatusElement = document.getElementById('rfidStatus');
+                if (rfidStatusElement) {
+                    rfidStatusElement.textContent = data.rfid ? 'Authenticated' : 'Not Authenticated';
+                }
+                
+                // Update stored keys (only if element exists - in RFID section)
+                const storedKeysElement = document.getElementById('storedKeys');
+                if (storedKeysElement) {
+                    storedKeysElement.textContent = data.keys || '0';
+                }
+                
+                // Update form values - convert from milliseconds to seconds
+                const pulseTimeElement = document.getElementById('pulseTime');
+                if (pulseTimeElement && data.starterPulse) {
+                    pulseTimeElement.value = (data.starterPulse / 1000).toFixed(1);
+                }
+                
+                const autoLockTimeElement = document.getElementById('autoLockTime');
+                if (autoLockTimeElement && data.autoLockTimeout) {
+                    autoLockTimeElement.value = Math.round(data.autoLockTimeout / 1000);
                 }
                 
                 // Load system configuration status
@@ -929,7 +969,10 @@ const char config_html[] PROGMEM = R"rawliteral(
                 
             } catch (error) {
                 console.error('Error loading system status:', error);
-                showNotification('Error loading system status', 'error');
+                // Only show notification for actual network/server errors
+                if (error.message && !error.message.includes('element')) {
+                    showNotification('Error loading system status', 'error');
+                }
             }
         }
 
@@ -1863,21 +1906,26 @@ const char config_html[] PROGMEM = R"rawliteral(
         function handleHeaderCollapse() {
             if (window.innerWidth <= 768) {
                 const header = document.querySelector('.app-header');
+                const sidebar = document.querySelector('.sidebar');
                 const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
                 
-                if (scrollTop > 50 && scrollTop > lastScrollTop) {
+                if (scrollTop > 30 && scrollTop > lastScrollTop) {
                     // Scrolling down
-                    if (scrollTop > 150) {
+                    if (scrollTop > 100) {
                         header.className = 'app-header minimal';
+                        if (sidebar) sidebar.style.top = '40px';
                     } else {
                         header.className = 'app-header collapsed';
+                        if (sidebar) sidebar.style.top = '45px';
                     }
-                } else if (scrollTop < lastScrollTop - 30) {
+                } else if (scrollTop < lastScrollTop - 20) {
                     // Scrolling up
-                    if (scrollTop < 50) {
+                    if (scrollTop < 30) {
                         header.className = 'app-header';
+                        if (sidebar) sidebar.style.top = '60px';
                     } else {
                         header.className = 'app-header collapsed';
+                        if (sidebar) sidebar.style.top = '45px';
                     }
                 }
                 
@@ -1895,7 +1943,10 @@ const char config_html[] PROGMEM = R"rawliteral(
             // Add click to expand header
             document.querySelector('.app-header')?.addEventListener('click', () => {
                 if (window.innerWidth <= 768) {
-                    document.querySelector('.app-header').className = 'app-header';
+                    const header = document.querySelector('.app-header');
+                    const sidebar = document.querySelector('.sidebar');
+                    header.className = 'app-header';
+                    if (sidebar) sidebar.style.top = '60px';
                 }
             });
             

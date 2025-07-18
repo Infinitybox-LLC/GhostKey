@@ -578,6 +578,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
             
             .main-container {
+                display: flex;
                 flex-direction: column;
                 overflow-x: hidden;
                 width: 100%;
@@ -645,10 +646,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             .sidebar {
                 width: 100%;
                 margin: 0;
-                position: fixed;
-                top: 60px;
-                left: 0;
-                right: 0;
+                position: relative;
                 display: flex;
                 flex-direction: row !important;
                 overflow-x: auto;
@@ -664,9 +662,10 @@ const char config_html[] PROGMEM = R"rawliteral(
                 scroll-snap-type: x mandatory;
                 scrollbar-width: none;
                 -ms-overflow-style: none;
-                z-index: 999;
+                z-index: 100;
                 border-radius: 0;
                 box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                order: 1;
             }
             
             .sidebar::-webkit-scrollbar {
@@ -739,9 +738,10 @@ const char config_html[] PROGMEM = R"rawliteral(
                 max-width: 100%;
                 overflow-x: hidden;
                 box-sizing: border-box;
-                margin-top: 70px;
+                margin-top: 0;
                 position: relative;
                 z-index: 10;
+                order: 2;
             }
             
             .card {
@@ -806,16 +806,26 @@ const char config_html[] PROGMEM = R"rawliteral(
         }
         
         @media (min-width: 769px) {
+            .main-container {
+                flex-direction: row !important;
+            }
+            
             .sidebar {
                 position: sticky !important;
                 top: 100px !important;
-                left: auto !important;
-                right: auto !important;
-                z-index: auto !important;
+                width: 280px !important;
+                flex-direction: column !important;
+                order: 0 !important;
+                margin: 2rem 0 2rem 2rem !important;
+                border-radius: 20px !important;
+                padding: 2rem 0 !important;
+                overflow-x: visible !important;
             }
             
             .content {
-                margin-top: 0 !important;
+                order: 0 !important;
+                flex: 1 !important;
+                padding: 2rem !important;
             }
         }
         
@@ -1921,31 +1931,26 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
         }
 
-        // Mobile header collapse functionality
+        // Mobile header collapse functionality (simplified)
         let lastScrollTop = 0;
         function handleHeaderCollapse() {
             if (window.innerWidth <= 768) {
                 const header = document.querySelector('.app-header');
-                const sidebar = document.querySelector('.sidebar');
                 const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
                 
                 if (scrollTop > 30 && scrollTop > lastScrollTop) {
                     // Scrolling down
                     if (scrollTop > 100) {
                         header.className = 'app-header minimal';
-                        if (sidebar) sidebar.style.top = '40px';
                     } else {
                         header.className = 'app-header collapsed';
-                        if (sidebar) sidebar.style.top = '45px';
                     }
                 } else if (scrollTop < lastScrollTop - 20) {
                     // Scrolling up
                     if (scrollTop < 30) {
                         header.className = 'app-header';
-                        if (sidebar) sidebar.style.top = '60px';
                     } else {
                         header.className = 'app-header collapsed';
-                        if (sidebar) sidebar.style.top = '45px';
                     }
                 }
                 
@@ -1964,9 +1969,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             document.querySelector('.app-header')?.addEventListener('click', () => {
                 if (window.innerWidth <= 768) {
                     const header = document.querySelector('.app-header');
-                    const sidebar = document.querySelector('.sidebar');
                     header.className = 'app-header';
-                    if (sidebar) sidebar.style.top = '60px';
                 }
             });
             

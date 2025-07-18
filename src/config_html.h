@@ -714,6 +714,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 } else if (sectionName === 'bluetooth') {
                     loadBluetoothStatus();
                     updateDevices();
+                    updateCalibrationStatus();
                 } else if (sectionName === 'confidence') {
                     loadConfidenceMonitoring();
                 } else if (sectionName === 'plot') {
@@ -1361,6 +1362,112 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
         }
 
+        // Calibration Functions
+        let calibrationInterval = null;
+
+        async function startCalibration() {
+            try {
+                const response = await fetchWithTimeout('/calibration_start', { method: 'POST' });
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(errorText);
+                }
+                
+                showNotification('Calibration started - keep your phone in position for 30 seconds');
+                
+                // Update UI
+                document.getElementById('startCalibrationBtn').disabled = true;
+                document.getElementById('stopCalibrationBtn').disabled = false;
+                
+                // Start status polling
+                calibrationInterval = setInterval(updateCalibrationStatus, 1000);
+                
+            } catch (error) {
+                showNotification('Error starting calibration: ' + error.message, 'error');
+            }
+        }
+
+        async function stopCalibration() {
+            try {
+                const response = await fetchWithTimeout('/calibration_stop', { method: 'POST' });
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(errorText);
+                }
+                
+                showNotification('Calibration stopped and offset calculated');
+                stopCalibrationPolling();
+                
+            } catch (error) {
+                showNotification('Error stopping calibration: ' + error.message, 'error');
+            }
+        }
+
+        async function resetCalibration() {
+            if (!confirm('Are you sure you want to reset calibration to default?')) {
+                return;
+            }
+            
+            try {
+                const response = await fetchWithTimeout('/calibration_reset', { method: 'POST' });
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(errorText);
+                }
+                
+                showNotification('Calibration reset to default');
+                updateCalibrationStatus();
+                
+            } catch (error) {
+                showNotification('Error resetting calibration: ' + error.message, 'error');
+            }
+        }
+
+        async function updateCalibrationStatus() {
+            try {
+                const response = await fetchWithTimeout('/calibration_status');
+                if (response.ok) {
+                    const data = await response.json();
+                    
+                    // Update status display
+                    document.getElementById('calibrationStatus').textContent = 
+                        data.isCalibrating ? 'Active' : 'Inactive';
+                    document.getElementById('calibrationOffset').textContent = 
+                        data.offset.toFixed(1);
+                    document.getElementById('calibrationSamples').textContent = 
+                        data.sampleCount;
+                    
+                    if (data.isCalibrating) {
+                        const timeRemaining = Math.ceil(data.timeRemaining / 1000);
+                        document.getElementById('calibrationTimer').textContent = 
+                            timeRemaining + 's';
+                        
+                        // Auto-stop when complete
+                        if (data.timeRemaining <= 0) {
+                            stopCalibrationPolling();
+                            showNotification('Calibration completed automatically');
+                        }
+                    } else {
+                        document.getElementById('calibrationTimer').textContent = '--';
+                        stopCalibrationPolling();
+                    }
+                }
+            } catch (error) {
+                console.error('Error updating calibration status:', error);
+            }
+        }
+
+        function stopCalibrationPolling() {
+            if (calibrationInterval) {
+                clearInterval(calibrationInterval);
+                calibrationInterval = null;
+            }
+            
+            // Reset UI
+            document.getElementById('startCalibrationBtn').disabled = false;
+            document.getElementById('stopCalibrationBtn').disabled = true;
+        }
+
         // Update confidence monitoring UI
         function updateConfidenceUI(data) {
             document.getElementById('totalConfidence').textContent = data.confidence + '%';
@@ -1368,6 +1475,21 @@ const char config_html[] PROGMEM = R"rawliteral(
             document.getElementById('trendScore').textContent = data.trendScore.toFixed(1) + '/25';
             document.getElementById('strengthScore').textContent = data.strengthScore.toFixed(1) + '/40';
             document.getElementById('signalMean').textContent = data.mean.toFixed(1) + ' dBm';
+            
+            // Enhanced metrics
+            document.getElementById('sampleQuality').textContent = (data.sampleQuality || 0).toFixed(1) + '%';
+            document.getElementById('trendSlope').textContent = (data.averagedSlope || 0).toFixed(4);
+            
+            // Signal status
+            let signalText = 'Active';
+            if (data.signalLost) {
+                signalText = '🔴 Signal Lost';
+            } else if (data.sampleQuality < 50) {
+                signalText = '🟡 Weak Signal';
+            } else {
+                signalText = '🟢 Strong Signal';
+            }
+            document.getElementById('signalStatus').textContent = signalText;
 
             // Movement status
             let movementText = 'Stable';
@@ -1637,7 +1759,16 @@ const char config_html[] PROGMEM = R"rawliteral(
                 }
             }, 1000);
             
-            // Refresh data every 15 seconds when authenticated
+            // Refresh data every 2 seconds for confidence monitoring, 15 seconds for others
+            setInterval(() => {
+                if (isAuthenticated) {
+                    const activeSection = document.querySelector('.content-section.active');
+                    if (activeSection && activeSection.id === 'confidenceSection') {
+                        loadConfidenceMonitoring(); // Fast refresh for confidence monitoring
+                    }
+                }
+            }, 2000);
+            
             setInterval(() => {
                 if (isAuthenticated) {
                     const activeSection = document.querySelector('.content-section.active');
@@ -1646,8 +1777,6 @@ const char config_html[] PROGMEM = R"rawliteral(
                     } else if (activeSection && activeSection.id === 'bluetoothSection') {
                         loadBluetoothStatus();
                         updateDevices();
-                    } else if (activeSection && activeSection.id === 'confidenceSection') {
-                        loadConfidenceMonitoring();
                     } else if (activeSection && activeSection.id === 'rfidSection') {
                         loadRfidKeys();
                     } else if (activeSection && activeSection.id === 'securitySection') {
@@ -1775,6 +1904,51 @@ const char config_html[] PROGMEM = R"rawliteral(
                         </div>
                     </div>
                     
+                    <div class="card">
+                        <h2 class="card-title">🎯 Proximity Calibration</h2>
+                        <div style="margin-bottom: 1.5rem;">
+                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+                                Calibrate the system for your specific installation. Position your phone where you want authentication to work, then run calibration.
+                            </p>
+                            <div style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
+                                <button onclick="startCalibration()" class="btn btn-primary" id="startCalibrationBtn">
+                                    🎯 Start Calibration
+                                </button>
+                                <button onclick="stopCalibration()" class="btn btn-secondary" id="stopCalibrationBtn" disabled>
+                                    ⏹️ Stop Early
+                                </button>
+                                <button onclick="resetCalibration()" class="btn btn-secondary">
+                                    🔄 Reset to Default
+                                </button>
+                            </div>
+                            <div style="background: #f8f9ff; padding: 1rem; border-radius: 12px;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                                    <span>Calibration Status:</span>
+                                    <span id="calibrationStatus">Inactive</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                                    <span>Current Offset:</span>
+                                    <span id="calibrationOffset">0.0</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                                    <span>Time Remaining:</span>
+                                    <span id="calibrationTimer">--</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span>Samples Collected:</span>
+                                    <span id="calibrationSamples">0</span>
+                                </div>
+                            </div>
+                            <p style="font-size: 0.8rem; color: #666; margin-top: 1rem;">
+                                📍 <strong>Instructions:</strong><br>
+                                1. Position your phone where you want authentication to work<br>
+                                2. Click "Start Calibration" and keep your phone in position<br>
+                                3. Wait 30 seconds for data collection to complete<br>
+                                4. System will automatically calculate the optimal offset
+                            </p>
+                        </div>
+                    </div>
+                    
                     <div id="devicesList">
                         <div class="card">Loading devices...</div>
                     </div>
@@ -1806,12 +1980,24 @@ const char config_html[] PROGMEM = R"rawliteral(
                                     <div class="status-value" id="strengthScore">0/40</div>
                                 </div>
                                 <div class="status-item">
+                                    <div class="status-label">Sample Quality</div>
+                                    <div class="status-value" id="sampleQuality">0%</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-label">Signal Status</div>
+                                    <div class="status-value" id="signalStatus">Unknown</div>
+                                </div>
+                                <div class="status-item">
                                     <div class="status-label">Movement Status</div>
                                     <div class="status-value" id="movementStatus">Unknown</div>
                                 </div>
                                 <div class="status-item">
                                     <div class="status-label">Signal Mean</div>
                                     <div class="status-value" id="signalMean">-99 dBm</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-label">Trend Slope</div>
+                                    <div class="status-value" id="trendSlope">0.000</div>
                                 </div>
                             </div>
                             <div style="margin-top: 1rem; padding: 1rem; background: #f8f9ff; border-radius: 12px;">

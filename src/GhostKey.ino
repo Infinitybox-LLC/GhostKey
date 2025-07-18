@@ -145,7 +145,7 @@ const char jdi_logo_svg[] PROGMEM = R"(<?xml version="1.0" encoding="UTF-8"?>
 #define DEVICE_PRIORITY_KEY "dev_priority_"
 #define MAX_RSSI -30
 #define MIN_RSSI -100
-#define RSSI_UPDATE_INTERVAL 5000
+#define RSSI_UPDATE_INTERVAL 1000
 #define CONNECTION_TIMEOUT 30000
 #define MIN_CONN_INTERVAL 0x10
 #define MAX_CONN_INTERVAL 0x20
@@ -161,13 +161,13 @@ const char jdi_logo_svg[] PROGMEM = R"(<?xml version="1.0" encoding="UTF-8"?>
 #define RSSI_SHORT_TERM_SIZE 10       // 1 second of readings (100ms intervals)
 #define RSSI_MEDIUM_TERM_SIZE 50      // 5 seconds of readings  
 #define RSSI_LONG_TERM_SIZE 300       // 30 seconds of readings
-#define CONFIDENCE_AUTH_THRESHOLD 65.0f    // Minimum confidence % for authentication
-#define CONFIDENCE_DEAUTH_THRESHOLD 45.0f  // Confidence % to lose authentication
+#define CONFIDENCE_AUTH_THRESHOLD 65.0f    // Minimum confidence % for authentication (easier to authenticate)
+#define CONFIDENCE_DEAUTH_THRESHOLD 50.0f  // Confidence % to lose authentication (faster to deauthenticate)
 #define STABILITY_WEIGHT 35.0f        // Max points for stability (35%)
 #define TREND_WEIGHT 25.0f           // Max points for trend analysis (25%)
 #define STRENGTH_WEIGHT 40.0f        // Max points for signal strength (40%)
-#define MIN_READINGS_FOR_ANALYSIS 5  // Minimum readings before analysis
-#define TREND_WINDOW_MS 3000         // 3 seconds for trend analysis
+#define MIN_READINGS_FOR_ANALYSIS 3  // Minimum readings before analysis (faster startup)
+#define TREND_WINDOW_MS 8000         // 8 seconds for trend analysis (increased from 3s)
 #define STABILITY_THRESHOLD 12.0f    // Max std deviation for "stable" (increased tolerance)
 #define STRONG_SIGNAL_THRESHOLD -60  // RSSI above this = strong signal
 #define WEAK_SIGNAL_THRESHOLD -80    // RSSI below this = weak signal
@@ -176,9 +176,30 @@ const char jdi_logo_svg[] PROGMEM = R"(<?xml version="1.0" encoding="UTF-8"?>
 
 // Enhanced confidence calculation constants
 #define STATIONARY_BONUS_POINTS 10.0f     // Bonus for stationary strong signal
-#define CONFIDENCE_MOMENTUM_RATE 0.3f     // 30% change rate for smoothing
+#define CONFIDENCE_MOMENTUM_RATE 0.25f    // 25% change rate for faster response
+#define CONFIDENCE_MOMENTUM_RATE_FAST 0.40f    // Fast momentum for rapid changes
+#define CONFIDENCE_CHANGE_THRESHOLD 20.0f      // Threshold for switching to fast momentum
 #define STATIONARY_MIN_SAMPLES 8          // Minimum samples for stationary detection
 #define STATIONARY_MAX_STDDEV 6.0f        // Max std dev for "stationary" signal
+
+// Outlier rejection and signal quality constants
+#define OUTLIER_REJECTION_STDDEV_MULT 2.5f    // Multiplier for outlier rejection
+#define MIN_SAMPLE_QUALITY_WEIGHT 0.3f        // Minimum weight for sample quality
+#define OPTIMAL_SAMPLE_COUNT 10               // Optimal number of samples for full weight
+#define MEDIAN_FILTER_SIZE 5                  // Size of median filter for outlier rejection
+
+// No-signal handling constants
+#define NO_SIGNAL_DECAY_RATE 0.9f            // Decay rate when no signal (per second)
+#define NO_SIGNAL_TIMEOUT_MS 3000            // Time before considering signal lost
+#define SIGNAL_LOSS_FAST_DECAY_RATE 0.7f     // Faster decay for signal loss
+
+// Sigmoid function constants for smooth signal strength scoring
+#define SIGMOID_MIDPOINT -60.0f              // RSSI midpoint for sigmoid function
+#define SIGMOID_STEEPNESS 0.3f               // Steepness of sigmoid curve
+
+// Slope averaging constants for trend analysis
+#define SLOPE_HISTORY_SIZE 3                 // Number of slope measurements to average
+#define SLOPE_VARIANCE_THRESHOLD 0.001f      // Threshold for slope stability
 
 // ========================================
 // CURRENT MONITORING (Future Use)
@@ -249,15 +270,31 @@ struct RSSIAnalysis {
     RSSIStatistics longTermStats;
     
     // Confidence scoring components
-    float stabilityScore = 0.0f;      // 0-40 points
-    float trendScore = 0.0f;          // 0-30 points  
-    float strengthScore = 0.0f;       // 0-30 points
+    float stabilityScore = 0.0f;      // 0-35 points
+    float trendScore = 0.0f;          // 0-25 points  
+    float strengthScore = 0.0f;       // 0-40 points
     float totalConfidence = 0.0f;     // 0-100 points
     
     // Trend analysis
     float trendDirection = 0.0f;      // Positive = improving, negative = degrading
     bool isApproaching = false;       // Detected approach pattern
     bool isStable = false;            // Signal is stable (parked)
+    
+    // Enhanced trend analysis with slope averaging
+    float slopeHistory[SLOPE_HISTORY_SIZE] = {0};
+    int slopeHistoryIndex = 0;
+    float averagedSlope = 0.0f;
+    
+    // Signal quality and outlier rejection
+    unsigned long lastSignalTime = 0;   // Time of last valid signal
+    bool signalLost = false;            // True if signal has been lost
+    float sampleQualityWeight = 1.0f;   // Weight based on sample quality
+    
+    // Adaptive calibration tracking
+    float historicalSuccessRate = 0.0f;  // Track authentication success rate
+    int authAttempts = 0;               // Total authentication attempts
+    int authSuccesses = 0;              // Successful authentications
+    bool needsCalibrationAdjustment = false;  // Flag for auto-calibration
     
     // Timing
     unsigned long lastUpdate = 0;
@@ -440,6 +477,16 @@ RSSIAnalysis rssiAnalysis;
 
 // Confidence momentum tracking for smoothing
 static float lastConfidence = 0.0f;
+
+// Calibration system variables
+bool isCalibrating = false;
+unsigned long calibrationStartTime = 0;
+unsigned long calibrationDuration = 30000; // 30 seconds
+float calibrationOffset = 0.0f; // Offset to add to confidence
+#define MAX_CALIBRATION_SAMPLES 300 // 30 seconds at ~100ms intervals
+float calibrationRSSIReadings[MAX_CALIBRATION_SAMPLES];
+float calibrationConfidenceReadings[MAX_CALIBRATION_SAMPLES];
+int calibrationSampleCount = 0;
 
 // ========================================
 // BLUETOOTH FUNCTIONS
@@ -1580,6 +1627,7 @@ void setup() {
     bluetoothEnabled = preferences.getBool("bt_enabled", true);
     ghostKeyEnabled = preferences.getBool("ghost_key_enabled", true);
     ghostPowerEnabled = preferences.getBool("ghost_power_enabled", true);
+    calibrationOffset = preferences.getFloat("calibration_offset", 0.0f);
     
     // Legacy RSSI calibration removed - using confidence-based authentication only
     
@@ -2867,6 +2915,53 @@ void setupWebServer() {
         server.send(200, "application/json", json);
     });
 
+    // Calibration system endpoints
+    server.on("/calibration_start", HTTP_POST, [](){
+        Serial.println("Calibration start request received");
+        if (!bluetoothEnabled || !bluetoothInitialized) {
+            server.send(400, "text/plain", "Bluetooth is disabled");
+            return;
+        }
+        if (isCalibrating) {
+            server.send(400, "text/plain", "Calibration already in progress");
+            return;
+        }
+        startCalibration();
+        server.send(200, "text/plain", "Calibration started - position your phone and wait 30 seconds");
+    });
+    
+    server.on("/calibration_stop", HTTP_POST, [](){
+        Serial.println("Calibration stop request received");
+        if (!isCalibrating) {
+            server.send(400, "text/plain", "No calibration in progress");
+            return;
+        }
+        stopCalibration();
+        server.send(200, "text/plain", "Calibration stopped and offset calculated");
+    });
+    
+    server.on("/calibration_reset", HTTP_POST, [](){
+        Serial.println("Calibration reset request received");
+        resetCalibration();
+        server.send(200, "text/plain", "Calibration reset to default");
+    });
+    
+    server.on("/calibration_status", HTTP_GET, [](){
+        String json = "{";
+        json += "\"isCalibrating\":" + String(isCalibrating ? "true" : "false") + ",";
+        json += "\"offset\":" + String(calibrationOffset, 1) + ",";
+        json += "\"sampleCount\":" + String(calibrationSampleCount) + ",";
+        if (isCalibrating) {
+            unsigned long elapsed = millis() - calibrationStartTime;
+            unsigned long remaining = (elapsed < calibrationDuration) ? (calibrationDuration - elapsed) : 0;
+            json += "\"timeRemaining\":" + String(remaining);
+        } else {
+            json += "\"timeRemaining\":0";
+        }
+        json += "}";
+        server.send(200, "application/json", json);
+    });
+
     // Start server
     server.begin();
     Serial.println("Web server started successfully");
@@ -3159,6 +3254,69 @@ void performFactoryReset() {
 // STATISTICAL RSSI ANALYSIS FUNCTIONS  
 // ========================================
 
+// Median filter for outlier rejection
+int8_t medianFilter(int8_t newValue) {
+    static int8_t medianBuffer[MEDIAN_FILTER_SIZE] = {-99, -99, -99, -99, -99};
+    static int bufferIndex = 0;
+    
+    // Add new value to buffer
+    medianBuffer[bufferIndex] = newValue;
+    bufferIndex = (bufferIndex + 1) % MEDIAN_FILTER_SIZE;
+    
+    // Sort buffer for median calculation
+    int8_t sortedBuffer[MEDIAN_FILTER_SIZE];
+    memcpy(sortedBuffer, medianBuffer, sizeof(medianBuffer));
+    
+    // Simple bubble sort for small array
+    for (int i = 0; i < MEDIAN_FILTER_SIZE - 1; i++) {
+        for (int j = 0; j < MEDIAN_FILTER_SIZE - i - 1; j++) {
+            if (sortedBuffer[j] > sortedBuffer[j + 1]) {
+                int8_t temp = sortedBuffer[j];
+                sortedBuffer[j] = sortedBuffer[j + 1];
+                sortedBuffer[j + 1] = temp;
+            }
+        }
+    }
+    
+    // Return median value
+    return sortedBuffer[MEDIAN_FILTER_SIZE / 2];
+}
+
+// Outlier rejection based on statistical analysis
+bool isOutlier(int8_t rssi, const RSSIStatistics& stats) {
+    if (stats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return false; // Not enough data to determine outliers
+    }
+    
+    float deviation = abs(rssi - stats.mean);
+    float threshold = OUTLIER_REJECTION_STDDEV_MULT * stats.standardDeviation;
+    
+    return deviation > threshold;
+}
+
+// Calculate sample quality weight based on number of valid samples
+float calculateSampleQualityWeight(int validSamples) {
+    if (validSamples <= 0) {
+        return 0.0f;
+    }
+    
+    if (validSamples >= OPTIMAL_SAMPLE_COUNT) {
+        return 1.0f;
+    }
+    
+    // Linear interpolation between minimum weight and full weight
+    float ratio = (float)validSamples / OPTIMAL_SAMPLE_COUNT;
+    return MIN_SAMPLE_QUALITY_WEIGHT + (1.0f - MIN_SAMPLE_QUALITY_WEIGHT) * ratio;
+}
+
+// Sigmoid function for smooth signal strength calculation
+float sigmoidSignalStrength(float rssi) {
+    // Sigmoid function: f(x) = 1 / (1 + e^(-k(x-x0)))
+    // Where k = steepness, x0 = midpoint
+    float exponent = -SIGMOID_STEEPNESS * (rssi - SIGMOID_MIDPOINT);
+    return 1.0f / (1.0f + exp(exponent));
+}
+
 // Add RSSI reading to analysis buffers
 void addRSSIReading(int8_t rssi, esp_bd_addr_t address) {
     if (!isRSSIValid(rssi)) {
@@ -3178,9 +3336,26 @@ void addRSSIReading(int8_t rssi, esp_bd_addr_t address) {
         rssiAnalysis.hasDevice = true;
     }
     
-    // Create new reading
+    // Apply median filter for outlier rejection
+    int8_t filteredRSSI = medianFilter(rssi);
+    
+    // Check for outliers against current statistics (for logging purposes)
+    bool isRSSIOutlier = isOutlier(filteredRSSI, rssiAnalysis.shortTermStats);
+    if (isRSSIOutlier && rssiAnalysis.shortTermStats.validSamples >= MIN_READINGS_FOR_ANALYSIS) {
+        static unsigned long lastOutlierLog = 0;
+        if (now - lastOutlierLog > 5000) { // Log outliers every 5 seconds max
+            Serial.printf("BLE: Outlier detected - Raw: %d dBm, Filtered: %d dBm\n", rssi, filteredRSSI);
+            lastOutlierLog = now;
+        }
+    }
+    
+    // Update signal tracking
+    rssiAnalysis.lastSignalTime = now;
+    rssiAnalysis.signalLost = false;
+    
+    // Create new reading with filtered value
     RSSIReading reading;
-    reading.rssi = rssi;
+    reading.rssi = filteredRSSI;
     reading.timestamp = now;
     reading.valid = true;
     
@@ -3199,7 +3374,7 @@ void addRSSIReading(int8_t rssi, esp_bd_addr_t address) {
     rssiAnalysis.lastUpdate = now;
     
     // Trigger analysis if enough time has passed
-    if (now - rssiAnalysis.lastAnalysis >= 500) { // Analyze every 500ms
+    if (now - rssiAnalysis.lastAnalysis >= 250) { // Analyze every 250ms (4x faster response)
         performRSSIAnalysis();
         rssiAnalysis.lastAnalysis = now;
     }
@@ -3269,7 +3444,7 @@ bool isStationaryStrongSignal(const RSSIStatistics& stats) {
             stats.validSamples >= STATIONARY_MIN_SAMPLES);
 }
 
-// Calculate stability score (0-35 points) with adaptive threshold
+// Calculate stability score (0-35 points) with distance-dependent scaling
 float calculateStabilityScore() {
     // Use short-term statistics for stability
     if (rssiAnalysis.shortTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
@@ -3279,27 +3454,58 @@ float calculateStabilityScore() {
     float meanRSSI = rssiAnalysis.shortTermStats.mean;
     float stdDev = rssiAnalysis.shortTermStats.standardDeviation;
     
-    // Get adaptive threshold based on signal strength
+    // Get adaptive threshold based on signal strength (keep existing logic for stability detection)
     float adaptiveThreshold = getAdaptiveStabilityThreshold(meanRSSI);
     
-    // Calculate stability based on adaptive standard deviation
-    float score = 0.0f;
+    // Calculate base stability score using existing logic
+    float baseScore = 0.0f;
     
     if (stdDev <= adaptiveThreshold) {
-        // Signal is stable - full points
-        score = STABILITY_WEIGHT;
+        // Signal is stable - full points before distance scaling
+        baseScore = STABILITY_WEIGHT;
     } else {
         // Signal is unstable - reduce points proportionally
         float stabilityRatio = adaptiveThreshold / stdDev;
-        score = STABILITY_WEIGHT * stabilityRatio;
+        baseScore = STABILITY_WEIGHT * stabilityRatio;
     }
     
-    // Ensure score doesn't go negative
-    if (score < 0.0f) {
-        score = 0.0f;
+    // Ensure base score doesn't go negative
+    if (baseScore < 0.0f) {
+        baseScore = 0.0f;
     }
     
-    return score;
+    // Apply distance-dependent scaling based on RSSI (eased thresholds)
+    float distanceMultiplier = 1.0f;
+    
+    if (meanRSSI >= -60) {
+        // Very Close: Full stability points
+        distanceMultiplier = 1.0f;
+    } else if (meanRSSI >= -70) {
+        // Close: 85% of stability points (was 70%)
+        distanceMultiplier = 0.85f;
+    } else if (meanRSSI >= -80) {
+        // Medium: 60% of stability points (was 40%)
+        distanceMultiplier = 0.6f;
+    } else if (meanRSSI >= -90) {
+        // Far: 25% of stability points (was 15%)
+        distanceMultiplier = 0.25f;
+    } else {
+        // Very Far: 5% of stability points (was 0%)
+        distanceMultiplier = 0.05f;
+    }
+    
+    // Apply sample quality weighting
+    float qualityWeight = calculateSampleQualityWeight(rssiAnalysis.shortTermStats.validSamples);
+    
+    // Small base bonus for any level of stability (2 points), regardless of distance
+    float finalScore = (baseScore * distanceMultiplier * qualityWeight) + (rssiAnalysis.isStable ? 2.0f : 0.0f);
+    
+    // Ensure final score doesn't exceed maximum
+    if (finalScore > STABILITY_WEIGHT) {
+        finalScore = STABILITY_WEIGHT;
+    }
+    
+    return finalScore;
 }
 
 // Calculate trend score (0-25 points) - Updated to be friendlier to stationary phones
@@ -3335,11 +3541,21 @@ float calculateTrendScore() {
     
     // Linear regression slope calculation
     float slope = (trendSamples * sumXY - sumX * sumY) / (trendSamples * sumXX - sumX * sumX);
-    rssiAnalysis.trendDirection = slope;
     
-    // Positive slope = signal getting stronger (approaching)
-    // Negative slope = signal getting weaker (leaving)
-    rssiAnalysis.isApproaching = (slope > 0.001f); // Small threshold for noise
+    // Add slope to history for averaging (hysteresis filter)
+    rssiAnalysis.slopeHistory[rssiAnalysis.slopeHistoryIndex] = slope;
+    rssiAnalysis.slopeHistoryIndex = (rssiAnalysis.slopeHistoryIndex + 1) % SLOPE_HISTORY_SIZE;
+    
+    // Calculate averaged slope for stability
+    float slopeSum = 0.0f;
+    for (int i = 0; i < SLOPE_HISTORY_SIZE; i++) {
+        slopeSum += rssiAnalysis.slopeHistory[i];
+    }
+    rssiAnalysis.averagedSlope = slopeSum / SLOPE_HISTORY_SIZE;
+    rssiAnalysis.trendDirection = rssiAnalysis.averagedSlope;
+    
+    // Use averaged slope for direction detection (prevents noise reactions)
+    rssiAnalysis.isApproaching = (rssiAnalysis.averagedSlope > 0.005f);
     
     // Score based on trend strength and direction
     float trendStrength = abs(slope) * 1000.0f; // Scale for scoring
@@ -3363,39 +3579,55 @@ float calculateTrendScore() {
     return score;
 }
 
-// Calculate signal strength score (0-40 points) - Enhanced with proximity bonus
+// Calculate signal strength score (0-40 points) - Enhanced with sigmoid function
 float calculateStrengthScore() {
     if (rssiAnalysis.shortTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
         return 0.0f;
     }
     
     float meanRSSI = rssiAnalysis.shortTermStats.mean;
-    float score = 0.0f;
     
-    if (meanRSSI >= VERY_STRONG_SIGNAL_THRESHOLD) {
-        // Very strong signal (very close) = full points + proximity bonus
-        score = STRENGTH_WEIGHT; // Full 40 points
-    } else if (meanRSSI >= STRONG_SIGNAL_THRESHOLD) {
-        // Strong signal = high points
-        float range = VERY_STRONG_SIGNAL_THRESHOLD - STRONG_SIGNAL_THRESHOLD;
-        float position = meanRSSI - STRONG_SIGNAL_THRESHOLD;
-        score = STRENGTH_WEIGHT * (0.7f + 0.3f * (position / range)); // 70-100% of points
-    } else if (meanRSSI >= WEAK_SIGNAL_THRESHOLD) {
-        // Medium signal = proportional points
-        float range = STRONG_SIGNAL_THRESHOLD - WEAK_SIGNAL_THRESHOLD;
-        float position = meanRSSI - WEAK_SIGNAL_THRESHOLD;
-        score = STRENGTH_WEIGHT * (0.3f + 0.4f * (position / range)); // 30-70% of points
-    } else {
-        // Weak signal = minimal points
-        score = STRENGTH_WEIGHT * 0.1f;
-    }
+    // Use sigmoid function for smooth scoring
+    float sigmoidValue = sigmoidSignalStrength(meanRSSI);
     
-    return score;
+    // Apply sample quality weighting
+    float qualityWeight = calculateSampleQualityWeight(rssiAnalysis.shortTermStats.validSamples);
+    rssiAnalysis.sampleQualityWeight = qualityWeight;
+    
+    // Calculate base score using sigmoid (smoother than step function)
+    float baseScore = STRENGTH_WEIGHT * sigmoidValue;
+    
+    // Apply quality weighting
+    float finalScore = baseScore * qualityWeight;
+    
+    return finalScore;
 }
 
 // Perform complete RSSI analysis and confidence calculation
 void performRSSIAnalysis() {
     unsigned long now = millis();
+    
+    // Check for signal loss and handle no-signal decay
+    if (now - rssiAnalysis.lastSignalTime > NO_SIGNAL_TIMEOUT_MS) {
+        if (!rssiAnalysis.signalLost) {
+            rssiAnalysis.signalLost = true;
+            Serial.println("BLE: Signal lost - applying decay");
+        }
+        
+        // Apply no-signal decay to confidence
+        float decayRate = (now - rssiAnalysis.lastSignalTime > NO_SIGNAL_TIMEOUT_MS * 2) ? 
+                         SIGNAL_LOSS_FAST_DECAY_RATE : NO_SIGNAL_DECAY_RATE;
+        
+        rssiAnalysis.totalConfidence *= decayRate;
+        
+        // Ensure confidence doesn't go below 0
+        if (rssiAnalysis.totalConfidence < 0.0f) {
+            rssiAnalysis.totalConfidence = 0.0f;
+        }
+        
+        // Skip normal analysis when signal is lost
+        return;
+    }
     
     // Calculate statistics for each time window
     rssiAnalysis.shortTermStats = calculateBufferStatistics(
@@ -3417,19 +3649,62 @@ void performRSSIAnalysis() {
                           rssiAnalysis.trendScore + 
                           rssiAnalysis.strengthScore;
     
-    // Apply stationary strong signal bonus (Solution 2)
+    // Apply stationary strong signal bonus
     if (isStationaryStrongSignal(rssiAnalysis.shortTermStats)) {
         baseConfidence += STATIONARY_BONUS_POINTS;
     }
     
-    // Apply confidence momentum smoothing (Solution 3)
-    float confidenceDelta = baseConfidence - lastConfidence;
-    rssiAnalysis.totalConfidence = lastConfidence + (confidenceDelta * CONFIDENCE_MOMENTUM_RATE);
+    // Apply calibration offset to base confidence (bias-corrected smoothing)
+    float adjustedBaseConfidence = baseConfidence + calibrationOffset;
+    
+    // Store confidence before smoothing for calibration sampling
+    float confidenceBeforeSmoothing = adjustedBaseConfidence;
+    
+    // Calculate adaptive momentum rate based on context
+    float confidenceDelta = adjustedBaseConfidence - lastConfidence;
+    float adaptiveMomentumRate;
+    
+    // Check if user is clearly moving away (weak signal + dropping confidence)
+    bool clearlyLeaving = (rssiAnalysis.shortTermStats.mean < -80 && confidenceDelta < -5.0f);
+    
+    // Check if user is stationary with good signal (stable for smoothness)
+    bool stationaryGoodSignal = (rssiAnalysis.isStable && rssiAnalysis.shortTermStats.mean > -75);
+    
+    if (clearlyLeaving) {
+        // Fast deauth when clearly moving away
+        adaptiveMomentumRate = CONFIDENCE_MOMENTUM_RATE_FAST;
+    } else if (stationaryGoodSignal) {
+        // Extra smooth when stationary with good signal
+        adaptiveMomentumRate = 0.12f; // Slower than normal for extra smoothness
+    } else if (abs(confidenceDelta) > CONFIDENCE_CHANGE_THRESHOLD) {
+        // Fast response for big changes
+        adaptiveMomentumRate = CONFIDENCE_MOMENTUM_RATE_FAST;
+    } else {
+        // Normal response
+        adaptiveMomentumRate = CONFIDENCE_MOMENTUM_RATE;
+    }
+    
+    // Apply adaptive momentum smoothing
+    rssiAnalysis.totalConfidence = lastConfidence + (confidenceDelta * adaptiveMomentumRate);
+    
+    // Extra smoothing for authenticated users sitting still (reduce peakiness)
+    if (bluetoothAuthenticated && stationaryGoodSignal && abs(confidenceDelta) < 5.0f) {
+        // Apply additional smoothing to reduce small fluctuations
+        float extraSmoothing = 0.8f; // Keep 80% of previous + 20% of new
+        rssiAnalysis.totalConfidence = (lastConfidence * extraSmoothing) + 
+                                     (rssiAnalysis.totalConfidence * (1.0f - extraSmoothing));
+    }
+    
     lastConfidence = rssiAnalysis.totalConfidence;
     
     // Ensure confidence stays within bounds
     if (rssiAnalysis.totalConfidence < 0.0f) rssiAnalysis.totalConfidence = 0.0f;
     if (rssiAnalysis.totalConfidence > 100.0f) rssiAnalysis.totalConfidence = 100.0f;
+    
+    // Collect calibration sample if in calibration mode
+    if (isCalibrating) {
+        addCalibrationSample(rssiAnalysis.shortTermStats.mean, confidenceBeforeSmoothing);
+    }
     
     // Update stability flag using adaptive threshold
     float adaptiveThreshold = getAdaptiveStabilityThreshold(rssiAnalysis.shortTermStats.mean);
@@ -3437,16 +3712,37 @@ void performRSSIAnalysis() {
     
     // Debug logging (reduced frequency)
     static unsigned long lastDebugLog = 0;
-    if (now - lastDebugLog >= 5000) { // Log every 5 seconds
-        Serial.printf("RSSI Analysis: Confidence=%.1f%% (Stability=%.1f, Trend=%.1f, Strength=%.1f) "
-                     "Mean=%.1f, StdDev=%.1f, Trending=%s\n",
+    if (now - lastDebugLog >= 2000) { // Log every 2 seconds for faster feedback
+        // Calculate distance multiplier for logging (same logic as in calculateStabilityScore)
+        float distanceMultiplier = 1.0f;
+        float meanRSSI = rssiAnalysis.shortTermStats.mean;
+        if (meanRSSI >= -60) distanceMultiplier = 1.0f;
+        else if (meanRSSI >= -70) distanceMultiplier = 0.85f;
+        else if (meanRSSI >= -80) distanceMultiplier = 0.6f;
+        else if (meanRSSI >= -90) distanceMultiplier = 0.25f;
+        else distanceMultiplier = 0.05f;
+        
+        // Determine current adaptive mode for logging
+        const char* adaptiveMode = "Normal";
+        bool clearlyLeaving = (rssiAnalysis.shortTermStats.mean < -80 && (rssiAnalysis.totalConfidence - lastConfidence) < -5.0f);
+        bool stationaryGoodSignal = (rssiAnalysis.isStable && rssiAnalysis.shortTermStats.mean > -75);
+        
+        if (clearlyLeaving) adaptiveMode = "FastDeauth";
+        else if (stationaryGoodSignal) adaptiveMode = "ExtraSmooth";
+        else if (abs(rssiAnalysis.totalConfidence - lastConfidence) > CONFIDENCE_CHANGE_THRESHOLD) adaptiveMode = "FastResponse";
+        
+        Serial.printf("RSSI Analysis: Confidence=%.1f%% (Stability=%.1f[x%.1f], Trend=%.1f, Strength=%.1f) "
+                     "Mean=%.1f, StdDev=%.1f, Quality=%.1f%%, Mode=%s, Trending=%s%s\n",
                      rssiAnalysis.totalConfidence,
-                     rssiAnalysis.stabilityScore,
+                     rssiAnalysis.stabilityScore, distanceMultiplier,
                      rssiAnalysis.trendScore, 
                      rssiAnalysis.strengthScore,
                      rssiAnalysis.shortTermStats.mean,
                      rssiAnalysis.shortTermStats.standardDeviation,
-                     rssiAnalysis.isApproaching ? "Approaching" : "Stable/Leaving");
+                     rssiAnalysis.sampleQualityWeight * 100.0f,
+                     adaptiveMode,
+                     rssiAnalysis.isApproaching ? "Approaching" : "Stable/Leaving",
+                     rssiAnalysis.signalLost ? " [SIGNAL LOST]" : "");
         lastDebugLog = now;
     }
 }
@@ -3485,7 +3781,20 @@ void resetRSSIAnalysis() {
         rssiAnalysis.longTerm[i].valid = false;
     }
     
-    Serial.println("RSSI Analysis: Reset for new device or system restart");
+    // Initialize enhanced fields
+    rssiAnalysis.sampleQualityWeight = 1.0f;
+    rssiAnalysis.signalLost = false;
+    rssiAnalysis.lastSignalTime = millis();
+    for (int i = 0; i < SLOPE_HISTORY_SIZE; i++) {
+        rssiAnalysis.slopeHistory[i] = 0.0f;
+    }
+    rssiAnalysis.slopeHistoryIndex = 0;
+    rssiAnalysis.averagedSlope = 0.0f;
+    
+    // Reset global confidence tracking
+    lastConfidence = 0.0f;
+    
+    Serial.println("RSSI Analysis: Enhanced reset for new device or system restart");
 }
 
 // Get RSSI analysis status as JSON for web interface
@@ -3500,10 +3809,99 @@ String getRSSIAnalysisJson() {
     json += "\"mean\":" + String(rssiAnalysis.shortTermStats.mean, 1) + ",";
     json += "\"stdDev\":" + String(rssiAnalysis.shortTermStats.standardDeviation, 1) + ",";
     json += "\"samples\":" + String(rssiAnalysis.shortTermStats.validSamples) + ",";
+    json += "\"sampleQuality\":" + String(rssiAnalysis.sampleQualityWeight * 100.0f, 1) + ",";
+    json += "\"signalLost\":" + String(rssiAnalysis.signalLost ? "true" : "false") + ",";
+    json += "\"averagedSlope\":" + String(rssiAnalysis.averagedSlope, 4) + ",";
     json += "\"authThreshold\":" + String(CONFIDENCE_AUTH_THRESHOLD, 1) + ",";
-    json += "\"deauthThreshold\":" + String(CONFIDENCE_DEAUTH_THRESHOLD, 1);
+    json += "\"deauthThreshold\":" + String(CONFIDENCE_DEAUTH_THRESHOLD, 1) + ",";
+    json += "\"calibrationOffset\":" + String(calibrationOffset, 1) + ",";
+    json += "\"isCalibrating\":" + String(isCalibrating ? "true" : "false");
     json += "}";
     return json;
+}
+
+// ========================================
+// CALIBRATION SYSTEM FUNCTIONS
+// ========================================
+
+// Start calibration mode
+void startCalibration() {
+    if (isCalibrating) return;
+    
+    isCalibrating = true;
+    calibrationStartTime = millis();
+    calibrationSampleCount = 0;
+    
+    Serial.println("=== STARTING CONFIDENCE CALIBRATION ===");
+    Serial.println("Position your phone where you want authentication to work");
+    Serial.println("Collecting data for 30 seconds...");
+}
+
+// Stop calibration mode and calculate offset
+void stopCalibration() {
+    if (!isCalibrating) return;
+    
+    isCalibrating = false;
+    
+    if (calibrationSampleCount < 10) {
+        Serial.println("Calibration failed: Not enough samples collected");
+        return;
+    }
+    
+    // Calculate average confidence during calibration period
+    float avgConfidence = 0.0f;
+    float avgRSSI = 0.0f;
+    
+    for (int i = 0; i < calibrationSampleCount; i++) {
+        avgConfidence += calibrationConfidenceReadings[i];
+        avgRSSI += calibrationRSSIReadings[i];
+    }
+    avgConfidence /= calibrationSampleCount;
+    avgRSSI /= calibrationSampleCount;
+    
+    // Calculate what offset is needed to reach 72% confidence (safely above 65% threshold)
+    float targetConfidence = 72.0f;
+    float newOffset = targetConfidence - avgConfidence;
+    
+    // Limit offset to reasonable range (-30 to +30)
+    if (newOffset > 30.0f) newOffset = 30.0f;
+    if (newOffset < -30.0f) newOffset = -30.0f;
+    
+    calibrationOffset = newOffset;
+    
+    // Save to preferences
+    preferences.putFloat("calibration_offset", calibrationOffset);
+    
+    Serial.println("=== CALIBRATION COMPLETE ===");
+    Serial.printf("Samples collected: %d\n", calibrationSampleCount);
+    Serial.printf("Average RSSI: %.1f dBm\n", avgRSSI);
+    Serial.printf("Average confidence (before offset): %.1f%%\n", avgConfidence);
+    Serial.printf("Calculated offset: %.1f\n", calibrationOffset);
+    Serial.printf("Target confidence (with offset): %.1f%%\n", avgConfidence + calibrationOffset);
+    Serial.println("===============================");
+}
+
+// Reset calibration to default
+void resetCalibration() {
+    calibrationOffset = 0.0f;
+    preferences.putFloat("calibration_offset", calibrationOffset);
+    Serial.println("Calibration reset to default (no offset)");
+}
+
+// Add calibration sample during calibration mode
+void addCalibrationSample(float rssi, float confidence) {
+    if (!isCalibrating || calibrationSampleCount >= MAX_CALIBRATION_SAMPLES) {
+        return;
+    }
+    
+    calibrationRSSIReadings[calibrationSampleCount] = rssi;
+    calibrationConfidenceReadings[calibrationSampleCount] = confidence;
+    calibrationSampleCount++;
+    
+    // Auto-stop after duration
+    if (millis() - calibrationStartTime >= calibrationDuration) {
+        stopCalibration();
+    }
 }
 
 // ========================================

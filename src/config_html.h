@@ -214,6 +214,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             height: fit-content;
             position: sticky;
             top: 100px;
+            flex-direction: column;
         }
         
         .nav-item {
@@ -582,29 +583,133 @@ const char config_html[] PROGMEM = R"rawliteral(
                 max-width: 100%;
             }
             
-            .sidebar {
+            /* Mobile Header - Collapsible */
+            .app-header {
+                background: rgba(255,255,255,0.98);
+                backdrop-filter: blur(30px);
+                padding: 0.75rem 1rem;
+                overflow-x: hidden;
                 width: 100%;
-                margin: 1rem;
-                position: static;
-                display: flex;
-                overflow-x: auto;
-                padding: 1rem 0;
-                max-width: calc(100vw - 2rem);
+                max-width: 100%;
                 box-sizing: border-box;
+                transition: all 0.3s ease;
+                position: sticky;
+                top: 0;
+                z-index: 100;
+                border-bottom: 1px solid rgba(102, 126, 234, 0.1);
             }
             
+            /* Collapsible header states */
+            .app-header.collapsed {
+                padding: 0.5rem 1rem;
+            }
+            
+            .app-header.minimal {
+                padding: 0.25rem 1rem;
+            }
+            
+            .app-logo {
+                transition: all 0.3s ease;
+            }
+            
+            .app-header.collapsed .app-logo {
+                width: 32px;
+                height: 32px;
+            }
+            
+            .app-header.minimal .app-logo {
+                width: 24px;
+                height: 24px;
+            }
+            
+            .app-name {
+                transition: all 0.3s ease;
+            }
+            
+            .app-header.collapsed .app-name {
+                font-size: 1.2rem;
+            }
+            
+            .app-header.minimal .app-name {
+                font-size: 1rem;
+            }
+            
+            /* Mobile Navigation Pills */
+            .sidebar {
+                width: 100%;
+                margin: 0;
+                position: sticky;
+                top: 80px;
+                display: flex;
+                overflow-x: auto;
+                overflow-y: hidden;
+                padding: 1rem;
+                max-width: 100vw;
+                box-sizing: border-box;
+                background: rgba(255,255,255,0.98);
+                backdrop-filter: blur(30px);
+                border-bottom: 1px solid rgba(102, 126, 234, 0.1);
+                gap: 0.5rem;
+                -webkit-overflow-scrolling: touch;
+                scroll-snap-type: x mandatory;
+                scrollbar-width: none;
+                -ms-overflow-style: none;
+            }
+            
+            .sidebar::-webkit-scrollbar {
+                display: none;
+            }
+            
+            /* Navigation Pills */
             .nav-item {
                 min-width: 120px;
+                max-width: 140px;
                 justify-content: center;
-                padding: 1rem;
-                margin: 0 0.5rem;
-                border-radius: 12px;
+                padding: 1rem 1.5rem;
+                margin: 0;
+                border-radius: 25px;
                 text-align: center;
                 flex-shrink: 0;
+                font-weight: 600;
+                font-size: 0.9rem;
+                background: rgba(102, 126, 234, 0.08);
+                color: #667eea;
+                border: 2px solid transparent;
+                transition: all 0.3s ease;
+                scroll-snap-align: start;
+                white-space: nowrap;
+                box-shadow: 0 2px 8px rgba(102, 126, 234, 0.1);
+            }
+            
+            .nav-item:hover:not(.active) {
+                background: rgba(102, 126, 234, 0.15);
+                transform: translateY(-1px);
+                box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
             }
             
             .nav-item.active {
-                margin: 0 0.5rem;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                color: white;
+                transform: translateY(-2px);
+                box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+                border-color: rgba(255,255,255,0.2);
+            }
+            
+            /* Exit button styling for mobile */
+            .exit-nav {
+                background: rgba(220, 53, 69, 0.1) !important;
+                color: #dc3545 !important;
+                border-color: rgba(220, 53, 69, 0.2) !important;
+            }
+            
+            .exit-nav:hover:not(.active) {
+                background: rgba(220, 53, 69, 0.2) !important;
+                color: #dc3545 !important;
+            }
+            
+            .exit-nav.active {
+                background: linear-gradient(135deg, #dc3545, #c82333) !important;
+                color: white !important;
             }
             
             .content {
@@ -621,14 +726,17 @@ const char config_html[] PROGMEM = R"rawliteral(
                 max-width: 100%;
                 overflow-x: hidden;
                 box-sizing: border-box;
+                margin-bottom: 1rem;
             }
             
             .status-grid {
                 grid-template-columns: 1fr;
+                gap: 0.75rem;
             }
             
             .device-actions {
                 flex-direction: column;
+                gap: 0.75rem;
             }
             
             .device-actions .btn {
@@ -636,12 +744,24 @@ const char config_html[] PROGMEM = R"rawliteral(
                 box-sizing: border-box;
             }
             
-            .app-header {
-                padding: 0.75rem 1rem;
-                overflow-x: hidden;
-                width: 100%;
-                max-width: 100%;
-                box-sizing: border-box;
+            /* Mobile button layouts */
+            .card .btn {
+                margin-bottom: 0.5rem;
+            }
+            
+            .card .form-group {
+                margin-bottom: 1.5rem;
+            }
+            
+            /* Mobile confidence plotting buttons */
+            .card h2 + div > div[style*="display: flex"] {
+                flex-wrap: wrap;
+                gap: 0.75rem;
+            }
+            
+            .card h2 + div > div[style*="display: flex"] .btn {
+                flex: 1;
+                min-width: 120px;
             }
             
             .notification {
@@ -709,18 +829,16 @@ const char config_html[] PROGMEM = R"rawliteral(
                 navItem.classList.add('active');
                 
                 // Load data for the section
-                if (sectionName === 'overview') {
-                    loadSystemStatus();
+                if (sectionName === 'config') {
+                    loadSystemStatus(); // Load config values
                 } else if (sectionName === 'bluetooth') {
                     loadBluetoothStatus();
                     updateDevices();
                     updateCalibrationStatus();
-                } else if (sectionName === 'confidence') {
-                    loadConfidenceMonitoring();
-                } else if (sectionName === 'plot') {
-                    loadPlottingInterface();
+                    loadPlottingInterface(); // Load plotting interface when showing bluetooth
                 } else if (sectionName === 'rfid') {
                     loadRfidKeys();
+                    loadSystemStatus(); // Load to get RFID status and stored keys
                 } else if (sectionName === 'security') {
                     loadSystemConfig();
                     loadWifiPassword();
@@ -736,7 +854,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             } else {
                 document.querySelector('.splash-screen').style.display = 'none';
                 document.querySelector('.app-container').style.display = 'block';
-                showSection('overview');
+                showSection('config');
             }
         }
 
@@ -910,31 +1028,23 @@ const char config_html[] PROGMEM = R"rawliteral(
             // Navigation visibility
             const configNav = document.getElementById('configNav');
             const bluetoothNav = document.getElementById('bluetoothNav');
-            const confidenceNav = document.getElementById('confidenceNav');
-            const plotNav = document.getElementById('plotNav');
             const rfidNav = document.getElementById('rfidNav');
             
             if (ghostKeyEnabled) {
                 // Show full interface for Ghost Key
                 configNav.style.display = 'flex';
                 bluetoothNav.style.display = 'flex';
-                confidenceNav.style.display = 'flex';
-                plotNav.style.display = 'flex';
                 rfidNav.style.display = 'flex';
             } else {
                 // Hide Ghost Key sections if only Ghost Power
                 configNav.style.display = 'none';
                 bluetoothNav.style.display = 'none';
-                confidenceNav.style.display = 'none';
-                plotNav.style.display = 'none';
                 rfidNav.style.display = 'none';
                 
                 // If we're currently viewing a hidden section, switch to security
                 const activeSection = document.querySelector('.content-section.active');
                 if (activeSection && (activeSection.id === 'configSection' || 
                                     activeSection.id === 'bluetoothSection' || 
-                                    activeSection.id === 'confidenceSection' ||
-                                    activeSection.id === 'plotSection' ||
                                     activeSection.id === 'rfidSection')) {
                     showSection('security');
                 }
@@ -1748,9 +1858,46 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
         }
 
+        // Mobile header collapse functionality
+        let lastScrollTop = 0;
+        function handleHeaderCollapse() {
+            if (window.innerWidth <= 768) {
+                const header = document.querySelector('.app-header');
+                const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+                
+                if (scrollTop > 50 && scrollTop > lastScrollTop) {
+                    // Scrolling down
+                    if (scrollTop > 150) {
+                        header.className = 'app-header minimal';
+                    } else {
+                        header.className = 'app-header collapsed';
+                    }
+                } else if (scrollTop < lastScrollTop - 30) {
+                    // Scrolling up
+                    if (scrollTop < 50) {
+                        header.className = 'app-header';
+                    } else {
+                        header.className = 'app-header collapsed';
+                    }
+                }
+                
+                lastScrollTop = scrollTop;
+            }
+        }
+        
         // Initialize page
         document.addEventListener('DOMContentLoaded', () => {
             checkAuth();
+            
+            // Add mobile header collapse listener
+            window.addEventListener('scroll', handleHeaderCollapse);
+            
+            // Add click to expand header
+            document.querySelector('.app-header')?.addEventListener('click', () => {
+                if (window.innerWidth <= 768) {
+                    document.querySelector('.app-header').className = 'app-header';
+                }
+            });
             
             // Load system configuration on page load to set UI visibility
             setTimeout(() => {
@@ -1759,12 +1906,18 @@ const char config_html[] PROGMEM = R"rawliteral(
                 }
             }, 1000);
             
-            // Refresh data every 2 seconds for confidence monitoring, 15 seconds for others
+            // Refresh data every 2 seconds for bluetooth (plotting), 15 seconds for others
             setInterval(() => {
                 if (isAuthenticated) {
                     const activeSection = document.querySelector('.content-section.active');
-                    if (activeSection && activeSection.id === 'confidenceSection') {
-                        loadConfidenceMonitoring(); // Fast refresh for confidence monitoring
+                    if (activeSection && activeSection.id === 'bluetoothSection') {
+                        loadBluetoothStatus();
+                        updateDevices();
+                        updateCalibrationStatus();
+                        // Also update plotting if active
+                        if (isPlotting) {
+                            // Plotting updates are handled in the plotting interval
+                        }
                     }
                 }
             }, 2000);
@@ -1772,13 +1925,11 @@ const char config_html[] PROGMEM = R"rawliteral(
             setInterval(() => {
                 if (isAuthenticated) {
                     const activeSection = document.querySelector('.content-section.active');
-                    if (activeSection && activeSection.id === 'overviewSection') {
+                    if (activeSection && activeSection.id === 'configSection') {
                         loadSystemStatus();
-                    } else if (activeSection && activeSection.id === 'bluetoothSection') {
-                        loadBluetoothStatus();
-                        updateDevices();
                     } else if (activeSection && activeSection.id === 'rfidSection') {
                         loadRfidKeys();
+                        loadSystemStatus(); // For RFID status and stored keys
                     } else if (activeSection && activeSection.id === 'securitySection') {
                         loadSystemConfig();
                         loadWifiPassword();
@@ -1826,20 +1977,11 @@ const char config_html[] PROGMEM = R"rawliteral(
         <div class="main-container">
             <!-- Sidebar Navigation -->
             <nav class="sidebar">
-                <div class="nav-item active" id="overviewNav" onclick="showSection('overview')">
-                    <span>Overview</span>
-                </div>
-                <div class="nav-item" id="configNav" onclick="showSection('config')">
+                <div class="nav-item active" id="configNav" onclick="showSection('config')">
                     <span>Configuration</span>
                 </div>
                 <div class="nav-item" id="bluetoothNav" onclick="showSection('bluetooth')">
                     <span>Bluetooth</span>
-                </div>
-                <div class="nav-item" id="confidenceNav" onclick="showSection('confidence')">
-                    <span>Authentication Status</span>
-                </div>
-                <div class="nav-item" id="plotNav" onclick="showSection('plot')">
-                    <span>Confidence Plot</span>
                 </div>
                 <div class="nav-item" id="rfidNav" onclick="showSection('rfid')">
                     <span>RFID Keys</span>
@@ -1854,26 +1996,7 @@ const char config_html[] PROGMEM = R"rawliteral(
 
             <!-- Content Area -->
             <main class="content">
-                <!-- Overview Section -->
-                <section class="content-section active" id="overviewSection">
-                    <div class="card">
-                        <h2 class="card-title">System Status</h2>
-                        <div class="status-grid">
-                            <div class="status-item">
-                                <div class="status-label">RFID Status</div>
-                                <div class="status-value" id="rfidStatus">Loading...</div>
-                            </div>
-                            <div class="status-item">
-                                <div class="status-label">Bluetooth Status</div>
-                                <div class="status-value" id="bluetoothStatus">Loading...</div>
-                            </div>
-                            <div class="status-item">
-                                <div class="status-label">Stored Keys</div>
-                                <div class="status-value" id="storedKeys">Loading...</div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
+
 
                 <!-- Bluetooth Section -->
                 <section class="content-section" id="bluetoothSection">
@@ -1952,69 +2075,71 @@ const char config_html[] PROGMEM = R"rawliteral(
                     <div id="devicesList">
                         <div class="card">Loading devices...</div>
                     </div>
-                </section>
-
-                <!-- Confidence Monitoring Section (moved from calibration) -->
-                <section class="content-section" id="confidenceSection">
+                    
+                    <!-- Confidence Plotting (moved from separate section) -->
                     <div class="card">
-                        <h2 class="card-title">📊 Confidence-Based Authentication</h2>
+                        <h2 class="card-title">📈 Confidence Over Time</h2>
                         <div style="margin-bottom: 1.5rem;">
                             <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
-                                Real-time confidence analysis for statistical authentication. The system uses stability, trend, and signal strength to determine proximity authentication.
+                                Real-time plotting of confidence percentage. Click start to begin recording, stop to end. Data shows the last 60 seconds.
                             </p>
-                            <div class="status-grid">
-                                <div class="status-item">
-                                    <div class="status-label">Total Confidence</div>
-                                    <div class="status-value" id="totalConfidence">0%</div>
+                            <div style="display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap;">
+                                <button onclick="startPlotting()" class="btn btn-primary" id="startPlotBtn">
+                                    ▶️ Start Recording
+                                </button>
+                                <button onclick="stopPlotting()" class="btn btn-secondary" id="stopPlotBtn" disabled>
+                                    ⏹️ Stop Recording
+                                </button>
+                                <button onclick="clearPlot()" class="btn btn-secondary">
+                                    🗑️ Clear Data
+                                </button>
+                            </div>
+                            <div style="background: #f8f9ff; padding: 1rem; border-radius: 12px; margin-bottom: 1rem;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                                    <span>Recording Status:</span>
+                                    <span id="plotStatus">Stopped</span>
                                 </div>
-                                <div class="status-item">
-                                    <div class="status-label">Stability Score</div>
-                                    <div class="status-value" id="stabilityScore">0/35</div>
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                                    <span>Data Points:</span>
+                                    <span id="plotDataPoints">0</span>
                                 </div>
-                                <div class="status-item">
-                                    <div class="status-label">Trend Score</div>
-                                    <div class="status-value" id="trendScore">0/25</div>
-                                </div>
-                                <div class="status-item">
-                                    <div class="status-label">Strength Score</div>
-                                    <div class="status-value" id="strengthScore">0/40</div>
-                                </div>
-                                <div class="status-item">
-                                    <div class="status-label">Sample Quality</div>
-                                    <div class="status-value" id="sampleQuality">0%</div>
-                                </div>
-                                <div class="status-item">
-                                    <div class="status-label">Signal Status</div>
-                                    <div class="status-value" id="signalStatus">Unknown</div>
-                                </div>
-                                <div class="status-item">
-                                    <div class="status-label">Movement Status</div>
-                                    <div class="status-value" id="movementStatus">Unknown</div>
-                                </div>
-                                <div class="status-item">
-                                    <div class="status-label">Signal Mean</div>
-                                    <div class="status-value" id="signalMean">-99 dBm</div>
-                                </div>
-                                <div class="status-item">
-                                    <div class="status-label">Trend Slope</div>
-                                    <div class="status-value" id="trendSlope">0.000</div>
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span>Current Confidence:</span>
+                                    <span id="plotCurrentConfidence">0%</span>
                                 </div>
                             </div>
-                            <div style="margin-top: 1rem; padding: 1rem; background: #f8f9ff; border-radius: 12px;">
-                                <div style="font-size: 0.9rem; color: #667eea; font-weight: 600;">Authentication Status:</div>
-                                <div id="authenticationStatus" style="font-size: 1.1rem; margin-top: 0.5rem;">
-                                    <span style="color: #dc3545;">⚫ Not Authenticated</span>
+                        </div>
+                        
+                        <h3 class="card-title">Confidence Graph</h3>
+                        <div style="background: #fff; border: 1px solid #e1e5e9; border-radius: 12px; padding: 1rem; height: 300px; position: relative;">
+                            <canvas id="confidenceChart" width="800" height="280" style="width: 100%; height: 100%;"></canvas>
+                            <div id="chartOverlay" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #999; font-size: 1.1rem;">
+                                Click "Start Recording" to begin plotting
+                            </div>
+                        </div>
+                        <div style="margin-top: 1rem; font-size: 0.9rem; color: #666;">
+                            <div style="display: flex; gap: 2rem; justify-content: center; flex-wrap: wrap;">
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <div style="width: 12px; height: 12px; background: #667eea; border-radius: 2px;"></div>
+                                    <span>Confidence %</span>
                                 </div>
-                                <div style="font-size: 0.8rem; color: #666; margin-top: 0.5rem;">
-                                    Requires 65% confidence to authenticate, 45% to maintain authentication.
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <div style="width: 12px; height: 12px; background: #28a745; border-radius: 2px;"></div>
+                                    <span>Auth Threshold (65%)</span>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <div style="width: 12px; height: 12px; background: #ffc107; border-radius: 2px;"></div>
+                                    <span>Deauth Threshold (45%)</span>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </section>
 
+
+
                 <!-- Configuration Section -->
-                <section class="content-section" id="configSection">
+                <section class="content-section active" id="configSection">
                     <div class="card">
                         <h2 class="card-title">Starter Configuration</h2>
                         <div class="form-group">
@@ -2038,6 +2163,19 @@ const char config_html[] PROGMEM = R"rawliteral(
                 <section class="content-section" id="rfidSection">
                     <div class="card">
                         <h2 class="card-title">RFID Key Management</h2>
+                        
+                        <!-- RFID Status -->
+                        <div class="status-grid" style="margin-bottom: 2rem;">
+                            <div class="status-item">
+                                <div class="status-label">RFID Status</div>
+                                <div class="status-value" id="rfidStatus">Loading...</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-label">Stored Keys</div>
+                                <div class="status-value" id="storedKeys">Loading...</div>
+                            </div>
+                        </div>
+                        
                         <div style="margin-bottom: 2rem;">
                             <button onclick="toggleRfidPairing()" class="btn btn-primary">Toggle RFID Pairing Mode</button>
                             <p id="rfidPairingStatus" style="margin-top: 1rem; color: #666;">Pairing mode: inactive</p>
@@ -2133,68 +2271,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                     </div>
                 </section>
                 
-                <!-- Confidence Plotting Section -->
-                <section class="content-section" id="plotSection">
-                    <div class="card">
-                        <h2 class="card-title">📈 Confidence Over Time</h2>
-                        <div style="margin-bottom: 1.5rem;">
-                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
-                                Real-time plotting of confidence percentage. Click start to begin recording, stop to end. Data shows the last 60 seconds.
-                            </p>
-                            <div style="display: flex; gap: 1rem; margin-bottom: 1.5rem;">
-                                <button onclick="startPlotting()" class="btn btn-primary" id="startPlotBtn">
-                                    ▶️ Start Recording
-                                </button>
-                                <button onclick="stopPlotting()" class="btn btn-secondary" id="stopPlotBtn" disabled>
-                                    ⏹️ Stop Recording
-                                </button>
-                                <button onclick="clearPlot()" class="btn btn-secondary">
-                                    🗑️ Clear Data
-                                </button>
-                            </div>
-                            <div style="background: #f8f9ff; padding: 1rem; border-radius: 12px; margin-bottom: 1rem;">
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
-                                    <span>Recording Status:</span>
-                                    <span id="plotStatus">Stopped</span>
-                                </div>
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
-                                    <span>Data Points:</span>
-                                    <span id="plotDataPoints">0</span>
-                                </div>
-                                <div style="display: flex; justify-content: space-between;">
-                                    <span>Current Confidence:</span>
-                                    <span id="plotCurrentConfidence">0%</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h3 class="card-title">Confidence Graph</h3>
-                        <div style="background: #fff; border: 1px solid #e1e5e9; border-radius: 12px; padding: 1rem; height: 300px; position: relative;">
-                            <canvas id="confidenceChart" width="800" height="280" style="width: 100%; height: 100%;"></canvas>
-                            <div id="chartOverlay" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #999; font-size: 1.1rem;">
-                                Click "Start Recording" to begin plotting
-                            </div>
-                        </div>
-                        <div style="margin-top: 1rem; font-size: 0.9rem; color: #666;">
-                            <div style="display: flex; gap: 2rem; justify-content: center;">
-                                <div style="display: flex; align-items: center; gap: 0.5rem;">
-                                    <div style="width: 12px; height: 12px; background: #667eea; border-radius: 2px;"></div>
-                                    <span>Confidence %</span>
-                                </div>
-                                <div style="display: flex; align-items: center; gap: 0.5rem;">
-                                    <div style="width: 12px; height: 12px; background: #28a745; border-radius: 2px;"></div>
-                                    <span>Auth Threshold (65%)</span>
-                                </div>
-                                <div style="display: flex; align-items: center; gap: 0.5rem;">
-                                    <div style="width: 12px; height: 12px; background: #ffc107; border-radius: 2px;"></div>
-                                    <span>Deauth Threshold (45%)</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
+
             </main>
         </div>
     </div>

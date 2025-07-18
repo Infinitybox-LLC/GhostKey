@@ -6,6 +6,7 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
@@ -2334,6 +2335,14 @@ void enterConfigMode() {
     
     // Initialize WiFi and web server
     setupWiFi();
+    
+    // Initialize mDNS
+    if (!MDNS.begin("ghost-key")) {
+        Serial.println("Error setting up MDNS responder!");
+    } else {
+        Serial.println("mDNS responder started - access via http://ghost-key.local");
+    }
+    
     setupWebServer();
     
     // Visual feedback

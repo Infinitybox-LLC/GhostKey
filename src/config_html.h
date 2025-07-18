@@ -879,10 +879,11 @@ const char config_html[] PROGMEM = R"rawliteral(
                 
                 // Load data for the section
                 if (sectionName === 'config') {
-                    // Only load the config-specific data (pulse time, auto lock)
+                    // Load config data including system configuration toggles
                     loadSystemStatus().catch(error => {
                         console.log('Config section: some status elements may not be available');
                     });
+                    loadSystemConfig(); // Load Ghost Key/Power toggle states
                 } else if (sectionName === 'bluetooth') {
                     loadBluetoothStatus();
                     updateDevices();
@@ -895,7 +896,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                         console.log('RFID section: some status elements may not be available');
                     });
                 } else if (sectionName === 'security') {
-                    loadSystemConfig();
+                    // Settings section - load passwords and settings
                     loadWifiPassword();
                 }
             }
@@ -2007,11 +2008,12 @@ const char config_html[] PROGMEM = R"rawliteral(
                     const activeSection = document.querySelector('.content-section.active');
                     if (activeSection && activeSection.id === 'configSection') {
                         loadSystemStatus();
+                        loadSystemConfig(); // Refresh system toggles
                     } else if (activeSection && activeSection.id === 'rfidSection') {
                         loadRfidKeys();
                         loadSystemStatus(); // For RFID status and stored keys
                     } else if (activeSection && activeSection.id === 'securitySection') {
-                        loadSystemConfig();
+                        // Settings section - only load passwords
                         loadWifiPassword();
                     }
                 }
@@ -2067,7 +2069,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                     <span>RFID Keys</span>
                 </div>
                 <div class="nav-item" id="securityNav" onclick="showSection('security')">
-                    <span>Security</span>
+                    <span>Settings</span>
                 </div>
                 <div class="nav-item exit-nav" onclick="exitConfig()">
                     <span>Exit</span>
@@ -2221,6 +2223,37 @@ const char config_html[] PROGMEM = R"rawliteral(
                 <!-- Configuration Section -->
                 <section class="content-section active" id="configSection">
                     <div class="card">
+                        <h2 class="card-title">System Configuration</h2>
+                        <div class="form-group" style="margin-bottom: 2rem;">
+                            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
+                                <label class="form-label" for="ghostKeyEnabled" style="margin-bottom: 0;">Enable Ghost Key</label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="ghostKeyEnabled" onchange="toggleGhostKey()">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
+                                RFID/Bluetooth authentication and push-to-start functionality.
+                            </p>
+                            
+                            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
+                                <label class="form-label" for="ghostPowerEnabled" style="margin-bottom: 0;">Enable Ghost Power</label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="ghostPowerEnabled" onchange="toggleGhostPower()">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
+                                Security relay control and immobilization features.
+                            </p>
+                            
+                            <p style="font-size: 0.9rem; color: #ff6b6b; font-weight: 600;">
+                                ⚠️ At least one system must remain enabled
+                            </p>
+                        </div>
+                    </div>
+                
+                    <div class="card">
                         <h2 class="card-title">Starter Configuration</h2>
                         <div class="form-group">
                             <label class="form-label" for="pulseTime">Starter Crank Time (seconds)</label>
@@ -2270,39 +2303,8 @@ const char config_html[] PROGMEM = R"rawliteral(
                     </div>
                 </section>
 
-                <!-- Security Section -->
+                <!-- Settings Section -->
                 <section class="content-section" id="securitySection">
-                    <div class="card">
-                        <h2 class="card-title">System Configuration</h2>
-                        <div class="form-group" style="margin-bottom: 2rem;">
-                            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
-                                <label class="form-label" for="ghostKeyEnabled" style="margin-bottom: 0;">Enable Ghost Key</label>
-                                <label class="toggle-switch">
-                                    <input type="checkbox" id="ghostKeyEnabled" onchange="toggleGhostKey()">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
-                                RFID/Bluetooth authentication and push-to-start functionality.
-                            </p>
-                            
-                            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
-                                <label class="form-label" for="ghostPowerEnabled" style="margin-bottom: 0;">Enable Ghost Power</label>
-                                <label class="toggle-switch">
-                                    <input type="checkbox" id="ghostPowerEnabled" onchange="toggleGhostPower()">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
-                                Security relay control and immobilization features.
-                            </p>
-                            
-                            <p style="font-size: 0.9rem; color: #ff6b6b; font-weight: 600;">
-                                ⚠️ At least one system must remain enabled
-                            </p>
-                        </div>
-                    </div>
-                    
                     <div class="card">
                         <h2 class="card-title">Web Interface Password</h2>
                         <div class="form-group">

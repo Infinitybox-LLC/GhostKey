@@ -663,7 +663,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 scroll-snap-type: x mandatory;
                 scrollbar-width: none;
                 -ms-overflow-style: none;
-                z-index: 100;
+                z-index: 99;
                 border-radius: 0;
                 box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             }
@@ -738,9 +738,9 @@ const char config_html[] PROGMEM = R"rawliteral(
                 max-width: 100%;
                 overflow-x: hidden;
                 box-sizing: border-box;
-                margin-top: 0;
+                margin-top: 70px;
                 position: relative;
-                z-index: 10;
+                z-index: 1;
             }
             
             .card {
@@ -751,7 +751,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 box-sizing: border-box;
                 margin-bottom: 1rem;
                 position: relative;
-                z-index: 5;
+                z-index: 1;
             }
             
             .status-grid {

@@ -215,6 +215,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             position: sticky;
             top: 100px;
             flex-direction: column;
+            z-index: auto;
         }
         
         .nav-item {
@@ -644,8 +645,10 @@ const char config_html[] PROGMEM = R"rawliteral(
             .sidebar {
                 width: 100%;
                 margin: 0;
-                position: sticky;
-                top: 59px;
+                position: fixed;
+                top: 60px;
+                left: 0;
+                right: 0;
                 display: flex;
                 flex-direction: row !important;
                 overflow-x: auto;
@@ -661,10 +664,9 @@ const char config_html[] PROGMEM = R"rawliteral(
                 scroll-snap-type: x mandatory;
                 scrollbar-width: none;
                 -ms-overflow-style: none;
-                z-index: 200;
+                z-index: 999;
                 border-radius: 0;
                 box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                margin-top: -1px;
             }
             
             .sidebar::-webkit-scrollbar {
@@ -737,7 +739,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 max-width: 100%;
                 overflow-x: hidden;
                 box-sizing: border-box;
-                margin-top: 0;
+                margin-top: 70px;
                 position: relative;
                 z-index: 10;
             }
@@ -800,6 +802,20 @@ const char config_html[] PROGMEM = R"rawliteral(
                 width: 100%;
                 max-width: 100%;
                 box-sizing: border-box;
+            }
+        }
+        
+        @media (min-width: 769px) {
+            .sidebar {
+                position: sticky !important;
+                top: 100px !important;
+                left: auto !important;
+                right: auto !important;
+                z-index: auto !important;
+            }
+            
+            .content {
+                margin-top: 0 !important;
             }
         }
         
@@ -1917,19 +1933,19 @@ const char config_html[] PROGMEM = R"rawliteral(
                     // Scrolling down
                     if (scrollTop > 100) {
                         header.className = 'app-header minimal';
-                        if (sidebar) sidebar.style.top = '39px';
+                        if (sidebar) sidebar.style.top = '40px';
                     } else {
                         header.className = 'app-header collapsed';
-                        if (sidebar) sidebar.style.top = '44px';
+                        if (sidebar) sidebar.style.top = '45px';
                     }
                 } else if (scrollTop < lastScrollTop - 20) {
                     // Scrolling up
                     if (scrollTop < 30) {
                         header.className = 'app-header';
-                        if (sidebar) sidebar.style.top = '59px';
+                        if (sidebar) sidebar.style.top = '60px';
                     } else {
                         header.className = 'app-header collapsed';
-                        if (sidebar) sidebar.style.top = '44px';
+                        if (sidebar) sidebar.style.top = '45px';
                     }
                 }
                 
@@ -1950,7 +1966,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                     const header = document.querySelector('.app-header');
                     const sidebar = document.querySelector('.sidebar');
                     header.className = 'app-header';
-                    if (sidebar) sidebar.style.top = '59px';
+                    if (sidebar) sidebar.style.top = '60px';
                 }
             });
             

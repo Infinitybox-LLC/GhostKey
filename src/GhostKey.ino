@@ -73,14 +73,14 @@ const char jdi_logo_svg[] PROGMEM = R"(<?xml version="1.0" encoding="UTF-8"?>
 const char manifest_json[] PROGMEM = R"({
   "name": "Ghost Key Configuration",
   "short_name": "Ghost Key",
-  "id": "/",
+  "id": "http://ghost-key.local/",
   "description": "Secure Vehicle Access System Configuration",
-  "start_url": "/",
+  "start_url": "http://ghost-key.local/",
   "display": "standalone",
   "background_color": "#764ba2",
   "theme_color": "#667eea",
   "orientation": "portrait-primary",
-  "scope": "/",
+  "scope": "http://ghost-key.local/",
   "icons": [
     {
       "src": "/icon.png",

@@ -442,7 +442,26 @@ static unsigned long lastJsonUpdate = 0;
 static int lastDeviceCount = -1;
 static bool jsonCacheValid = false;
 
+// ========================================
+// POWER MANAGEMENT SYSTEM
+// ========================================
 
+enum PowerMode {
+    ACTIVE_MODE,      // Full power: authenticated or recent activity
+    MONITORING_MODE,  // Reduced power: maintain proximity monitoring  
+    LIGHT_SLEEP_MODE  // Minimal power: periodic wake for connection checks
+};
+
+PowerMode currentPowerMode = ACTIVE_MODE;
+unsigned long lastPowerModeChange = 0;
+
+// Power management timing constants
+#define MONITORING_MODE_DELAY 10000     // 10 seconds without auth -> monitoring mode
+#define LIGHT_SLEEP_MODE_DELAY 30000    // 30 seconds without auth -> light sleep mode
+#define LIGHT_SLEEP_DURATION 2000000    // 2 second light sleep duration (microseconds)
+
+// Power mode transition tracking
+bool powerModeInitialized = false;
 
 // ========================================
 // TIMING VARIABLES
@@ -1193,12 +1212,23 @@ void disablePairingMode() {
 
 // Function to start RSSI scanning
 void startRSSIScan() {
+    // Adjust scan parameters based on power mode
+    uint16_t scan_interval, scan_window;
+    
+    if (currentPowerMode == ACTIVE_MODE) {
+        scan_interval = 0x50;  // Normal interval for frequent updates
+        scan_window = 0x30;    // Normal window for better reception
+    } else {
+        scan_interval = 0x100; // Slower interval for power savings
+        scan_window = 0x50;    // Adjusted window to maintain reasonable reception
+    }
+    
     esp_ble_scan_params_t scan_params = {
         .scan_type = BLE_SCAN_TYPE_ACTIVE,
         .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
         .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval = 0x50,  // Reduced interval for more frequent updates
-        .scan_window = 0x30,    // Increased window for better reception
+        .scan_interval = scan_interval,
+        .scan_window = scan_window,
         .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE
     };
     esp_ble_gap_set_scan_params(&scan_params);
@@ -1206,7 +1236,7 @@ void startRSSIScan() {
     // Reduced logging - only log once at startup
     static bool firstScan = true;
     if (firstScan) {
-        Serial.println("BLE: RSSI scanning started");
+        Serial.println("BLE: RSSI scanning started with power-aware parameters");
         firstScan = false;
     }
 }
@@ -1635,6 +1665,235 @@ void enterConfigMode();
 void exitConfigMode();
 void updateSecurityState();
 
+// Power management functions
+void updatePowerManagement();
+void enterLightSleep();
+void setPowerMode(PowerMode newMode);
+void printPowerModeStatus();
+
+// ========================================
+// POWER MANAGEMENT FUNCTIONS
+// ========================================
+
+// Update power management mode based on activity
+void updatePowerManagement() {
+    // Check for any authentication or activity
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    bool hasActivity = (isAuthenticated || engineRunning || buttonPressed || brakeHeld || 
+                       currentState == CONFIG_MODE || startRelayActive);
+    
+    unsigned long now = millis();
+    
+    // Initialize timing on first run
+    if (!powerModeInitialized) {
+        lastActivityTime = now;
+        powerModeInitialized = true;
+        Serial.println("Power: Power management system initialized");
+    }
+    
+    // Update last activity time if there's current activity
+    if (hasActivity) {
+        lastActivityTime = now;
+        if (currentPowerMode != ACTIVE_MODE) {
+            setPowerMode(ACTIVE_MODE);
+        }
+        return;
+    }
+    
+    // Calculate inactive time
+    unsigned long inactiveTime = now - lastActivityTime;
+    
+    // Determine appropriate power mode
+    if (inactiveTime > LIGHT_SLEEP_MODE_DELAY) {
+        if (currentPowerMode != LIGHT_SLEEP_MODE) {
+            setPowerMode(LIGHT_SLEEP_MODE);
+        }
+    } else if (inactiveTime > MONITORING_MODE_DELAY) {
+        if (currentPowerMode != MONITORING_MODE) {
+            setPowerMode(MONITORING_MODE);
+        }
+    }
+}
+
+// Set power mode with appropriate actions
+void setPowerMode(PowerMode newMode) {
+    if (currentPowerMode == newMode) return;
+    
+    PowerMode oldMode = currentPowerMode;
+    currentPowerMode = newMode;
+    lastPowerModeChange = millis();
+    
+    // Calculate inactive time for logging
+    unsigned long inactiveTime = millis() - lastActivityTime;
+    
+    // Detailed mode change logging
+    Serial.println("========================================");
+    Serial.print("POWER MODE CHANGE: ");
+    
+    // Print old mode
+    switch (oldMode) {
+        case ACTIVE_MODE: Serial.print("ACTIVE"); break;
+        case MONITORING_MODE: Serial.print("MONITORING"); break;
+        case LIGHT_SLEEP_MODE: Serial.print("LIGHT_SLEEP"); break;
+    }
+    
+    Serial.print(" → ");
+    
+    // Print new mode with details
+    switch (newMode) {
+        case ACTIVE_MODE:
+            setCpuFrequencyMhz(240);
+            Serial.println("ACTIVE_MODE");
+            Serial.println("• CPU: 240MHz (Full Power)");
+            Serial.println("• Bluetooth: Full scanning (1s intervals)");
+            Serial.println("• Status: Every 5 seconds");
+            Serial.println("• Trigger: Authentication or activity detected");
+            break;
+            
+        case MONITORING_MODE:
+            setCpuFrequencyMhz(80);
+            Serial.println("MONITORING_MODE");
+            Serial.println("• CPU: 80MHz (Reduced Power)");
+            Serial.println("• Bluetooth: Slower scanning (2s intervals)");
+            Serial.println("• Status: Every 10 seconds");
+            Serial.printf("• Inactive Time: %.1f seconds\n", inactiveTime / 1000.0);
+            break;
+            
+        case LIGHT_SLEEP_MODE:
+            setCpuFrequencyMhz(80);
+            Serial.println("LIGHT_SLEEP_MODE");
+            Serial.println("• CPU: 80MHz + Light Sleep");
+            Serial.println("• Sleep: 2-second intervals");
+            Serial.println("• Wake: BLE connection, button, brake");
+            Serial.println("• Status: Every 30 seconds");
+            Serial.printf("• Inactive Time: %.1f seconds\n", inactiveTime / 1000.0);
+            break;
+    }
+    
+    // Print authentication status
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    Serial.print("• Auth Status: ");
+    if (rfidAuthenticated) Serial.print("RFID ");
+    if (bluetoothEnabled && bluetoothAuthenticated) Serial.print("Bluetooth ");
+    if (!isAuthenticated) Serial.print("None ");
+    Serial.println();
+    
+    // Print activity status
+    Serial.print("• Activity: ");
+    if (engineRunning) Serial.print("Engine ");
+    if (buttonPressed) Serial.print("Button ");
+    if (brakeHeld) Serial.print("Brake ");
+    if (currentState == CONFIG_MODE) Serial.print("Config ");
+    if (startRelayActive) Serial.print("Starting ");
+    Serial.println();
+    
+    Serial.println("========================================");
+}
+
+// Enter light sleep with appropriate wake conditions
+void enterLightSleep() {
+    // Set up wake sources
+    esp_sleep_enable_timer_wakeup(LIGHT_SLEEP_DURATION); // 2 second timer backup
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, 0); // Button wake (active low)
+    
+    // Additional wake sources for other inputs
+    esp_sleep_enable_ext1_wakeup(
+        (1ULL << BRAKE_PIN), 
+        ESP_EXT1_WAKEUP_ANY_HIGH
+    );
+    
+    // Enter light sleep - maintains BLE advertising
+    Serial.println("💤 Entering light sleep for 2 seconds...");
+    esp_light_sleep_start();
+    
+    // Log wake up reason
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    Serial.print("⏰ Woke from light sleep - Reason: ");
+    switch(wakeup_reason) {
+        case ESP_SLEEP_WAKEUP_EXT0: Serial.println("Button press"); break;
+        case ESP_SLEEP_WAKEUP_EXT1: Serial.println("Brake or GPIO"); break;
+        case ESP_SLEEP_WAKEUP_TIMER: Serial.println("Timer (2s timeout)"); break;
+        case ESP_SLEEP_WAKEUP_TOUCHPAD: Serial.println("Touchpad"); break;
+        case ESP_SLEEP_WAKEUP_ULP: Serial.println("ULP program"); break;
+        default: Serial.println("Unknown/Reset"); break;
+    }
+    
+    // After waking up, check if we should transition to active mode
+    if (isBleConnected || digitalRead(BUTTON_PIN) == LOW || digitalRead(BRAKE_PIN) == LOW) {
+        Serial.println("🔋 Activity detected - switching to ACTIVE_MODE");
+        setPowerMode(ACTIVE_MODE);
+    }
+}
+
+// Print periodic power mode status
+void printPowerModeStatus() {
+    unsigned long now = millis();
+    unsigned long inactiveTime = powerModeInitialized ? (now - lastActivityTime) : 0;
+    unsigned long timeInCurrentMode = now - lastPowerModeChange;
+    
+    Serial.println("--- Power Mode Status ---");
+    
+    // Current mode
+    Serial.print("Mode: ");
+    switch(currentPowerMode) {
+        case ACTIVE_MODE: 
+            Serial.print("ACTIVE (Full Power)"); 
+            break;
+        case MONITORING_MODE: 
+            Serial.print("MONITORING (Reduced Power)"); 
+            break;
+        case LIGHT_SLEEP_MODE: 
+            Serial.print("LIGHT_SLEEP (Minimal Power)"); 
+            break;
+    }
+    Serial.printf(" for %.1f seconds\n", timeInCurrentMode / 1000.0);
+    
+    // Timing information
+    if (powerModeInitialized) {
+        Serial.printf("Inactive: %.1f seconds\n", inactiveTime / 1000.0);
+        Serial.printf("Next mode transition: ");
+        
+        if (currentPowerMode == ACTIVE_MODE && inactiveTime > 0) {
+            float timeToMonitoring = (MONITORING_MODE_DELAY - inactiveTime) / 1000.0;
+            if (timeToMonitoring > 0) {
+                Serial.printf("MONITORING in %.1f seconds\n", timeToMonitoring);
+            } else {
+                float timeToSleep = (LIGHT_SLEEP_MODE_DELAY - inactiveTime) / 1000.0;
+                Serial.printf("LIGHT_SLEEP in %.1f seconds\n", timeToSleep > 0 ? timeToSleep : 0);
+            }
+        } else if (currentPowerMode == MONITORING_MODE) {
+            float timeToSleep = (LIGHT_SLEEP_MODE_DELAY - inactiveTime) / 1000.0;
+            Serial.printf("LIGHT_SLEEP in %.1f seconds\n", timeToSleep > 0 ? timeToSleep : 0);
+        } else {
+            Serial.println("Waiting for activity");
+        }
+    }
+    
+    // Authentication status
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    Serial.print("Auth: ");
+    if (isAuthenticated) {
+        if (rfidAuthenticated) Serial.print("RFID ");
+        if (bluetoothEnabled && bluetoothAuthenticated) Serial.print("Bluetooth ");
+    } else {
+        Serial.print("None");
+    }
+    Serial.println();
+    
+    // Current activity
+    Serial.print("Activity: ");
+    bool hasActivity = false;
+    if (engineRunning) { Serial.print("Engine "); hasActivity = true; }
+    if (buttonPressed) { Serial.print("Button "); hasActivity = true; }
+    if (brakeHeld) { Serial.print("Brake "); hasActivity = true; }
+    if (currentState == CONFIG_MODE) { Serial.print("Config "); hasActivity = true; }
+    if (startRelayActive) { Serial.print("Starting "); hasActivity = true; }
+    if (!hasActivity) Serial.print("None");
+    Serial.println();
+    
+    Serial.println("------------------------");
+}
+
 // ========================================
 // MAIN SETUP - Runs once on boot
 // ========================================
@@ -1759,6 +2018,15 @@ void setup() {
 // MAIN LOOP - Runs continuously
 // ========================================
 void loop() {
+    // Power management update - check first
+    updatePowerManagement();
+    
+    // Handle light sleep mode
+    if (currentPowerMode == LIGHT_SLEEP_MODE) {
+        enterLightSleep();
+        return; // Skip rest of loop after waking up, will re-evaluate power mode
+    }
+    
     // Core system updates
     updateSystemState();
     
@@ -1803,9 +2071,16 @@ void loop() {
     if (bluetoothEnabled && bluetoothInitialized) {
     isBleConnected = bleKeyboard.isConnected();
     
-    // RSSI scanning (only when needed)
+    // RSSI scanning (only when needed, adjusted for power mode)
     static unsigned long lastRSSIScan = 0;
-    if (millis() - lastRSSIScan >= RSSI_UPDATE_INTERVAL) {
+    unsigned long rssiInterval = RSSI_UPDATE_INTERVAL;
+    
+    // Adjust scanning frequency based on power mode
+    if (currentPowerMode == MONITORING_MODE) {
+        rssiInterval = RSSI_UPDATE_INTERVAL * 2; // Scan every 2 seconds instead of 1
+    }
+    
+    if (millis() - lastRSSIScan >= rssiInterval) {
         int bondedCount = esp_ble_get_bond_device_num();
         if (bondedCount > 0 && (isBleConnected || isPairingMode)) {
             startRSSIScan();
@@ -1968,9 +2243,27 @@ void loop() {
         }
     }
     
-    // Status printing
+    // Periodic power mode status updates
+    static unsigned long lastPowerStatus = 0;
+    unsigned long powerStatusInterval = 15000; // Every 15 seconds
+    
+    if (millis() - lastPowerStatus >= powerStatusInterval) {
+        printPowerModeStatus();
+        lastPowerStatus = millis();
+    }
+    
+    // Status printing (adjusted for power mode)
     static unsigned long lastStatusPrint = 0;
-    if (millis() - lastStatusPrint >= STATUS_PRINT_INTERVAL) {
+    unsigned long statusInterval = STATUS_PRINT_INTERVAL;
+    
+    // Reduce status printing frequency in low power modes
+    if (currentPowerMode == MONITORING_MODE) {
+        statusInterval = STATUS_PRINT_INTERVAL * 2; // Print every 10 seconds instead of 5
+    } else if (currentPowerMode == LIGHT_SLEEP_MODE) {
+        statusInterval = STATUS_PRINT_INTERVAL * 6; // Print every 30 seconds
+    }
+    
+    if (millis() - lastStatusPrint >= statusInterval) {
         printSystemStatus();
         lastStatusPrint = millis();
     }
@@ -3759,6 +4052,20 @@ void printSystemStatus() {
         Serial.print(", Accessory: ");
         Serial.print(digitalRead(ACCESSORY_INPUT_PIN) == HIGH ? "HIGH" : "LOW");
         Serial.print(")");
+    }
+    
+    Serial.print("\nPower Management:");
+    Serial.print("\n  Current Mode: ");
+    switch(currentPowerMode) {
+        case ACTIVE_MODE: Serial.print("ACTIVE (Full Power)"); break;
+        case MONITORING_MODE: Serial.print("MONITORING (Reduced Power)"); break;
+        case LIGHT_SLEEP_MODE: Serial.print("LIGHT_SLEEP (Minimal Power)"); break;
+    }
+    if (powerModeInitialized) {
+        unsigned long inactiveTime = millis() - lastActivityTime;
+        Serial.print("\n  Inactive Time: ");
+        Serial.print(inactiveTime / 1000);
+        Serial.print(" seconds");
     }
     Serial.println();
 }

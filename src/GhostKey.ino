@@ -130,19 +130,19 @@ const char manifest_json[] PROGMEM = R"({
 // PIN DEFINITIONS
 // ========================================
 // Input pins (all active low with pullups)
-#define BUTTON_PIN 32 // Changed from 34 - supports internal pullup
+#define BUTTON_PIN 32 // WILL BE 35, 32 FOR TESTING W/ INTERNAL PULLUP - NEEDS external pullup // "startneg" on diagram // was 32 input pullup for testing
 #define BRAKE_PIN 18 // Good
-#define ACCESSORY_INPUT_PIN 19 // Ghost Power accessory input (external pullup)
+#define ACCESSORY_INPUT_PIN 19 // Ghost Power accessory input (external pullup) // called IGNONNEG on diagram active on low
 #define BEEPER_PIN 25  // GPIO 25 will be used for the beeper
 
 // Output pins
-#define LED_PIN 23 // change
+#define LED_PIN 23 // system LED    
 #define BUTTON_LED_PIN 26 // good
 
 // RFID pins
 #define RFID_DEMOD_OUT 12 // good
 #define RFID_SHD 13 // good
-#define RFID_MOD 27 // good
+#define RFID_MOD 27 // good ()
 #define RFID_RDY_CLK 14 // good
 
 // Relay control pins
@@ -195,7 +195,7 @@ const char manifest_json[] PROGMEM = R"({
 #define RSSI_INVALID_VALUE -99   // Value to use for invalid RSSI
 
 // Statistical RSSI Analysis constants (CONFIDENCE-BASED AUTHENTICATION)
-#define RSSI_SHORT_TERM_SIZE 10       // 1 second of readings (100ms intervals)
+#define RSSI_SHORT_TERM_SIZE 30       // ~3 seconds of readings for quick confidence
 #define RSSI_MEDIUM_TERM_SIZE 50      // 5 seconds of readings  
 #define RSSI_LONG_TERM_SIZE 300       // 30 seconds of readings
 #define CONFIDENCE_AUTH_THRESHOLD 65.0f    // Minimum confidence % for authentication (easier to authenticate)
@@ -269,8 +269,8 @@ enum PowerState {
 
 // Power management timing constants
 #define LIGHT_SLEEP_DELAY_MS 30000      // 30 seconds after losing authentication
-#define DEEP_SLEEP_DELAY_MS 120000      // 2 minutes after losing authentication
-#define RFID_DEEP_SLEEP_CYCLE_MS 500    // 500ms on/off cycle for RFID in deep sleep
+#define DEEP_SLEEP_DELAY_MS 60000      // 2 minutes after losing authentication
+#define RFID_DEEP_SLEEP_CYCLE_MS 1000    // 500ms on/off cycle for RFID in deep sleep
 #define BLE_DEEP_SLEEP_INTERVAL_MS 60000 // 1 minute between BLE advertising periods
 #define BLE_DEEP_SLEEP_DURATION_MS 10000 // 10 seconds of advertising in deep sleep
 
@@ -392,6 +392,17 @@ unsigned long rfidDeepSleepCycleStart = 0;    // For RFID on/off cycling
 bool rfidDeepSleepOn = true;                  // Current RFID state in deep sleep
 unsigned long bleDeepSleepAdvertiseStart = 0;  // When BLE advertising started in deep sleep
 bool bleDeepSleepAdvertising = false;         // Whether BLE is currently advertising in deep sleep
+bool bleAdvertisingStopped = false;           // Track if we've already stopped advertising
+
+// Adaptive interval and quick confidence system
+unsigned long adaptiveLightSleepTimeout = 120000;  // Start with 2 minutes (120s)
+int consecutiveWeakConnections = 0;                 // Counter for weak connections
+bool isQuickSampling = false;                      // Currently doing quick confidence check
+unsigned long quickSamplingStart = 0;              // When quick sampling started
+float lastQuickConfidence = 0.0f;                 // Last calculated quick confidence
+#define QUICK_SAMPLING_DURATION 3000              // 3 seconds for quick check
+#define QUICK_CONFIDENCE_LOW_THRESHOLD 35.0f      // Below this = stay in deep sleep
+#define QUICK_CONFIDENCE_HIGH_THRESHOLD 45.0f     // Above this = reset adaptive, immediate response
 
 // Bluetooth timing measurements
 unsigned long systemBootTime = 0;
@@ -770,8 +781,8 @@ void saveDeviceRSSI(esp_bd_addr_t address, int8_t rssi) {
         static esp_bd_addr_t lastLoggedAddr = {0};
         if (memcmp(lastLoggedAddr, address, sizeof(esp_bd_addr_t)) != 0 || 
             abs(rssi - lastLoggedRSSI) > 5) {
-            Serial.printf("BLE: RSSI cached: %d dBm (valid range: %d to %d dBm)\n", 
-                         rssi, RSSI_MIN_VALID, RSSI_MAX_VALID);
+            //Serial.printf("BLE: RSSI cached: %d dBm (valid range: %d to %d dBm)\n", 
+            //             rssi, RSSI_MIN_VALID, RSSI_MAX_VALID);
             lastLoggedRSSI = rssi;
             memcpy(lastLoggedAddr, address, sizeof(esp_bd_addr_t));
         }
@@ -1160,7 +1171,7 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
             break;
 
         default:
-            Serial.printf("BLE: GAP event: %d\n", event);
+            //Serial.printf("BLE: GAP event: %d\n", event);
             break;
     }
 }
@@ -1663,6 +1674,9 @@ void updatePowerManagement();
 void setPowerState(PowerState newState);
 void handleDeepSleepRFID();
 void handleDeepSleepBLE();
+float calculateQuickConfidence();
+void updateAdaptiveInterval(bool success);
+void resetAdaptiveInterval();
 
 // ========================================
 // MAIN SETUP - Runs once on boot
@@ -1835,11 +1849,13 @@ void loop() {
     if (bluetoothEnabled && bluetoothInitialized) {
     isBleConnected = bleKeyboard.isConnected();
     
-    // RSSI scanning (only when needed)
+    // RSSI scanning (only when needed and not in deep sleep quiet period)
     static unsigned long lastRSSIScan = 0;
     if (millis() - lastRSSIScan >= RSSI_UPDATE_INTERVAL) {
         int bondedCount = esp_ble_get_bond_device_num();
-        if (bondedCount > 0 && (isBleConnected || isPairingMode)) {
+        // Don't scan if in deep sleep unless actively advertising
+        bool canScan = (currentPowerState != POWER_DEEP_SLEEP) || bleDeepSleepAdvertising;
+        if (bondedCount > 0 && (isBleConnected || isPairingMode) && canScan) {
             startRSSIScan();
         }
         lastRSSIScan = millis();
@@ -2014,7 +2030,7 @@ void loop() {
 // Links to: All pin constants defined at top of file
 void setupPins() {
     // Input pins (active low with pullups)
-    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(BUTTON_PIN, INPUT_PULLUP); // External pullup needed
     pinMode(BRAKE_PIN, INPUT_PULLUP);
     pinMode(ACCESSORY_INPUT_PIN, INPUT); // External pullup, no internal pullup needed
     
@@ -2222,9 +2238,7 @@ void handleButtonPress() {
     lastBrakeReading = brakeReading;
 }
 
-void handleBrakeInput() {
-    //brake is handled in handleButtonPress()
-}
+
 
 //function to handle button state changes
 void updateButtonState(ButtonState &state, int pin) {
@@ -3621,22 +3635,22 @@ void setupBluetooth() {
     // This function kept for compatibility but does nothing
 }
 
-// updateAccessoryAuthentication - Check brake + accessory input for Ghost Power only mode
+// updateAccessoryAuthentication - Check brake + accessory input for Ghost Power only mode (active on low) EDIT PLS 7/25/25
 // Called from: main loop() when ghostKeyEnabled is false
 // Links to: Used for Ghost Power only authentication
 void updateAccessoryAuthentication() {
-    bool brakeHigh = (digitalRead(BRAKE_PIN) == HIGH);
-    bool accessoryHigh = (digitalRead(ACCESSORY_INPUT_PIN) == HIGH);
+    bool brakeLow = (digitalRead(BRAKE_PIN) == LOW);
+    bool accessoryLow = (digitalRead(ACCESSORY_INPUT_PIN) == LOW);
     
     // Authentication occurs when both brake and accessory inputs are HIGH
-    bool newAuthState = (brakeHigh && accessoryHigh);
+    bool newAuthState = (brakeLow && accessoryLow);
     
     if (newAuthState != accessoryInputAuth) {
         accessoryInputAuth = newAuthState;
         Serial.printf("Ghost Power authentication: %s (Brake: %s, Accessory: %s)\n", 
                      accessoryInputAuth ? "Authenticated" : "Not authenticated",
-                     brakeHigh ? "HIGH" : "LOW",
-                     accessoryHigh ? "HIGH" : "LOW");
+                     brakeLow ? "HIGH" : "LOW",
+                     accessoryLow ? "HIGH" : "LOW");
     }
 }
 
@@ -3759,19 +3773,91 @@ void printSystemStatus() {
     }
     
     Serial.print("\nPower State: ");
+    unsigned long currentTime = millis();
+    
+    // Calculate current authentication state (like other functions do)
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    
     switch(currentPowerState) {
         case POWER_ACTIVE:
-            Serial.println("ACTIVE (240MHz)");
+            Serial.print("ACTIVE (240MHz)");
+            if (!isAuthenticated) {
+                unsigned long timeToLightSleep = LIGHT_SLEEP_DELAY_MS - (currentTime - lastUnauthenticatedTime);
+                if (timeToLightSleep > 0 && timeToLightSleep <= LIGHT_SLEEP_DELAY_MS) {
+                    Serial.print(" - Light Sleep in ");
+                    Serial.print(timeToLightSleep / 1000);
+                    Serial.print("s");
+                }
+            }
+            Serial.println();
             break;
+            
         case POWER_LIGHT_SLEEP:
-            Serial.println("LIGHT SLEEP (160MHz)");
+            Serial.print("LIGHT SLEEP (160MHz) - Adaptive timeout: ");
+            Serial.print(adaptiveLightSleepTimeout);
+            Serial.print("ms");
+            if (!isAuthenticated) {
+                unsigned long totalTimeout = LIGHT_SLEEP_DELAY_MS + adaptiveLightSleepTimeout;
+                unsigned long timeToDeepSleep = totalTimeout - (currentTime - lastUnauthenticatedTime);
+                if (timeToDeepSleep > 0 && timeToDeepSleep <= totalTimeout) {
+                    Serial.print(" - Deep Sleep in ");
+                    if (timeToDeepSleep >= 60000) {
+                        Serial.print(timeToDeepSleep / 60000);
+                        Serial.print("m ");
+                        Serial.print((timeToDeepSleep % 60000) / 1000);
+                        Serial.print("s");
+                    } else {
+                        Serial.print(timeToDeepSleep / 1000);
+                        Serial.print("s");
+                    }
+                }
+            }
+            Serial.println();
             break;
+            
         case POWER_DEEP_SLEEP:
             Serial.print("DEEP SLEEP (80MHz) - RFID: ");
             Serial.print(rfidDeepSleepOn ? "ON" : "OFF");
             Serial.print(", BLE Adv: ");
-            Serial.println(bleDeepSleepAdvertising ? "ON" : "OFF");
+            Serial.print(bleDeepSleepAdvertising ? "ON" : "OFF");
+            if (isQuickSampling) {
+                Serial.print(", Quick Sampling: ACTIVE");
+            }
+            
+            // Show BLE cycle timing
+            if (bleDeepSleepAdvertising) {
+                // Currently advertising - show time remaining in this window
+                unsigned long timeInWindow = currentTime - bleDeepSleepAdvertiseStart;
+                unsigned long timeRemaining = BLE_DEEP_SLEEP_DURATION_MS - timeInWindow;
+                if (timeRemaining > 0 && timeRemaining <= BLE_DEEP_SLEEP_DURATION_MS) {
+                    Serial.print(" - BLE window ends in ");
+                    Serial.print(timeRemaining / 1000);
+                    Serial.print("s");
+                }
+            } else {
+                // Currently in quiet period - show time until next BLE window
+                unsigned long timeSinceStart = currentTime - bleDeepSleepAdvertiseStart;
+                unsigned long quietPeriod = BLE_DEEP_SLEEP_INTERVAL_MS - BLE_DEEP_SLEEP_DURATION_MS;
+                unsigned long timeToNextWindow = quietPeriod - timeSinceStart;
+                if (timeToNextWindow > 0 && timeToNextWindow <= quietPeriod) {
+                    Serial.print(" - Next BLE window in ");
+                    Serial.print(timeToNextWindow / 1000);
+                    Serial.print("s");
+                }
+            }
+            Serial.println();
             break;
+    }
+    
+    // Show adaptive interval status
+    if (currentPowerState == POWER_DEEP_SLEEP || currentPowerState == POWER_LIGHT_SLEEP) {
+        Serial.print("Adaptive System: Timeout=");
+        Serial.print(adaptiveLightSleepTimeout);
+        Serial.print("ms, Consecutive weak connections=");
+        Serial.print(consecutiveWeakConnections);
+        Serial.print(", Last quick confidence=");
+        Serial.print(lastQuickConfidence, 1);
+        Serial.println("%");
     }
     
     Serial.print("\nLED States - ACC: ");
@@ -4580,14 +4666,28 @@ void updatePowerManagement() {
     if (isAuthenticated != wasAuthenticated) {
         if (isAuthenticated) {
             lastAuthenticatedTime = millis();
-            // Wake up immediately if authenticated
-            if (currentPowerState != POWER_ACTIVE) {
+            // Wake up based on current power state
+            if (currentPowerState == POWER_DEEP_SLEEP) {
+                // From Deep Sleep: go to Light Sleep first, then Active after verification
+                setPowerState(POWER_LIGHT_SLEEP);
+            } else if (currentPowerState != POWER_ACTIVE) {
+                // From Light Sleep or other states: go directly to Active
                 setPowerState(POWER_ACTIVE);
             }
         } else {
             lastUnauthenticatedTime = millis();
         }
         wasAuthenticated = isAuthenticated;
+    }
+    
+    // Check for device connection during Deep Sleep advertising window
+    if (currentPowerState == POWER_DEEP_SLEEP && bleDeepSleepAdvertising) {
+        if (bluetoothEnabled && isBleConnected && !isAuthenticated) {
+            // Device connected but not yet authenticated - go to Light Sleep to monitor
+            setPowerState(POWER_LIGHT_SLEEP);
+            Serial.println("Deep Sleep: Device connected, transitioning to Light Sleep for monitoring");
+            return;
+        }
     }
     
     // Check brake press for wake up
@@ -4604,14 +4704,20 @@ void updatePowerManagement() {
             setPowerState(POWER_LIGHT_SLEEP);
         }
     } else if (!isAuthenticated && currentPowerState == POWER_LIGHT_SLEEP) {
-        // Check if we should transition to Deep Sleep
-        if (millis() - lastUnauthenticatedTime >= DEEP_SLEEP_DELAY_MS) {
+        // Check if we should transition to Deep Sleep using adaptive timeout
+        if (millis() - lastUnauthenticatedTime >= (LIGHT_SLEEP_DELAY_MS + adaptiveLightSleepTimeout)) {
+            Serial.print("Light Sleep timeout reached (");
+            Serial.print(adaptiveLightSleepTimeout);
+            Serial.println("ms), transitioning to Deep Sleep");
+            Serial.flush();  // Ensure output completes before state change
+            updateAdaptiveInterval(false);  // Failed to authenticate in light sleep
             setPowerState(POWER_DEEP_SLEEP);
         }
-        // Also go to deep sleep if BLE device disconnects
-        if (bluetoothEnabled && !isBleConnected && hasConnectedDevice) {
-            setPowerState(POWER_DEEP_SLEEP);
-        }
+    } else if (isAuthenticated && currentPowerState == POWER_LIGHT_SLEEP) {
+        // If we're in Light Sleep and become authenticated, go to Active
+        Serial.println("Authenticated in Light Sleep, going to Active");
+        updateAdaptiveInterval(true);  // Successful authentication
+        setPowerState(POWER_ACTIVE);
     }
     
     // Handle Deep Sleep specific operations
@@ -4643,6 +4749,7 @@ void setPowerState(PowerState newState) {
     }
     
     currentPowerState = newState;
+    Serial.flush();  // Ensure all debug output completes before frequency change
     
     // Set CPU frequency based on state
     switch(newState) {
@@ -4650,9 +4757,10 @@ void setPowerState(PowerState newState) {
             setCpuFrequencyMhz(240);  // Full speed
             // Make sure RFID is on
             digitalWrite(RFID_SHD, LOW);
-            // Resume normal BLE advertising if enabled
+            // Resume normal BLE advertising and scanning if enabled
             if (bluetoothEnabled && bluetoothInitialized) {
                 startBLEAdvertising(isPairingMode);
+                startRSSIScan();  // Resume RSSI scanning
             }
             break;
             
@@ -4663,12 +4771,26 @@ void setPowerState(PowerState newState) {
             break;
             
         case POWER_DEEP_SLEEP:
-            setCpuFrequencyMhz(80);   // Minimal speed
+            // Stop any ongoing RSSI scanning and advertising first
+            if (bluetoothEnabled && bluetoothInitialized) {
+                stopRSSIScan();
+                stopBLEAdvertising();
+            }
+            delay(10);  // Brief pause to ensure operations complete
+            
             // Initialize deep sleep timing
             rfidDeepSleepCycleStart = millis();
             rfidDeepSleepOn = true;
-            bleDeepSleepAdvertiseStart = 0;
+            // Start quiet period - BLE window will start after 50 seconds
+            bleDeepSleepAdvertiseStart = millis();  // Start of 60-second cycle
             bleDeepSleepAdvertising = false;
+            bleAdvertisingStopped = true;   // Start in stopped state for quiet period
+            isQuickSampling = false;        // Reset quick sampling
+            
+            // Start Deep Sleep at lower frequency (will be raised during BLE windows)
+            setCpuFrequencyMhz(40);   // Start with power-saving frequency
+            
+            Serial.println("Deep Sleep: Starting with 50-second quiet period");
             break;
     }
 }
@@ -4696,23 +4818,177 @@ void handleDeepSleepBLE() {
     unsigned long currentTime = millis();
     
     if (!bleDeepSleepAdvertising) {
-        // Check if it's time to start advertising
+        // Check if it's time to start advertising (after 50 seconds of cycle)
         if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_INTERVAL_MS - BLE_DEEP_SLEEP_DURATION_MS) {
-            // Start advertising for 10 seconds
+            // Increase CPU frequency for BLE operations
+            setCpuFrequencyMhz(80);  // Higher speed for reliable BLE operations
+            delay(5);  // Brief pause after frequency change
+            
+            // Start advertising and scanning for 10 seconds
             bleDeepSleepAdvertising = true;
-            bleDeepSleepAdvertiseStart = currentTime;
+            // DON'T reset bleDeepSleepAdvertiseStart - keep cycle timing intact
+            bleAdvertisingStopped = false;  // Reset flag since we're advertising again
+            isQuickSampling = false;        // Reset quick sampling state
             startBLEAdvertising(false);  // Normal advertising, not pairing mode
+            startRSSIScan();  // Also start RSSI scanning
+            Serial.println("Deep Sleep: BLE window started (80MHz)");
         } else {
-            // Make sure advertising is stopped during the quiet period
-            stopBLEAdvertising();
+            // Stop advertising and scanning only once when entering quiet period
+            if (!bleAdvertisingStopped) {
+                stopBLEAdvertising();
+                stopRSSIScan();  // Also stop RSSI scanning
+                // Disconnect any connected devices during quiet period to prevent stale connections
+                if (pServer != nullptr && isBleConnected) {
+                    pServer->disconnect(pServer->getConnId());
+                    Serial.println("Deep Sleep: Disconnecting BLE device for quiet period");
+                }
+                // Clear connection state for clean transitions
+                hasConnectedDevice = false;
+                bluetoothAuthenticated = false;
+                isQuickSampling = false;  // Reset quick sampling
+                bleAdvertisingStopped = true;
+            }
         }
     } else {
-        // Check if advertising period is over
-        if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_DURATION_MS) {
+        // During advertising period - check for device connections and do quick sampling
+        if (isBleConnected && hasConnectedDevice && !isQuickSampling && !bluetoothAuthenticated) {
+            // Device just connected - start quick confidence sampling
+            isQuickSampling = true;
+            quickSamplingStart = currentTime;
+            Serial.println("Deep Sleep: Device connected, starting quick confidence sampling...");
+        }
+        
+        // Handle quick sampling process
+        if (isQuickSampling) {
+            if (currentTime - quickSamplingStart >= QUICK_SAMPLING_DURATION) {
+                // Quick sampling complete - calculate confidence and make decision
+                lastQuickConfidence = calculateQuickConfidence();
+                isQuickSampling = false;
+                
+                Serial.print("Deep Sleep: Quick confidence = ");
+                Serial.print(lastQuickConfidence, 1);
+                Serial.println("%");
+                
+                if (lastQuickConfidence < QUICK_CONFIDENCE_LOW_THRESHOLD) {
+                    // Low confidence - disconnect and stay in deep sleep
+                    Serial.println("Deep Sleep: Low confidence, disconnecting and staying in deep sleep");
+                    if (pServer != nullptr) {
+                        pServer->disconnect(pServer->getConnId());
+                    }
+                    consecutiveWeakConnections++;
+                } else if (lastQuickConfidence >= QUICK_CONFIDENCE_HIGH_THRESHOLD) {
+                    // High confidence - user approaching, reset adaptive and go to light sleep
+                    Serial.println("Deep Sleep: High confidence detected - user approaching!");
+                    resetAdaptiveInterval();
+                    setPowerState(POWER_LIGHT_SLEEP);
+                    return;
+                } else {
+                    // Medium confidence - go to light sleep with current adaptive timeout
+                    Serial.print("Deep Sleep: Medium confidence, going to light sleep (timeout: ");
+                    Serial.print(adaptiveLightSleepTimeout);
+                    Serial.println("ms)");
+                    setPowerState(POWER_LIGHT_SLEEP);
+                    return;
+                }
+            }
+        }
+        
+        // Check if full 60-second cycle is complete (BLE window ends at 60s)
+        if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_INTERVAL_MS) {
             bleDeepSleepAdvertising = false;
             stopBLEAdvertising();
+            stopRSSIScan();  // Also stop RSSI scanning
+            isQuickSampling = false;  // Reset quick sampling
+            bleAdvertisingStopped = true;  // Mark as stopped
+            
+            // Reset cycle for next 60-second period
+            bleDeepSleepAdvertiseStart = currentTime;
+            
+            // Reduce CPU frequency for quiet period
+            Serial.flush();  // Ensure output completes before frequency change
+            delay(5);  // Brief pause before frequency change
+            setCpuFrequencyMhz(40);  // Lower speed for power savings
+            Serial.println("Deep Sleep: BLE window ended, starting new 60s cycle (40MHz)");
         }
     }
+}
+
+// ========================================
+// ADAPTIVE INTERVAL AND QUICK CONFIDENCE FUNCTIONS
+// ========================================
+
+// Calculate quick confidence using recent RSSI data for fast decision making
+float calculateQuickConfidence() {
+    // Use existing RSSI analysis but focus on recent short-term data
+    if (!rssiAnalysis.hasDevice || rssiAnalysis.shortTermStats.validSamples < 15) {
+        return 0.0f;  // Not enough data for quick decision
+    }
+    
+    // Quick calculation using short-term stats only
+    float mean = rssiAnalysis.shortTermStats.mean;
+    float stdDev = rssiAnalysis.shortTermStats.standardDeviation;
+    
+    // Quick signal strength score (0-40 points) using sigmoid
+    float strengthScore = STRENGTH_WEIGHT / (1.0f + exp(-SIGMOID_STEEPNESS * (mean - SIGMOID_MIDPOINT)));
+    
+    // Quick stability score (0-35 points) - lower std dev = more stable
+    float stabilityScore = 0.0f;
+    if (stdDev <= STABILITY_THRESHOLD) {
+        stabilityScore = STABILITY_WEIGHT * (1.0f - (stdDev / STABILITY_THRESHOLD));
+    }
+    
+    // Quick trend score (0-25 points) - assume neutral for quick decision
+    float trendScore = TREND_WEIGHT * 0.5f;  // Neutral trend assumption
+    
+    // Calculate total quick confidence
+    float quickConfidence = strengthScore + stabilityScore + trendScore;
+    
+    // Apply calibration offset
+    quickConfidence += calibrationOffset;
+    
+    // Clamp to 0-100 range
+    if (quickConfidence < 0.0f) quickConfidence = 0.0f;
+    if (quickConfidence > 100.0f) quickConfidence = 100.0f;
+    
+    return quickConfidence;
+}
+
+// Update adaptive interval based on Light Sleep outcome
+void updateAdaptiveInterval(bool success) {
+    if (success) {
+        // Successful authentication - reset to fast intervals
+        resetAdaptiveInterval();
+        consecutiveWeakConnections = 0;
+        Serial.println("Adaptive: Reset to fast intervals (successful auth)");
+    } else {
+        // Failed authentication - increase timeout
+        consecutiveWeakConnections++;
+        
+        // Progressive timeout increases: 2min -> 3min -> 5min -> 10min -> 15min (max)
+        if (consecutiveWeakConnections >= 1 && adaptiveLightSleepTimeout < 180000) {
+            adaptiveLightSleepTimeout = 180000;  // 3 minutes
+        } else if (consecutiveWeakConnections >= 2 && adaptiveLightSleepTimeout < 300000) {
+            adaptiveLightSleepTimeout = 300000;  // 5 minutes
+        } else if (consecutiveWeakConnections >= 3 && adaptiveLightSleepTimeout < 600000) {
+            adaptiveLightSleepTimeout = 600000;  // 10 minutes
+        } else if (consecutiveWeakConnections >= 4 && adaptiveLightSleepTimeout < 900000) {
+            adaptiveLightSleepTimeout = 900000;  // 15 minutes (max)
+        }
+        
+        Serial.print("Adaptive: Timeout increased to ");
+        Serial.print(adaptiveLightSleepTimeout);
+        Serial.print("ms (consecutive weak: ");
+        Serial.print(consecutiveWeakConnections);
+        Serial.println(")");
+        Serial.flush();  // Ensure serial output completes before frequency change
+    }
+}
+
+// Reset adaptive interval to fastest setting
+void resetAdaptiveInterval() {
+    adaptiveLightSleepTimeout = 120000;  // Reset to 2 minutes
+    consecutiveWeakConnections = 0;
+    Serial.println("Adaptive: Intervals reset to minimum (2 minutes)");
 }
 
 // ========================================

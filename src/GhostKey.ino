@@ -16,6 +16,7 @@
 #include <ArduinoJson.h>
 #include "config_html.h"
 #include "setup_html.h"
+#include <esp32-hal-cpu.h>
 
 // ========================================
 // JDI LOGO SVG - STORED IN PROGMEM
@@ -259,6 +260,20 @@ enum SystemState {
     CONFIG_MODE
 };
 
+// Power management states
+enum PowerState {
+    POWER_ACTIVE,      // 240MHz - Full power, all systems running
+    POWER_LIGHT_SLEEP, // 160MHz - Reduced power, all systems active but slower
+    POWER_DEEP_SLEEP   // 80MHz - Minimal power, RFID cycling, BLE advertising reduced
+};
+
+// Power management timing constants
+#define LIGHT_SLEEP_DELAY_MS 30000      // 30 seconds after losing authentication
+#define DEEP_SLEEP_DELAY_MS 120000      // 2 minutes after losing authentication
+#define RFID_DEEP_SLEEP_CYCLE_MS 500    // 500ms on/off cycle for RFID in deep sleep
+#define BLE_DEEP_SLEEP_INTERVAL_MS 60000 // 1 minute between BLE advertising periods
+#define BLE_DEEP_SLEEP_DURATION_MS 10000 // 10 seconds of advertising in deep sleep
+
 // Button state tracking with debouncing
 struct ButtonState {
     bool currentState;
@@ -367,6 +382,16 @@ bool bluetoothInitialized = false;
 bool ghostKeyEnabled = true;    // RFID/Bluetooth/Push-to-start functionality
 bool ghostPowerEnabled = true;  // Security relay functionality
 bool accessoryInputAuth = false; // Authentication via brake + accessory input
+
+// Power management state variables
+PowerState currentPowerState = POWER_ACTIVE;  // Always start in active mode
+bool wasAuthenticated = false;                // Track previous authentication state
+unsigned long lastAuthenticatedTime = 0;       // When authentication was last true
+unsigned long lastUnauthenticatedTime = 0;     // When authentication became false
+unsigned long rfidDeepSleepCycleStart = 0;    // For RFID on/off cycling
+bool rfidDeepSleepOn = true;                  // Current RFID state in deep sleep
+unsigned long bleDeepSleepAdvertiseStart = 0;  // When BLE advertising started in deep sleep
+bool bleDeepSleepAdvertising = false;         // Whether BLE is currently advertising in deep sleep
 
 // Bluetooth timing measurements
 unsigned long systemBootTime = 0;
@@ -1634,6 +1659,10 @@ void checkAutoLock();
 void enterConfigMode();
 void exitConfigMode();
 void updateSecurityState();
+void updatePowerManagement();
+void setPowerState(PowerState newState);
+void handleDeepSleepRFID();
+void handleDeepSleepBLE();
 
 // ========================================
 // MAIN SETUP - Runs once on boot
@@ -1759,6 +1788,9 @@ void setup() {
 // MAIN LOOP - Runs continuously
 // ========================================
 void loop() {
+    // Power management first - affects all other systems
+    updatePowerManagement();
+    
     // Core system updates
     updateSystemState();
     
@@ -3071,8 +3103,17 @@ void setupWebServer() {
             default: stateStr = "UNKNOWN"; break;
         }
         
+        String powerStateStr;
+        switch(currentPowerState) {
+            case POWER_ACTIVE: powerStateStr = "ACTIVE"; break;
+            case POWER_LIGHT_SLEEP: powerStateStr = "LIGHT_SLEEP"; break;
+            case POWER_DEEP_SLEEP: powerStateStr = "DEEP_SLEEP"; break;
+            default: powerStateStr = "UNKNOWN"; break;
+        }
+        
         String json = "{";
         json += "\"state\":\"" + stateStr + "\",";
+        json += "\"powerState\":\"" + powerStateStr + "\",";
         json += "\"bluetooth\":" + String((bluetoothEnabled && bluetoothAuthenticated) ? "true" : "false") + ",";
         json += "\"bluetoothEnabled\":" + String(bluetoothEnabled ? "true" : "false") + ",";
         json += "\"starterPulse\":" + String(starterPulseTime) + ",";
@@ -3715,6 +3756,22 @@ void printSystemStatus() {
                 Serial.println("IGNITION");
                 break;
         }
+    }
+    
+    Serial.print("\nPower State: ");
+    switch(currentPowerState) {
+        case POWER_ACTIVE:
+            Serial.println("ACTIVE (240MHz)");
+            break;
+        case POWER_LIGHT_SLEEP:
+            Serial.println("LIGHT SLEEP (160MHz)");
+            break;
+        case POWER_DEEP_SLEEP:
+            Serial.print("DEEP SLEEP (80MHz) - RFID: ");
+            Serial.print(rfidDeepSleepOn ? "ON" : "OFF");
+            Serial.print(", BLE Adv: ");
+            Serial.println(bleDeepSleepAdvertising ? "ON" : "OFF");
+            break;
     }
     
     Serial.print("\nLED States - ACC: ");
@@ -4507,6 +4564,154 @@ void addCalibrationSample(float rssi, float confidence) {
     // Auto-stop after duration
     if (millis() - calibrationStartTime >= calibrationDuration) {
         stopCalibration();
+    }
+}
+
+// ========================================
+// POWER MANAGEMENT FUNCTIONS
+// ========================================
+
+// Update power management state based on authentication and timing
+void updatePowerManagement() {
+    // Get current authentication state
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    
+    // Track authentication state changes
+    if (isAuthenticated != wasAuthenticated) {
+        if (isAuthenticated) {
+            lastAuthenticatedTime = millis();
+            // Wake up immediately if authenticated
+            if (currentPowerState != POWER_ACTIVE) {
+                setPowerState(POWER_ACTIVE);
+            }
+        } else {
+            lastUnauthenticatedTime = millis();
+        }
+        wasAuthenticated = isAuthenticated;
+    }
+    
+    // Check brake press for wake up
+    bool brakePressed = (digitalRead(BRAKE_PIN) == LOW);
+    if (brakePressed && currentPowerState != POWER_ACTIVE) {
+        setPowerState(POWER_ACTIVE);
+        return;
+    }
+    
+    // Handle state transitions based on authentication and timing
+    if (!isAuthenticated && currentPowerState == POWER_ACTIVE) {
+        // Check if we should transition to Light Sleep
+        if (millis() - lastUnauthenticatedTime >= LIGHT_SLEEP_DELAY_MS) {
+            setPowerState(POWER_LIGHT_SLEEP);
+        }
+    } else if (!isAuthenticated && currentPowerState == POWER_LIGHT_SLEEP) {
+        // Check if we should transition to Deep Sleep
+        if (millis() - lastUnauthenticatedTime >= DEEP_SLEEP_DELAY_MS) {
+            setPowerState(POWER_DEEP_SLEEP);
+        }
+        // Also go to deep sleep if BLE device disconnects
+        if (bluetoothEnabled && !isBleConnected && hasConnectedDevice) {
+            setPowerState(POWER_DEEP_SLEEP);
+        }
+    }
+    
+    // Handle Deep Sleep specific operations
+    if (currentPowerState == POWER_DEEP_SLEEP) {
+        handleDeepSleepRFID();
+        if (bluetoothEnabled) {
+            handleDeepSleepBLE();
+        }
+    }
+}
+
+// Set new power state and adjust CPU frequency
+void setPowerState(PowerState newState) {
+    if (currentPowerState == newState) {
+        return;
+    }
+    
+    DEBUG_PRINT("Power state changing from ");
+    switch(currentPowerState) {
+        case POWER_ACTIVE: DEBUG_PRINT("ACTIVE"); break;
+        case POWER_LIGHT_SLEEP: DEBUG_PRINT("LIGHT_SLEEP"); break;
+        case POWER_DEEP_SLEEP: DEBUG_PRINT("DEEP_SLEEP"); break;
+    }
+    DEBUG_PRINT(" to ");
+    switch(newState) {
+        case POWER_ACTIVE: DEBUG_PRINTLN("ACTIVE"); break;
+        case POWER_LIGHT_SLEEP: DEBUG_PRINTLN("LIGHT_SLEEP"); break;
+        case POWER_DEEP_SLEEP: DEBUG_PRINTLN("DEEP_SLEEP"); break;
+    }
+    
+    currentPowerState = newState;
+    
+    // Set CPU frequency based on state
+    switch(newState) {
+        case POWER_ACTIVE:
+            setCpuFrequencyMhz(240);  // Full speed
+            // Make sure RFID is on
+            digitalWrite(RFID_SHD, LOW);
+            // Resume normal BLE advertising if enabled
+            if (bluetoothEnabled && bluetoothInitialized) {
+                startBLEAdvertising(isPairingMode);
+            }
+            break;
+            
+        case POWER_LIGHT_SLEEP:
+            setCpuFrequencyMhz(160);  // 33% reduction
+            // RFID stays on in light sleep
+            digitalWrite(RFID_SHD, LOW);
+            break;
+            
+        case POWER_DEEP_SLEEP:
+            setCpuFrequencyMhz(80);   // Minimal speed
+            // Initialize deep sleep timing
+            rfidDeepSleepCycleStart = millis();
+            rfidDeepSleepOn = true;
+            bleDeepSleepAdvertiseStart = 0;
+            bleDeepSleepAdvertising = false;
+            break;
+    }
+}
+
+// Handle RFID on/off cycling in deep sleep
+void handleDeepSleepRFID() {
+    unsigned long currentTime = millis();
+    unsigned long cycleTime = currentTime - rfidDeepSleepCycleStart;
+    
+    // Toggle RFID every ~500ms
+    if (cycleTime >= RFID_DEEP_SLEEP_CYCLE_MS) {
+        rfidDeepSleepCycleStart = currentTime;
+        rfidDeepSleepOn = !rfidDeepSleepOn;
+        
+        // Control RFID module power via SHD pin
+        // SHD HIGH = shutdown/sleep mode, LOW = active
+        digitalWrite(RFID_SHD, rfidDeepSleepOn ? LOW : HIGH);
+    }
+}
+
+// Handle BLE advertising cycling in deep sleep
+void handleDeepSleepBLE() {
+    if (!bluetoothInitialized) return;
+    
+    unsigned long currentTime = millis();
+    
+    if (!bleDeepSleepAdvertising) {
+        // Check if it's time to start advertising
+        if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_INTERVAL_MS - BLE_DEEP_SLEEP_DURATION_MS) {
+            // Start advertising for 10 seconds
+            bleDeepSleepAdvertising = true;
+            bleDeepSleepAdvertiseStart = currentTime;
+            startBLEAdvertising(false);  // Normal advertising, not pairing mode
+        } else {
+            // Make sure advertising is stopped during the quiet period
+            stopBLEAdvertising();
+        }
+    } else {
+        // Check if advertising period is over
+        if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_DURATION_MS) {
+            bleDeepSleepAdvertising = false;
+            stopBLEAdvertising();
+        }
     }
 }
 

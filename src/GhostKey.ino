@@ -4754,6 +4754,8 @@ void setPowerState(PowerState newState) {
     // Set CPU frequency based on state
     switch(newState) {
         case POWER_ACTIVE:
+            Serial.begin(115200);  // Re-enable serial
+            delay(10);  // Brief pause for serial initialization
             setCpuFrequencyMhz(240);  // Full speed
             // Make sure RFID is on
             digitalWrite(RFID_SHD, LOW);
@@ -4765,6 +4767,8 @@ void setPowerState(PowerState newState) {
             break;
             
         case POWER_LIGHT_SLEEP:
+            Serial.begin(115200);  // Re-enable serial
+            delay(10);  // Brief pause for serial initialization
             setCpuFrequencyMhz(160);  // 33% reduction
             // RFID stays on in light sleep
             digitalWrite(RFID_SHD, LOW);
@@ -4791,6 +4795,9 @@ void setPowerState(PowerState newState) {
             setCpuFrequencyMhz(40);   // Start with power-saving frequency
             
             Serial.println("Deep Sleep: Starting with 50-second quiet period");
+            Serial.flush();  // Ensure final message is sent
+            delay(10);  // Brief pause before disabling serial
+            Serial.end();  // Disable serial to prevent issues during deep sleep
             break;
     }
 }
@@ -4822,7 +4829,7 @@ void handleDeepSleepBLE() {
         if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_INTERVAL_MS - BLE_DEEP_SLEEP_DURATION_MS) {
             // Increase CPU frequency for BLE operations
             setCpuFrequencyMhz(80);  // Higher speed for reliable BLE operations
-            delay(5);  // Brief pause after frequency change
+            delay(50);  // Longer pause for proper stabilization
             
             // Start advertising and scanning for 10 seconds
             bleDeepSleepAdvertising = true;
@@ -4906,7 +4913,7 @@ void handleDeepSleepBLE() {
             
             // Reduce CPU frequency for quiet period
             Serial.flush();  // Ensure output completes before frequency change
-            delay(5);  // Brief pause before frequency change
+            delay(50);  // Longer pause for proper stabilization
             setCpuFrequencyMhz(40);  // Lower speed for power savings
             Serial.println("Deep Sleep: BLE window ended, starting new 60s cycle (40MHz)");
         }

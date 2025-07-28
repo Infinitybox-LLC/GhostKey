@@ -1234,11 +1234,11 @@ void disablePairingMode() {
 // Function to start RSSI scanning
 void startRSSIScan() {
     esp_ble_scan_params_t scan_params = {
-        .scan_type = BLE_SCAN_TYPE_ACTIVE,
+        .scan_type = BLE_SCAN_TYPE_PASSIVE,  // Use passive scanning to reduce power
         .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
         .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval = 0x50,  // Reduced interval for more frequent updates
-        .scan_window = 0x30,    // Increased window for better reception
+        .scan_interval = 0x80,  // Longer interval for power savings (100ms)
+        .scan_window = 0x20,    // Shorter window for power savings (20ms)
         .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE
     };
     esp_ble_gap_set_scan_params(&scan_params);
@@ -1246,7 +1246,7 @@ void startRSSIScan() {
     // Reduced logging - only log once at startup
     static bool firstScan = true;
     if (firstScan) {
-        Serial.println("BLE: RSSI scanning started");
+        Serial.println("BLE: Passive RSSI scanning started (power optimized)");
         firstScan = false;
     }
 }
@@ -1868,14 +1868,18 @@ void loop() {
     if (bluetoothEnabled && bluetoothInitialized) {
     isBleConnected = bleKeyboard.isConnected();
     
-    // RSSI scanning (only when needed and not in deep sleep quiet period)
+    // RSSI scanning (only in active mode to preserve power savings)
     static unsigned long lastRSSIScan = 0;
     if (millis() - lastRSSIScan >= RSSI_UPDATE_INTERVAL) {
         int bondedCount = esp_ble_get_bond_device_num();
-        // Don't scan if in deep sleep unless actively advertising
-        bool canScan = (currentPowerState != POWER_DEEP_SLEEP) || bleDeepSleepAdvertising;
+        // Only scan in ACTIVE mode - modem and deep sleep preserve power by avoiding scanning
+        bool canScan = (currentPowerState == POWER_ACTIVE) || 
+                       (currentPowerState == POWER_DEEP_SLEEP && bleDeepSleepAdvertising);
         if (bondedCount > 0 && (isBleConnected || isPairingMode) && canScan) {
             startRSSIScan();
+        } else if (currentPowerState != POWER_ACTIVE) {
+            // Stop scanning in non-active modes to allow radio sleep
+            stopRSSIScan();
         }
         lastRSSIScan = millis();
     }
@@ -4799,6 +4803,13 @@ void setPowerState(PowerState newState) {
         case POWER_MODEM_SLEEP: {
             Serial.begin(115200);  // Re-enable serial
             delay(10);  // Brief pause for serial initialization
+            
+            // Stop RSSI scanning to allow BLE radio to sleep
+            if (bluetoothEnabled && bluetoothInitialized) {
+                stopRSSIScan();
+                Serial.println("Modem Sleep: RSSI scanning stopped to allow radio sleep");
+            }
+            
             setCpuFrequencyMhz(80);  // Reduced frequency but CPU stays active
             
             // Enable ESP32 modem sleep with Association Sleep Pattern
@@ -4812,10 +4823,10 @@ void setPowerState(PowerState newState) {
             // RFID stays on in modem sleep - CPU remains active for scanning
             digitalWrite(RFID_SHD, LOW);
             
-            // BLE automatically handles Association Sleep Pattern
-            // Radio wakes up at DTIM intervals to maintain connections
-            // RSSI analysis and proximity detection continue working
-            Serial.println("Modem Sleep: BLE Association Sleep Pattern enabled, RFID active");
+            // BLE maintains connections via Association Sleep Pattern (3-20mA)
+            // Radio sleeps between DTIM beacons, wakes for connection maintenance
+            // Proximity detection relies on connection events, not active scanning
+            Serial.println("Modem Sleep: BLE Association Sleep Pattern enabled, RFID active, RSSI scanning disabled");
             break;
         }
             
@@ -4830,6 +4841,12 @@ void setPowerState(PowerState newState) {
             // Configure GPIO wake sources (brake only - RFID crashes system)
             esp_sleep_enable_ext0_wakeup((gpio_num_t)BRAKE_PIN, 0);  // Wake on brake press
             
+            // Disable WiFi if still active to save power
+            if (WiFi.getMode() != WIFI_OFF) {
+                WiFi.mode(WIFI_OFF);
+                Serial.println("Deep Sleep: WiFi disabled");
+            }
+            
             // Initialize deep sleep timing for pseudo deep sleep approach
             rfidDeepSleepCycleStart = millis();
             rfidDeepSleepOn = true;
@@ -4839,11 +4856,18 @@ void setPowerState(PowerState newState) {
             bleAdvertisingStopped = true;   // Start in stopped state for quiet period
             isQuickSampling = false;        // Reset quick sampling
             
-            // Use pseudo deep sleep (low frequency) instead of true deep sleep
-            // This preserves RFID cycling functionality
-            setCpuFrequencyMhz(40);   // Start with power-saving frequency
+            // Use aggressive power saving instead of true deep sleep (for RFID compatibility)
+            setCpuFrequencyMhz(10);   // Ultra-low frequency for minimum power
             
-            Serial.println("Pseudo Deep Sleep: Starting RFID cycling and BLE windows (40MHz)");
+            // Configure power management for ultra-low power mode
+            esp_pm_config_esp32_t pm_config_deep = {
+                .max_freq_mhz = 10,        // Ultra-low max frequency
+                .min_freq_mhz = 10,        // Keep consistent for stability
+                .light_sleep_enable = false // Disabled for manual RFID cycling
+            };
+            esp_pm_configure(&pm_config_deep);
+            
+            Serial.println("Ultra Deep Sleep: RFID cycling, BLE windows, minimal CPU (10MHz)");
             Serial.flush();  // Ensure final message is sent
             delay(10);  // Brief pause before reducing serial activity
             break;
@@ -5044,6 +5068,28 @@ void resetAdaptiveInterval() {
     adaptiveLightSleepTimeout = 120000;  // Reset to 2 minutes
     consecutiveWeakConnections = 0;
     Serial.println("Adaptive: Intervals reset to minimum (2 minutes)");
+}
+
+// ========================================
+// POWER OPTIMIZATION FUNCTIONS
+// ========================================
+
+// Explicit light sleep for guaranteed power savings in modem sleep mode
+void performLightSleep(uint32_t sleep_time_ms) {
+    if (currentPowerState != POWER_MODEM_SLEEP) {
+        return; // Only use during modem sleep
+    }
+    
+    // Configure wake sources
+    esp_sleep_enable_timer_wakeup(sleep_time_ms * 1000); // Convert to microseconds
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)BRAKE_PIN, 0); // Wake on brake
+    
+    // Enter light sleep - guarantees low power mode
+    esp_light_sleep_start();
+    
+    // After wake up, re-enable any needed peripherals
+    Serial.begin(115200);
+    delay(10);
 }
 
 // ========================================

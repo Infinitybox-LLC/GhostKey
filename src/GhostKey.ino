@@ -4772,7 +4772,7 @@ void setPowerState(PowerState newState) {
     
     // Set power state using ESP32 hardware sleep modes
     switch(newState) {
-        case POWER_ACTIVE:
+        case POWER_ACTIVE: {
             Serial.begin(115200);  // Re-enable serial
             delay(10);  // Brief pause for serial initialization
             setCpuFrequencyMhz(240);  // Full speed
@@ -4794,8 +4794,9 @@ void setPowerState(PowerState newState) {
             }
             Serial.println("Active Mode: Full power, all systems running");
             break;
+        }
             
-        case POWER_MODEM_SLEEP:
+        case POWER_MODEM_SLEEP: {
             Serial.begin(115200);  // Re-enable serial
             delay(10);  // Brief pause for serial initialization
             setCpuFrequencyMhz(80);  // Reduced frequency but CPU stays active
@@ -4816,6 +4817,7 @@ void setPowerState(PowerState newState) {
             // RSSI analysis and proximity detection continue working
             Serial.println("Modem Sleep: BLE Association Sleep Pattern enabled, RFID active");
             break;
+        }
             
         case POWER_DEEP_SLEEP:
             // Stop any ongoing RSSI scanning and advertising first

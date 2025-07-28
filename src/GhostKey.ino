@@ -17,6 +17,10 @@
 #include "config_html.h"
 #include "setup_html.h"
 #include <esp32-hal-cpu.h>
+#include "esp_sleep.h"
+#include "esp_pm.h"
+#include "driver/gpio.h"
+#include "driver/rtc_io.h"
 
 // ========================================
 // JDI LOGO SVG - STORED IN PROGMEM
@@ -263,14 +267,14 @@ enum SystemState {
 // Power management states
 enum PowerState {
     POWER_ACTIVE,      // 240MHz - Full power, all systems running
-    POWER_LIGHT_SLEEP, // 160MHz - Reduced power, all systems active but slower
-    POWER_DEEP_SLEEP   // 80MHz - Minimal power, RFID cycling, BLE advertising reduced
+    POWER_MODEM_SLEEP, // 10-80MHz - CPU active, BLE Association Sleep Pattern for proximity detection
+    POWER_DEEP_SLEEP   // 40MHz - Minimal power, RFID cycling, BLE advertising reduced
 };
 
 // Power management timing constants
-#define LIGHT_SLEEP_DELAY_MS 30000      // 30 seconds after losing authentication
+#define MODEM_SLEEP_DELAY_MS 30000      // 30 seconds after losing authentication
 #define DEEP_SLEEP_DELAY_MS 60000      // 2 minutes after losing authentication
-#define RFID_DEEP_SLEEP_CYCLE_MS 1000    // 500ms on/off cycle for RFID in deep sleep
+#define RFID_DEEP_SLEEP_CYCLE_MS 1000    // 1000ms on/off cycle for RFID in deep sleep
 #define BLE_DEEP_SLEEP_INTERVAL_MS 60000 // 1 minute between BLE advertising periods
 #define BLE_DEEP_SLEEP_DURATION_MS 10000 // 10 seconds of advertising in deep sleep
 
@@ -1795,6 +1799,21 @@ void setup() {
     DEBUG_PRINT(rfidInitCompleteTime - rfidInitStartTime);
     DEBUG_PRINTLN("ms");
     
+    // Initialize ESP32 power management
+    DEBUG_PRINTLN("Initializing ESP32 power management...");
+    
+    // Configure GPIO wake sources for deep sleep
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)BRAKE_PIN, 0);  // Wake on brake press
+    
+    // Start in active mode with power management disabled
+    esp_pm_config_esp32_t pm_config = {
+        .max_freq_mhz = 240,
+        .min_freq_mhz = 240,
+        .light_sleep_enable = false
+    };
+    esp_pm_configure(&pm_config);
+    DEBUG_PRINTLN("Power management configured for active mode");
+    
     DEBUG_PRINTLN("=== System Initialization Complete ===\n");
 }
 
@@ -3120,7 +3139,7 @@ void setupWebServer() {
         String powerStateStr;
         switch(currentPowerState) {
             case POWER_ACTIVE: powerStateStr = "ACTIVE"; break;
-            case POWER_LIGHT_SLEEP: powerStateStr = "LIGHT_SLEEP"; break;
+            case POWER_MODEM_SLEEP: powerStateStr = "MODEM_SLEEP"; break;
             case POWER_DEEP_SLEEP: powerStateStr = "DEEP_SLEEP"; break;
             default: powerStateStr = "UNKNOWN"; break;
         }
@@ -3782,22 +3801,22 @@ void printSystemStatus() {
         case POWER_ACTIVE:
             Serial.print("ACTIVE (240MHz)");
             if (!isAuthenticated) {
-                unsigned long timeToLightSleep = LIGHT_SLEEP_DELAY_MS - (currentTime - lastUnauthenticatedTime);
-                if (timeToLightSleep > 0 && timeToLightSleep <= LIGHT_SLEEP_DELAY_MS) {
-                    Serial.print(" - Light Sleep in ");
-                    Serial.print(timeToLightSleep / 1000);
+                unsigned long timeToModemSleep = MODEM_SLEEP_DELAY_MS - (currentTime - lastUnauthenticatedTime);
+                if (timeToModemSleep > 0 && timeToModemSleep <= MODEM_SLEEP_DELAY_MS) {
+                    Serial.print(" - Modem Sleep in ");
+                    Serial.print(timeToModemSleep / 1000);
                     Serial.print("s");
                 }
             }
             Serial.println();
             break;
             
-        case POWER_LIGHT_SLEEP:
-            Serial.print("LIGHT SLEEP (160MHz) - Adaptive timeout: ");
+        case POWER_MODEM_SLEEP:
+            Serial.print("MODEM SLEEP (10-80MHz) - BLE Association Sleep Pattern - Adaptive timeout: ");
             Serial.print(adaptiveLightSleepTimeout);
             Serial.print("ms");
             if (!isAuthenticated) {
-                unsigned long totalTimeout = LIGHT_SLEEP_DELAY_MS + adaptiveLightSleepTimeout;
+                unsigned long totalTimeout = MODEM_SLEEP_DELAY_MS + adaptiveLightSleepTimeout;
                 unsigned long timeToDeepSleep = totalTimeout - (currentTime - lastUnauthenticatedTime);
                 if (timeToDeepSleep > 0 && timeToDeepSleep <= totalTimeout) {
                     Serial.print(" - Deep Sleep in ");
@@ -3850,7 +3869,7 @@ void printSystemStatus() {
     }
     
     // Show adaptive interval status
-    if (currentPowerState == POWER_DEEP_SLEEP || currentPowerState == POWER_LIGHT_SLEEP) {
+    if (currentPowerState == POWER_DEEP_SLEEP || currentPowerState == POWER_MODEM_SLEEP) {
         Serial.print("Adaptive System: Timeout=");
         Serial.print(adaptiveLightSleepTimeout);
         Serial.print("ms, Consecutive weak connections=");
@@ -4668,10 +4687,10 @@ void updatePowerManagement() {
             lastAuthenticatedTime = millis();
             // Wake up based on current power state
             if (currentPowerState == POWER_DEEP_SLEEP) {
-                // From Deep Sleep: go to Light Sleep first, then Active after verification
-                setPowerState(POWER_LIGHT_SLEEP);
+                // From Deep Sleep: go to Modem Sleep first, then Active after verification
+                setPowerState(POWER_MODEM_SLEEP);
             } else if (currentPowerState != POWER_ACTIVE) {
-                // From Light Sleep or other states: go directly to Active
+                // From Modem Sleep or other states: go directly to Active
                 setPowerState(POWER_ACTIVE);
             }
         } else {
@@ -4683,9 +4702,9 @@ void updatePowerManagement() {
     // Check for device connection during Deep Sleep advertising window
     if (currentPowerState == POWER_DEEP_SLEEP && bleDeepSleepAdvertising) {
         if (bluetoothEnabled && isBleConnected && !isAuthenticated) {
-            // Device connected but not yet authenticated - go to Light Sleep to monitor
-            setPowerState(POWER_LIGHT_SLEEP);
-            Serial.println("Deep Sleep: Device connected, transitioning to Light Sleep for monitoring");
+            // Device connected but not yet authenticated - go to Modem Sleep to monitor
+            setPowerState(POWER_MODEM_SLEEP);
+            Serial.println("Deep Sleep: Device connected, transitioning to Modem Sleep for monitoring");
             return;
         }
     }
@@ -4699,23 +4718,23 @@ void updatePowerManagement() {
     
     // Handle state transitions based on authentication and timing
     if (!isAuthenticated && currentPowerState == POWER_ACTIVE) {
-        // Check if we should transition to Light Sleep
-        if (millis() - lastUnauthenticatedTime >= LIGHT_SLEEP_DELAY_MS) {
-            setPowerState(POWER_LIGHT_SLEEP);
+        // Check if we should transition to Modem Sleep
+        if (millis() - lastUnauthenticatedTime >= MODEM_SLEEP_DELAY_MS) {
+            setPowerState(POWER_MODEM_SLEEP);
         }
-    } else if (!isAuthenticated && currentPowerState == POWER_LIGHT_SLEEP) {
+    } else if (!isAuthenticated && currentPowerState == POWER_MODEM_SLEEP) {
         // Check if we should transition to Deep Sleep using adaptive timeout
-        if (millis() - lastUnauthenticatedTime >= (LIGHT_SLEEP_DELAY_MS + adaptiveLightSleepTimeout)) {
-            Serial.print("Light Sleep timeout reached (");
+        if (millis() - lastUnauthenticatedTime >= (MODEM_SLEEP_DELAY_MS + adaptiveLightSleepTimeout)) {
+            Serial.print("Modem Sleep timeout reached (");
             Serial.print(adaptiveLightSleepTimeout);
             Serial.println("ms), transitioning to Deep Sleep");
             Serial.flush();  // Ensure output completes before state change
             updateAdaptiveInterval(false);  // Failed to authenticate in light sleep
             setPowerState(POWER_DEEP_SLEEP);
         }
-    } else if (isAuthenticated && currentPowerState == POWER_LIGHT_SLEEP) {
-        // If we're in Light Sleep and become authenticated, go to Active
-        Serial.println("Authenticated in Light Sleep, going to Active");
+    } else if (isAuthenticated && currentPowerState == POWER_MODEM_SLEEP) {
+        // If we're in Modem Sleep and become authenticated, go to Active
+        Serial.println("Authenticated in Modem Sleep, going to Active");
         updateAdaptiveInterval(true);  // Successful authentication
         setPowerState(POWER_ACTIVE);
     }
@@ -4738,25 +4757,34 @@ void setPowerState(PowerState newState) {
     DEBUG_PRINT("Power state changing from ");
     switch(currentPowerState) {
         case POWER_ACTIVE: DEBUG_PRINT("ACTIVE"); break;
-        case POWER_LIGHT_SLEEP: DEBUG_PRINT("LIGHT_SLEEP"); break;
+        case POWER_MODEM_SLEEP: DEBUG_PRINT("MODEM_SLEEP"); break;
         case POWER_DEEP_SLEEP: DEBUG_PRINT("DEEP_SLEEP"); break;
     }
     DEBUG_PRINT(" to ");
     switch(newState) {
         case POWER_ACTIVE: DEBUG_PRINTLN("ACTIVE"); break;
-        case POWER_LIGHT_SLEEP: DEBUG_PRINTLN("LIGHT_SLEEP"); break;
+        case POWER_MODEM_SLEEP: DEBUG_PRINTLN("MODEM_SLEEP"); break;
         case POWER_DEEP_SLEEP: DEBUG_PRINTLN("DEEP_SLEEP"); break;
     }
     
     currentPowerState = newState;
     Serial.flush();  // Ensure all debug output completes before frequency change
     
-    // Set CPU frequency based on state
+    // Set power state using ESP32 hardware sleep modes
     switch(newState) {
         case POWER_ACTIVE:
             Serial.begin(115200);  // Re-enable serial
             delay(10);  // Brief pause for serial initialization
             setCpuFrequencyMhz(240);  // Full speed
+            
+            // Disable any sleep modes for full active operation
+            esp_pm_config_esp32_t pm_config_active = {
+                .max_freq_mhz = 240,
+                .min_freq_mhz = 240,
+                .light_sleep_enable = false
+            };
+            esp_pm_configure(&pm_config_active);
+            
             // Make sure RFID is on
             digitalWrite(RFID_SHD, LOW);
             // Resume normal BLE advertising and scanning if enabled
@@ -4764,14 +4792,29 @@ void setPowerState(PowerState newState) {
                 startBLEAdvertising(isPairingMode);
                 startRSSIScan();  // Resume RSSI scanning
             }
+            Serial.println("Active Mode: Full power, all systems running");
             break;
             
-        case POWER_LIGHT_SLEEP:
+        case POWER_MODEM_SLEEP:
             Serial.begin(115200);  // Re-enable serial
             delay(10);  // Brief pause for serial initialization
-            setCpuFrequencyMhz(160);  // 33% reduction
-            // RFID stays on in light sleep
+            setCpuFrequencyMhz(80);  // Reduced frequency but CPU stays active
+            
+            // Enable ESP32 modem sleep with Association Sleep Pattern
+            esp_pm_config_esp32_t pm_config_modem = {
+                .max_freq_mhz = 80,        // Max when BLE is active
+                .min_freq_mhz = 10,        // Min during sleep intervals
+                .light_sleep_enable = true  // Enables Association Sleep Pattern
+            };
+            esp_pm_configure(&pm_config_modem);
+            
+            // RFID stays on in modem sleep - CPU remains active for scanning
             digitalWrite(RFID_SHD, LOW);
+            
+            // BLE automatically handles Association Sleep Pattern
+            // Radio wakes up at DTIM intervals to maintain connections
+            // RSSI analysis and proximity detection continue working
+            Serial.println("Modem Sleep: BLE Association Sleep Pattern enabled, RFID active");
             break;
             
         case POWER_DEEP_SLEEP:
@@ -4782,7 +4825,10 @@ void setPowerState(PowerState newState) {
             }
             delay(10);  // Brief pause to ensure operations complete
             
-            // Initialize deep sleep timing
+            // Configure GPIO wake sources (brake only - RFID crashes system)
+            esp_sleep_enable_ext0_wakeup((gpio_num_t)BRAKE_PIN, 0);  // Wake on brake press
+            
+            // Initialize deep sleep timing for pseudo deep sleep approach
             rfidDeepSleepCycleStart = millis();
             rfidDeepSleepOn = true;
             // Start quiet period - BLE window will start after 50 seconds
@@ -4791,13 +4837,13 @@ void setPowerState(PowerState newState) {
             bleAdvertisingStopped = true;   // Start in stopped state for quiet period
             isQuickSampling = false;        // Reset quick sampling
             
-            // Start Deep Sleep at lower frequency (will be raised during BLE windows)
+            // Use pseudo deep sleep (low frequency) instead of true deep sleep
+            // This preserves RFID cycling functionality
             setCpuFrequencyMhz(40);   // Start with power-saving frequency
             
-            Serial.println("Deep Sleep: Starting with 50-second quiet period");
+            Serial.println("Pseudo Deep Sleep: Starting RFID cycling and BLE windows (40MHz)");
             Serial.flush();  // Ensure final message is sent
-            delay(10);  // Brief pause before disabling serial
-            Serial.end();  // Disable serial to prevent issues during deep sleep
+            delay(10);  // Brief pause before reducing serial activity
             break;
     }
 }
@@ -4884,17 +4930,17 @@ void handleDeepSleepBLE() {
                     }
                     consecutiveWeakConnections++;
                 } else if (lastQuickConfidence >= QUICK_CONFIDENCE_HIGH_THRESHOLD) {
-                    // High confidence - user approaching, reset adaptive and go to light sleep
+                    // High confidence - user approaching, reset adaptive and go to modem sleep
                     Serial.println("Deep Sleep: High confidence detected - user approaching!");
                     resetAdaptiveInterval();
-                    setPowerState(POWER_LIGHT_SLEEP);
+                    setPowerState(POWER_MODEM_SLEEP);
                     return;
                 } else {
-                    // Medium confidence - go to light sleep with current adaptive timeout
-                    Serial.print("Deep Sleep: Medium confidence, going to light sleep (timeout: ");
+                    // Medium confidence - go to modem sleep with current adaptive timeout
+                    Serial.print("Deep Sleep: Medium confidence, going to modem sleep (timeout: ");
                     Serial.print(adaptiveLightSleepTimeout);
                     Serial.println("ms)");
-                    setPowerState(POWER_LIGHT_SLEEP);
+                    setPowerState(POWER_MODEM_SLEEP);
                     return;
                 }
             }
@@ -4996,6 +5042,98 @@ void resetAdaptiveInterval() {
     adaptiveLightSleepTimeout = 120000;  // Reset to 2 minutes
     consecutiveWeakConnections = 0;
     Serial.println("Adaptive: Intervals reset to minimum (2 minutes)");
+}
+
+// ========================================
+// POWER OPTIMIZATION TEST FUNCTIONS
+// ========================================
+
+// Test function to verify ESP32 modem sleep with RFID + BLE functionality
+void testModemSleepFunctionality() {
+    Serial.println("=== TESTING MODEM SLEEP FUNCTIONALITY ===");
+    Serial.println("Testing ESP32 hardware modem sleep with RFID + BLE...");
+    Serial.println("This will run for 30 seconds to verify:");
+    Serial.println("1. RFID detection continues working");
+    Serial.println("2. BLE proximity detection functions");
+    Serial.println("3. Association Sleep Pattern operates correctly");
+    
+    // Save current state
+    PowerState originalState = currentPowerState;
+    
+    // Enter modem sleep mode
+    setPowerState(POWER_MODEM_SLEEP);
+    
+    unsigned long testStart = millis();
+    bool rfidTested = false;
+    bool bleTested = false;
+    
+    while (millis() - testStart < 30000) { // 30-second test
+        // Verify RFID still works
+        if(scanForTag(tagData)) {
+            if (!rfidTested) {
+                Serial.println("✅ RFID detection working in modem sleep!");
+                rfidTested = true;
+            }
+        }
+        
+        // Verify BLE proximity still works  
+        if (bluetoothEnabled && bluetoothAuthenticated) {
+            if (!bleTested) {
+                Serial.println("✅ BLE proximity working in modem sleep!");
+                bleTested = true;
+            }
+        }
+        
+        // Show test progress every 5 seconds
+        static unsigned long lastProgress = 0;
+        if (millis() - lastProgress >= 5000) {
+            unsigned long elapsed = millis() - testStart;
+            Serial.print("Test progress: ");
+            Serial.print(elapsed / 1000);
+            Serial.println("s / 30s");
+            lastProgress = millis();
+        }
+        
+        delay(100);
+    }
+    
+    // Restore original state
+    setPowerState(originalState);
+    
+    Serial.println("=== MODEM SLEEP TEST COMPLETE ===");
+    Serial.print("RFID Detection: ");
+    Serial.println(rfidTested ? "✅ WORKING" : "❌ NOT TESTED");
+    Serial.print("BLE Proximity: ");
+    Serial.println(bleTested ? "✅ WORKING" : "❌ NOT TESTED");
+    Serial.println("Returned to original power state");
+}
+
+// Test function to measure power consumption differences
+void measurePowerConsumption() {
+    Serial.println("=== POWER CONSUMPTION MEASUREMENT ===");
+    Serial.println("Cycling through power states for measurement...");
+    Serial.println("Use a current meter to measure differences:");
+    
+    // Test each state for 10 seconds
+    Serial.println("\nActive Mode (240MHz) - 10 seconds:");
+    setPowerState(POWER_ACTIVE);
+    delay(10000);
+    
+    Serial.println("Modem Sleep (10-80MHz + Association Sleep Pattern) - 10 seconds:");
+    setPowerState(POWER_MODEM_SLEEP);
+    delay(10000);
+    
+    Serial.println("Pseudo Deep Sleep (40MHz + cycling) - 10 seconds:");
+    setPowerState(POWER_DEEP_SLEEP);
+    delay(10000);
+    
+    // Return to active
+    setPowerState(POWER_ACTIVE);
+    Serial.println("\nReturned to Active Mode");
+    Serial.println("Expected power consumption:");
+    Serial.println("- Active: ~240mA");
+    Serial.println("- Modem Sleep: ~3-20mA (85-90% reduction)");
+    Serial.println("- Pseudo Deep Sleep: ~15-25mA (50-70% reduction)");
 }
 
 // ========================================

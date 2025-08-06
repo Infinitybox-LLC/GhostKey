@@ -130,14 +130,14 @@ const char manifest_json[] PROGMEM = R"({
 // PIN DEFINITIONS
 // ========================================
 // Input pins (all active low with pullups)
-#define BUTTON_PIN 32 // WILL BE 35, 32 FOR TESTING W/ INTERNAL PULLUP - NEEDS external pullup // "startneg" on diagram // was 32 input pullup for testing
+#define BUTTON_PIN 35 // WILL BE 35, 32 FOR TESTING W/ INTERNAL PULLUP - NEEDS external pullup // "startneg" on diagram // was 32 input pullup for testing
 #define BRAKE_PIN 18 // Good
 #define ACCESSORY_INPUT_PIN 19 // Ghost Power accessory input (external pullup) // called IGNONNEG on diagram active on low
-#define BEEPER_PIN 25  // GPIO 25 will be used for the beeper
 
 // Output pins
-#define LED_PIN 23 // system LED    
+#define LED_PIN 23 // system LED // heartbeat LED    
 #define BUTTON_LED_PIN 26 // good
+#define BEEPER_PIN 25  // GPIO 25 will be used for the beeper
 
 // RFID pins
 #define RFID_DEMOD_OUT 12 // good
@@ -268,10 +268,11 @@ enum PowerState {
 };
 
 // Power management timing constants
-#define LIGHT_SLEEP_DELAY_MS 30000      // 30 seconds after losing authentication
-#define DEEP_SLEEP_DELAY_MS 60000      // 2 minutes after losing authentication
-#define RFID_DEEP_SLEEP_CYCLE_MS 1000    // 500ms on/off cycle for RFID in deep sleep
-#define BLE_DEEP_SLEEP_INTERVAL_MS 60000 // 1 minute between BLE advertising periods
+#define LIGHT_SLEEP_DELAY_MS 10000      // 10 seconds after losing authentication
+#define DEEP_SLEEP_DELAY_MS 30000      // 30 seconds after losing authentication
+#define RFID_LIGHT_SLEEP_CYCLE_MS 500   // 500ms on/off cycle for RFID in light sleep
+#define RFID_DEEP_SLEEP_CYCLE_MS 2000    // 2 seconds on/off cycle for RFID in deep sleep
+#define BLE_DEEP_SLEEP_INTERVAL_MS 60000 // 1 minute between BLE advertising periods (base)
 #define BLE_DEEP_SLEEP_DURATION_MS 10000 // 10 seconds of advertising in deep sleep
 
 // Button state tracking with debouncing
@@ -388,14 +389,17 @@ PowerState currentPowerState = POWER_ACTIVE;  // Always start in active mode
 bool wasAuthenticated = false;                // Track previous authentication state
 unsigned long lastAuthenticatedTime = 0;       // When authentication was last true
 unsigned long lastUnauthenticatedTime = 0;     // When authentication became false
-unsigned long rfidDeepSleepCycleStart = 0;    // For RFID on/off cycling
+unsigned long rfidLightSleepCycleStart = 0;   // For RFID on/off cycling in light sleep
+bool rfidLightSleepOn = true;                 // Current RFID state in light sleep
+unsigned long rfidDeepSleepCycleStart = 0;    // For RFID on/off cycling in deep sleep
 bool rfidDeepSleepOn = true;                  // Current RFID state in deep sleep
 unsigned long bleDeepSleepAdvertiseStart = 0;  // When BLE advertising started in deep sleep
 bool bleDeepSleepAdvertising = false;         // Whether BLE is currently advertising in deep sleep
 bool bleAdvertisingStopped = false;           // Track if we've already stopped advertising
 
 // Adaptive interval and quick confidence system
-unsigned long adaptiveLightSleepTimeout = 120000;  // Start with 2 minutes (120s)
+unsigned long adaptiveDeepSleepInterval = 60000;  // Start with 1 minute BLE cycles
+unsigned long lightSleepTimeout = 120000;  // Fixed 2 minutes in light sleep
 int consecutiveWeakConnections = 0;                 // Counter for weak connections
 bool isQuickSampling = false;                      // Currently doing quick confidence check
 unsigned long quickSamplingStart = 0;              // When quick sampling started
@@ -3793,11 +3797,13 @@ void printSystemStatus() {
             break;
             
         case POWER_LIGHT_SLEEP:
-            Serial.print("LIGHT SLEEP (160MHz) - Adaptive timeout: ");
-            Serial.print(adaptiveLightSleepTimeout);
+            Serial.print("LIGHT SLEEP (160MHz) - RFID: ");
+            Serial.print(rfidLightSleepOn ? "ON" : "OFF");
+            Serial.print(", Timeout: ");
+            Serial.print(lightSleepTimeout);
             Serial.print("ms");
             if (!isAuthenticated) {
-                unsigned long totalTimeout = LIGHT_SLEEP_DELAY_MS + adaptiveLightSleepTimeout;
+                unsigned long totalTimeout = LIGHT_SLEEP_DELAY_MS + lightSleepTimeout;
                 unsigned long timeToDeepSleep = totalTimeout - (currentTime - lastUnauthenticatedTime);
                 if (timeToDeepSleep > 0 && timeToDeepSleep <= totalTimeout) {
                     Serial.print(" - Deep Sleep in ");
@@ -3851,8 +3857,8 @@ void printSystemStatus() {
     
     // Show adaptive interval status
     if (currentPowerState == POWER_DEEP_SLEEP || currentPowerState == POWER_LIGHT_SLEEP) {
-        Serial.print("Adaptive System: Timeout=");
-        Serial.print(adaptiveLightSleepTimeout);
+        Serial.print("Adaptive System: Deep sleep interval=");
+        Serial.print(adaptiveDeepSleepInterval);
         Serial.print("ms, Consecutive weak connections=");
         Serial.print(consecutiveWeakConnections);
         Serial.print(", Last quick confidence=");
@@ -4704,10 +4710,10 @@ void updatePowerManagement() {
             setPowerState(POWER_LIGHT_SLEEP);
         }
     } else if (!isAuthenticated && currentPowerState == POWER_LIGHT_SLEEP) {
-        // Check if we should transition to Deep Sleep using adaptive timeout
-        if (millis() - lastUnauthenticatedTime >= (LIGHT_SLEEP_DELAY_MS + adaptiveLightSleepTimeout)) {
+        // Check if we should transition to Deep Sleep using fixed timeout
+        if (millis() - lastUnauthenticatedTime >= (LIGHT_SLEEP_DELAY_MS + lightSleepTimeout)) {
             Serial.print("Light Sleep timeout reached (");
-            Serial.print(adaptiveLightSleepTimeout);
+            Serial.print(lightSleepTimeout);
             Serial.println("ms), transitioning to Deep Sleep");
             Serial.flush();  // Ensure output completes before state change
             updateAdaptiveInterval(false);  // Failed to authenticate in light sleep
@@ -4718,6 +4724,11 @@ void updatePowerManagement() {
         Serial.println("Authenticated in Light Sleep, going to Active");
         updateAdaptiveInterval(true);  // Successful authentication
         setPowerState(POWER_ACTIVE);
+    }
+    
+    // Handle Light Sleep specific operations
+    if (currentPowerState == POWER_LIGHT_SLEEP) {
+        handleLightSleepRFID();
     }
     
     // Handle Deep Sleep specific operations
@@ -4770,8 +4781,10 @@ void setPowerState(PowerState newState) {
             Serial.begin(115200);  // Re-enable serial
             delay(10);  // Brief pause for serial initialization
             setCpuFrequencyMhz(160);  // 33% reduction
-            // RFID stays on in light sleep
-            digitalWrite(RFID_SHD, LOW);
+            // Initialize RFID cycling for light sleep
+            rfidLightSleepCycleStart = millis();
+            rfidLightSleepOn = true;
+            digitalWrite(RFID_SHD, LOW);  // Start with RFID on
             break;
             
         case POWER_DEEP_SLEEP:
@@ -4802,12 +4815,28 @@ void setPowerState(PowerState newState) {
     }
 }
 
+// Handle RFID on/off cycling in light sleep
+void handleLightSleepRFID() {
+    unsigned long currentTime = millis();
+    unsigned long cycleTime = currentTime - rfidLightSleepCycleStart;
+    
+    // Toggle RFID every 500ms
+    if (cycleTime >= RFID_LIGHT_SLEEP_CYCLE_MS) {
+        rfidLightSleepCycleStart = currentTime;
+        rfidLightSleepOn = !rfidLightSleepOn;
+        
+        // Control RFID module power via SHD pin
+        // SHD HIGH = shutdown/sleep mode, LOW = active
+        digitalWrite(RFID_SHD, rfidLightSleepOn ? LOW : HIGH);
+    }
+}
+
 // Handle RFID on/off cycling in deep sleep
 void handleDeepSleepRFID() {
     unsigned long currentTime = millis();
     unsigned long cycleTime = currentTime - rfidDeepSleepCycleStart;
     
-    // Toggle RFID every ~500ms
+    // Toggle RFID every 2 seconds
     if (cycleTime >= RFID_DEEP_SLEEP_CYCLE_MS) {
         rfidDeepSleepCycleStart = currentTime;
         rfidDeepSleepOn = !rfidDeepSleepOn;
@@ -4825,8 +4854,8 @@ void handleDeepSleepBLE() {
     unsigned long currentTime = millis();
     
     if (!bleDeepSleepAdvertising) {
-        // Check if it's time to start advertising (after 50 seconds of cycle)
-        if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_INTERVAL_MS - BLE_DEEP_SLEEP_DURATION_MS) {
+        // Check if it's time to start advertising (using adaptive deep sleep interval)
+        if (currentTime - bleDeepSleepAdvertiseStart >= adaptiveDeepSleepInterval - BLE_DEEP_SLEEP_DURATION_MS) {
             // Increase CPU frequency for BLE operations
             setCpuFrequencyMhz(80);  // Higher speed for reliable BLE operations
             delay(50);  // Longer pause for proper stabilization
@@ -4838,7 +4867,9 @@ void handleDeepSleepBLE() {
             isQuickSampling = false;        // Reset quick sampling state
             startBLEAdvertising(false);  // Normal advertising, not pairing mode
             startRSSIScan();  // Also start RSSI scanning
-            Serial.println("Deep Sleep: BLE window started (80MHz)");
+            Serial.print("Deep Sleep: BLE window started (80MHz) - ");
+            Serial.print(adaptiveDeepSleepInterval / 1000);
+            Serial.println("s cycle");
         } else {
             // Stop advertising and scanning only once when entering quiet period
             if (!bleAdvertisingStopped) {
@@ -4890,9 +4921,9 @@ void handleDeepSleepBLE() {
                     setPowerState(POWER_LIGHT_SLEEP);
                     return;
                 } else {
-                    // Medium confidence - go to light sleep with current adaptive timeout
+                    // Medium confidence - go to light sleep with fixed timeout
                     Serial.print("Deep Sleep: Medium confidence, going to light sleep (timeout: ");
-                    Serial.print(adaptiveLightSleepTimeout);
+                    Serial.print(lightSleepTimeout);
                     Serial.println("ms)");
                     setPowerState(POWER_LIGHT_SLEEP);
                     return;
@@ -4900,8 +4931,8 @@ void handleDeepSleepBLE() {
             }
         }
         
-        // Check if full 60-second cycle is complete (BLE window ends at 60s)
-        if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_INTERVAL_MS) {
+        // Check if full adaptive cycle is complete (BLE window ends)
+        if (currentTime - bleDeepSleepAdvertiseStart >= adaptiveDeepSleepInterval) {
             bleDeepSleepAdvertising = false;
             stopBLEAdvertising();
             stopRSSIScan();  // Also stop RSSI scanning
@@ -4915,7 +4946,9 @@ void handleDeepSleepBLE() {
             Serial.flush();  // Ensure output completes before frequency change
             delay(50);  // Longer pause for proper stabilization
             setCpuFrequencyMhz(40);  // Lower speed for power savings
-            Serial.println("Deep Sleep: BLE window ended, starting new 60s cycle (40MHz)");
+            Serial.print("Deep Sleep: BLE window ended, starting new ");
+            Serial.print(adaptiveDeepSleepInterval / 1000);
+            Serial.println("s cycle (40MHz)");
         }
     }
 }
@@ -4960,7 +4993,7 @@ float calculateQuickConfidence() {
     return quickConfidence;
 }
 
-// Update adaptive interval based on Light Sleep outcome
+// Update adaptive interval based on Deep Sleep outcome
 void updateAdaptiveInterval(bool success) {
     if (success) {
         // Successful authentication - reset to fast intervals
@@ -4968,22 +5001,22 @@ void updateAdaptiveInterval(bool success) {
         consecutiveWeakConnections = 0;
         Serial.println("Adaptive: Reset to fast intervals (successful auth)");
     } else {
-        // Failed authentication - increase timeout
+        // Failed authentication - increase deep sleep intervals (longer between BLE checks)
         consecutiveWeakConnections++;
         
-        // Progressive timeout increases: 2min -> 3min -> 5min -> 10min -> 15min (max)
-        if (consecutiveWeakConnections >= 1 && adaptiveLightSleepTimeout < 180000) {
-            adaptiveLightSleepTimeout = 180000;  // 3 minutes
-        } else if (consecutiveWeakConnections >= 2 && adaptiveLightSleepTimeout < 300000) {
-            adaptiveLightSleepTimeout = 300000;  // 5 minutes
-        } else if (consecutiveWeakConnections >= 3 && adaptiveLightSleepTimeout < 600000) {
-            adaptiveLightSleepTimeout = 600000;  // 10 minutes
-        } else if (consecutiveWeakConnections >= 4 && adaptiveLightSleepTimeout < 900000) {
-            adaptiveLightSleepTimeout = 900000;  // 15 minutes (max)
+        // Progressive interval increases: 1min -> 2min -> 5min -> 10min -> 20min (max)
+        if (consecutiveWeakConnections >= 1 && adaptiveDeepSleepInterval < 120000) {
+            adaptiveDeepSleepInterval = 120000;  // 2 minutes
+        } else if (consecutiveWeakConnections >= 2 && adaptiveDeepSleepInterval < 300000) {
+            adaptiveDeepSleepInterval = 300000;  // 5 minutes
+        } else if (consecutiveWeakConnections >= 3 && adaptiveDeepSleepInterval < 600000) {
+            adaptiveDeepSleepInterval = 600000;  // 10 minutes
+        } else if (consecutiveWeakConnections >= 4 && adaptiveDeepSleepInterval < 1200000) {
+            adaptiveDeepSleepInterval = 1200000;  // 20 minutes (max)
         }
         
-        Serial.print("Adaptive: Timeout increased to ");
-        Serial.print(adaptiveLightSleepTimeout);
+        Serial.print("Adaptive: Deep sleep interval increased to ");
+        Serial.print(adaptiveDeepSleepInterval);
         Serial.print("ms (consecutive weak: ");
         Serial.print(consecutiveWeakConnections);
         Serial.println(")");
@@ -4993,9 +5026,9 @@ void updateAdaptiveInterval(bool success) {
 
 // Reset adaptive interval to fastest setting
 void resetAdaptiveInterval() {
-    adaptiveLightSleepTimeout = 120000;  // Reset to 2 minutes
+    adaptiveDeepSleepInterval = 60000;  // Reset to 1 minute
     consecutiveWeakConnections = 0;
-    Serial.println("Adaptive: Intervals reset to minimum (2 minutes)");
+    Serial.println("Adaptive: Deep sleep interval reset to minimum (1 minute)");
 }
 
 // ========================================

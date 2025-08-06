@@ -1708,6 +1708,7 @@ void setup() {
     ap_password = preferences.getString("wifi_password", "123456789");
     web_password = preferences.getString("web_password", "1234");
     bluetoothEnabled = preferences.getBool("bt_enabled", true);
+    rfidEnabled = preferences.getBool("rfid_enabled", true);
     ghostKeyEnabled = preferences.getBool("ghost_key_enabled", true);
     ghostPowerEnabled = preferences.getBool("ghost_power_enabled", true);
     calibrationOffset = preferences.getFloat("calibration_offset", 0.0f);
@@ -1889,8 +1890,8 @@ void loop() {
     // Factory reset detection - start + brake for 30 seconds
     checkFactoryReset();
     
-    // RFID scanning - only when Ghost Key is enabled
-    if (ghostKeyEnabled) {
+    // RFID scanning - only when Ghost Key and RFID are enabled
+    if (ghostKeyEnabled && rfidEnabled) {
         // Track first scan timing
     static bool firstRfidScanStarted = false;
     if (!firstRfidScanStarted) {
@@ -1979,7 +1980,7 @@ void loop() {
         Serial.println("RFID: Authentication expired");
     }
 } else {
-    // Ghost Key disabled: Reset RFID authentication state
+    // Ghost Key or RFID disabled: Reset RFID authentication state
     rfidAuthenticated = false;
     }
     
@@ -2117,9 +2118,8 @@ void handleConfigModeOnly() {
         }
     }
 
-    // Check for start button press in config mode with pairing active
-    if (currentState == CONFIG_MODE && isPairingMode && 
-        buttonReading == LOW && lastButtonReading == HIGH && 
+    // Check for start button press in config mode
+    if (currentState == CONFIG_MODE && buttonReading == LOW && lastButtonReading == HIGH && 
         (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
         DEBUG_BUTTON_PRINTLN("Start button pressed in pairing mode - Exiting config mode");
         exitConfigMode();
@@ -3365,6 +3365,10 @@ void setupWebServer() {
     
     server.on("/rfid_pair", HTTP_POST, [](){
         Serial.println("RFID pair mode request received");
+        if (!rfidEnabled) {
+            server.send(400, "text/plain", "RFID is disabled");
+            return;
+        }
         rfidPairingMode = true;
         Serial.println("RFID: Pairing mode activated - scan a tag to pair");
         server.send(200, "text/plain", "RFID pairing mode activated");
@@ -3388,16 +3392,6 @@ void setupWebServer() {
             }
         }
         server.send(400, "text/plain", "Invalid request");
-    });
-    
-    server.on("/rfid_status", HTTP_GET, [](){
-        String json = "{";
-        json += "\"pairing\":" + String(rfidPairingMode ? "true" : "false") + ",";
-        json += "\"authenticated\":" + String(rfidAuthenticated ? "true" : "false") + ",";
-        json += "\"count\":" + String(numStoredKeys) + ",";
-        json += "\"max\":" + String(MAX_RFID_KEYS);
-        json += "}";
-        server.send(200, "application/json", json);
     });
 
     // Bluetooth enable/disable endpoints
@@ -3448,6 +3442,70 @@ void setupWebServer() {
                     // No change needed
                     String status = bluetoothEnabled ? "enabled" : "disabled";
                     server.send(200, "text/plain", "Bluetooth already " + status);
+                }
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+
+    // RFID enable/disable endpoints
+    server.on("/rfid_status", HTTP_GET, [](){
+        Serial.println("RFID status request received");
+        String json = "{";
+        json += "\"enabled\":" + String(rfidEnabled ? "true" : "false") + ",";
+        json += "\"pairing\":" + String(rfidPairingMode ? "true" : "false") + ",";
+        json += "\"authenticated\":" + String(rfidAuthenticated ? "true" : "false") + ",";
+        json += "\"count\":" + String(numStoredKeys) + ",";
+        json += "\"max\":" + String(MAX_RFID_KEYS);
+        json += "}";
+        server.send(200, "application/json", json);
+    });
+    
+    server.on("/rfid_toggle", HTTP_POST, [](){
+        Serial.println("RFID toggle request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                bool newState = doc["enabled"];
+                
+                // Apply the change immediately
+                if (newState && !rfidEnabled) {
+                    // Enabling RFID
+                    rfidEnabled = true;
+                    preferences.putBool("rfid_enabled", rfidEnabled);
+                    
+                    // Make sure RFID is powered on if we're not in deep sleep or if we're cycling
+                    if (currentPowerState == POWER_ACTIVE || 
+                        (currentPowerState == POWER_LIGHT_SLEEP && rfidLightSleepOn) ||
+                        (currentPowerState == POWER_DEEP_SLEEP && rfidDeepSleepOn)) {
+                        digitalWrite(RFID_SHD, LOW);  // Turn on RFID
+                    }
+                    
+                    Serial.println("RFID enabled successfully");
+                    server.send(200, "text/plain", "RFID enabled successfully");
+                    
+                } else if (!newState && rfidEnabled) {
+                    // Disabling RFID
+                    rfidEnabled = false;
+                    preferences.putBool("rfid_enabled", rfidEnabled);
+                    
+                    // Turn off RFID immediately regardless of power state
+                    digitalWrite(RFID_SHD, HIGH);  // Turn off RFID
+                    
+                    // Reset RFID authentication state
+                    rfidAuthenticated = false;
+                    rfidPairingMode = false;
+                    
+                    Serial.println("RFID disabled successfully");
+                    server.send(200, "text/plain", "RFID disabled successfully");
+                    
+                } else {
+                    // No change needed
+                    String status = rfidEnabled ? "enabled" : "disabled";
+                    server.send(200, "text/plain", "RFID already " + status);
                 }
                 return;
             }
@@ -4768,8 +4826,8 @@ void setPowerState(PowerState newState) {
             Serial.begin(115200);  // Re-enable serial
             delay(10);  // Brief pause for serial initialization
             setCpuFrequencyMhz(240);  // Full speed
-            // Make sure RFID is on
-            digitalWrite(RFID_SHD, LOW);
+            // Make sure RFID is on (if enabled)
+            digitalWrite(RFID_SHD, rfidEnabled ? LOW : HIGH);
             // Resume normal BLE advertising and scanning if enabled
             if (bluetoothEnabled && bluetoothInitialized) {
                 startBLEAdvertising(isPairingMode);
@@ -4781,10 +4839,10 @@ void setPowerState(PowerState newState) {
             Serial.begin(115200);  // Re-enable serial
             delay(10);  // Brief pause for serial initialization
             setCpuFrequencyMhz(160);  // 33% reduction
-            // Initialize RFID cycling for light sleep
+            // Initialize RFID cycling for light sleep (if enabled)
             rfidLightSleepCycleStart = millis();
             rfidLightSleepOn = true;
-            digitalWrite(RFID_SHD, LOW);  // Start with RFID on
+            digitalWrite(RFID_SHD, rfidEnabled ? LOW : HIGH);  // Start with RFID on if enabled
             break;
             
         case POWER_DEEP_SLEEP:
@@ -4817,6 +4875,12 @@ void setPowerState(PowerState newState) {
 
 // Handle RFID on/off cycling in light sleep
 void handleLightSleepRFID() {
+    if (!rfidEnabled) {
+        // RFID disabled - keep it off
+        digitalWrite(RFID_SHD, HIGH);
+        return;
+    }
+    
     unsigned long currentTime = millis();
     unsigned long cycleTime = currentTime - rfidLightSleepCycleStart;
     
@@ -4833,6 +4897,12 @@ void handleLightSleepRFID() {
 
 // Handle RFID on/off cycling in deep sleep
 void handleDeepSleepRFID() {
+    if (!rfidEnabled) {
+        // RFID disabled - keep it off
+        digitalWrite(RFID_SHD, HIGH);
+        return;
+    }
+    
     unsigned long currentTime = millis();
     unsigned long cycleTime = currentTime - rfidDeepSleepCycleStart;
     

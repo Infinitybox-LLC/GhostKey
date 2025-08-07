@@ -378,6 +378,7 @@ bool isPairingMode = false;
 unsigned long pairingModeStartTime = 0;
 bool bluetoothEnabled = true; // Default to enabled
 bool bluetoothInitialized = false;
+bool rfidEnabled = true; // Default to enabled
 
 // System modularity - Ghost Key vs Ghost Power
 bool ghostKeyEnabled = true;    // RFID/Bluetooth/Push-to-start functionality
@@ -4867,8 +4868,7 @@ void setPowerState(PowerState newState) {
             
             Serial.println("Deep Sleep: Starting with 50-second quiet period");
             Serial.flush();  // Ensure final message is sent
-            delay(10);  // Brief pause before disabling serial
-            Serial.end();  // Disable serial to prevent issues during deep sleep
+            // Note: Keeping Serial enabled for debugging during deep sleep cycles
             break;
     }
 }

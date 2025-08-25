@@ -269,6 +269,7 @@ enum PowerState {
 
 // Power management timing constants
 #define LIGHT_SLEEP_DELAY_MS 10000      // 10 seconds after losing authentication
+#define BRAKE_WAKEUP_ACTIVE_TIME 30000  // 30 seconds in active mode after brake wake-up
 #define DEEP_SLEEP_DELAY_MS 30000      // 30 seconds after losing authentication
 #define RFID_LIGHT_SLEEP_CYCLE_MS 500   // 500ms on/off cycle for RFID in light sleep
 #define RFID_DEEP_SLEEP_CYCLE_MS 2000    // 2 seconds on/off cycle for RFID in deep sleep
@@ -392,6 +393,8 @@ unsigned long lastAuthenticatedTime = 0;       // When authentication was last t
 unsigned long lastUnauthenticatedTime = 0;     // When authentication became false
 unsigned long brakeWakeUpTime = 0;            // Time when brake wake-up started
 bool brakeWakeUpInProgress = false;           // Flag for brake wake-up process
+unsigned long brakeWakeUpActiveTime = 0;     // Time when brake wake-up reached active mode
+bool brakeWakeUpActiveMode = false;          // Flag for extended active time after brake wake-up
 unsigned long rfidLightSleepCycleStart = 0;   // For RFID on/off cycling in light sleep
 bool rfidLightSleepOn = true;                 // Current RFID state in light sleep
 unsigned long rfidDeepSleepCycleStart = 0;    // For RFID on/off cycling in deep sleep
@@ -4764,23 +4767,26 @@ void updatePowerManagement() {
         }
     }
     
-    // Check brake press for wake up
-    bool brakePressed = (digitalRead(BRAKE_PIN) == LOW);
-    if (brakePressed && currentPowerState != POWER_ACTIVE && !brakeWakeUpInProgress) {
-        Serial.println("Brake pressed - starting wake-up sequence");
+    // Check brake press or start button press for wake up (using existing global variables)
+    if ((brakeHeld || buttonPressed) && currentPowerState != POWER_ACTIVE && !brakeWakeUpInProgress) {
+        if (brakeHeld) {
+            Serial.println("Brake pressed - starting wake-up sequence");
+        } else {
+            Serial.println("Start button pressed - starting wake-up sequence");
+        }
         brakeWakeUpInProgress = true;
         brakeWakeUpTime = millis();
         
         if (currentPowerState == POWER_DEEP_SLEEP) {
             // From Deep Sleep: go to Light Sleep first for stability
-            Serial.println("Brake wake-up: Deep Sleep → Light Sleep (safer transition)");
+            Serial.println("Wake-up: Deep Sleep → Light Sleep (safer transition)");
             Serial.flush();  // Ensure message is sent before frequency change
             setPowerState(POWER_LIGHT_SLEEP);
-            Serial.println("Brake wake-up: Will complete to Active in 2 seconds for stability");
+            Serial.println("Wake-up: Will complete to Active in 2 seconds for stability");
         } else {
             // From Light Sleep: go directly to Active
             setPowerState(POWER_ACTIVE);
-            Serial.println("Brake wake-up: Light Sleep → Active");
+            Serial.println("Wake-up: Light Sleep → Active");
             brakeWakeUpInProgress = false; // Complete immediately
         }
         return;
@@ -4789,10 +4795,14 @@ void updatePowerManagement() {
     // Complete brake wake-up sequence after stabilization delay (regardless of brake state)
     if (brakeWakeUpInProgress && currentPowerState == POWER_LIGHT_SLEEP) {
         if (millis() - brakeWakeUpTime >= 2000) { // 2 second stabilization for safety
-            Serial.println("Brake wake-up: System stabilized, completing transition to Active");
+            Serial.println("Wake-up: System stabilized, completing transition to Active");
+            Serial.printf("Wake-up: Will stay active for %d seconds for phone detection\n", BRAKE_WAKEUP_ACTIVE_TIME / 1000);
             Serial.flush();  // Ensure message is sent before final frequency change
             setPowerState(POWER_ACTIVE);
             brakeWakeUpInProgress = false;
+            // Set extended active mode for brake wake-up
+            brakeWakeUpActiveMode = true;
+            brakeWakeUpActiveTime = millis();
         }
         return; // Don't continue with normal power management during brake wake-up
     }
@@ -4800,8 +4810,20 @@ void updatePowerManagement() {
     // Handle state transitions based on authentication and timing
     if (!isAuthenticated && currentPowerState == POWER_ACTIVE) {
         // Check if we should transition to Light Sleep
-        if (millis() - lastUnauthenticatedTime >= LIGHT_SLEEP_DELAY_MS) {
-            setPowerState(POWER_LIGHT_SLEEP);
+        unsigned long activeTimeout = LIGHT_SLEEP_DELAY_MS;
+        
+        // Use extended timeout for brake wake-up
+        if (brakeWakeUpActiveMode) {
+            if (millis() - brakeWakeUpActiveTime >= BRAKE_WAKEUP_ACTIVE_TIME) {
+                Serial.println("Brake wake-up: Extended active time expired, transitioning to Light Sleep");
+                brakeWakeUpActiveMode = false; // Reset brake wake-up mode
+                setPowerState(POWER_LIGHT_SLEEP);
+            }
+        } else {
+            // Normal timeout
+            if (millis() - lastUnauthenticatedTime >= LIGHT_SLEEP_DELAY_MS) {
+                setPowerState(POWER_LIGHT_SLEEP);
+            }
         }
     } else if (!isAuthenticated && currentPowerState == POWER_LIGHT_SLEEP) {
         // Check if we should transition to Deep Sleep using fixed timeout
@@ -4818,6 +4840,14 @@ void updatePowerManagement() {
         Serial.println("Authenticated in Light Sleep, going to Active");
         updateAdaptiveInterval(true);  // Successful authentication
         setPowerState(POWER_ACTIVE);
+        // Reset brake wake-up mode since we're authenticated
+        brakeWakeUpActiveMode = false;
+    }
+    
+    // Reset brake wake-up mode if authentication is successful
+    if (isAuthenticated && brakeWakeUpActiveMode) {
+        Serial.println("Brake wake-up: Authentication successful, exiting extended active mode");
+        brakeWakeUpActiveMode = false;
     }
     
     // Handle Light Sleep specific operations

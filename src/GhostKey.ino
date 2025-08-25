@@ -390,6 +390,8 @@ PowerState currentPowerState = POWER_ACTIVE;  // Always start in active mode
 bool wasAuthenticated = false;                // Track previous authentication state
 unsigned long lastAuthenticatedTime = 0;       // When authentication was last true
 unsigned long lastUnauthenticatedTime = 0;     // When authentication became false
+unsigned long brakeWakeUpTime = 0;            // Time when brake wake-up started
+bool brakeWakeUpInProgress = false;           // Flag for brake wake-up process
 unsigned long rfidLightSleepCycleStart = 0;   // For RFID on/off cycling in light sleep
 bool rfidLightSleepOn = true;                 // Current RFID state in light sleep
 unsigned long rfidDeepSleepCycleStart = 0;    // For RFID on/off cycling in deep sleep
@@ -405,7 +407,7 @@ int consecutiveWeakConnections = 0;                 // Counter for weak connecti
 bool isQuickSampling = false;                      // Currently doing quick confidence check
 unsigned long quickSamplingStart = 0;              // When quick sampling started
 float lastQuickConfidence = 0.0f;                 // Last calculated quick confidence
-#define QUICK_SAMPLING_DURATION 3000              // 3 seconds for quick check
+#define QUICK_SAMPLING_DURATION 4000              // 4 seconds for quick check
 #define QUICK_CONFIDENCE_LOW_THRESHOLD 35.0f      // Below this = stay in deep sleep
 #define QUICK_CONFIDENCE_HIGH_THRESHOLD 45.0f     // Above this = reset adaptive, immediate response
 
@@ -1712,7 +1714,7 @@ void setup() {
     rfidEnabled = preferences.getBool("rfid_enabled", true);
     ghostKeyEnabled = preferences.getBool("ghost_key_enabled", true);
     ghostPowerEnabled = preferences.getBool("ghost_power_enabled", true);
-    calibrationOffset = preferences.getFloat("calibration_offset", 0.0f);
+    calibrationOffset = preferences.getFloat("cal_offset", 0.0f);
     
     // Legacy RSSI calibration removed - using confidence-based authentication only
     
@@ -2190,6 +2192,11 @@ void handleButtonPress() {
             (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
             lastButtonPress = millis();
             
+            // Skip engine control if factory reset is in progress
+            if (factoryResetInProgress) {
+                return;
+            }
+            
             // Check if authenticated by Bluetooth (if enabled) or RFID
             bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
             if (isAuthenticated) {
@@ -2201,6 +2208,7 @@ void handleButtonPress() {
                     startRelayActive = false;
                     lastEngineShutdown = millis();  // Record time of engine shutdown
                     controlRelays();
+                    return; // Prevent same button press from immediately starting engine again
                 } else if (!startRelayActive) {
                     // Only allow starting sequence if engine is not running and not already starting
                     DEBUG_PRINTLN("Starting engine sequence...");
@@ -2212,9 +2220,9 @@ void handleButtonPress() {
                 DEBUG_BUTTON_PRINTLN("Not authenticated (Bluetooth) - Access denied");
                 // Error feedback
                 for (int i = 0; i < 3; i++) {
-                    digitalWrite(LED_PIN, HIGH);
+                    digitalWrite(BUTTON_LED_PIN, HIGH);
                     delay(50);
-                    digitalWrite(LED_PIN, LOW);
+                    digitalWrite(BUTTON_LED_PIN, LOW);
                     delay(50);
                 }
             }
@@ -3927,6 +3935,7 @@ void printSystemStatus() {
     
     Serial.print("\nLED States - ACC: ");
     Serial.print(digitalRead(RELAY_ACCESSORY) ? "ON" : "OFF");
+    Serial.print(digitalRead(15));
     Serial.print(" IGN1: ");
     Serial.print(digitalRead(RELAY_IGNITION1) ? "ON" : "OFF");
     Serial.print(" IGN2: ");
@@ -4684,7 +4693,7 @@ void stopCalibration() {
     calibrationOffset = newOffset;
     
     // Save to preferences
-    preferences.putFloat("calibration_offset", calibrationOffset);
+            preferences.putFloat("cal_offset", calibrationOffset);
     
     Serial.println("=== CALIBRATION COMPLETE ===");
     Serial.printf("Samples collected: %d\n", calibrationSampleCount);
@@ -4698,7 +4707,7 @@ void stopCalibration() {
 // Reset calibration to default
 void resetCalibration() {
     calibrationOffset = 0.0f;
-    preferences.putFloat("calibration_offset", calibrationOffset);
+            preferences.putFloat("cal_offset", calibrationOffset);
     Serial.println("Calibration reset to default (no offset)");
 }
 
@@ -4757,9 +4766,35 @@ void updatePowerManagement() {
     
     // Check brake press for wake up
     bool brakePressed = (digitalRead(BRAKE_PIN) == LOW);
-    if (brakePressed && currentPowerState != POWER_ACTIVE) {
-        setPowerState(POWER_ACTIVE);
+    if (brakePressed && currentPowerState != POWER_ACTIVE && !brakeWakeUpInProgress) {
+        Serial.println("Brake pressed - starting wake-up sequence");
+        brakeWakeUpInProgress = true;
+        brakeWakeUpTime = millis();
+        
+        if (currentPowerState == POWER_DEEP_SLEEP) {
+            // From Deep Sleep: go to Light Sleep first for stability
+            Serial.println("Brake wake-up: Deep Sleep → Light Sleep (safer transition)");
+            Serial.flush();  // Ensure message is sent before frequency change
+            setPowerState(POWER_LIGHT_SLEEP);
+            Serial.println("Brake wake-up: Will complete to Active in 2 seconds for stability");
+        } else {
+            // From Light Sleep: go directly to Active
+            setPowerState(POWER_ACTIVE);
+            Serial.println("Brake wake-up: Light Sleep → Active");
+            brakeWakeUpInProgress = false; // Complete immediately
+        }
         return;
+    }
+    
+    // Complete brake wake-up sequence after stabilization delay (regardless of brake state)
+    if (brakeWakeUpInProgress && currentPowerState == POWER_LIGHT_SLEEP) {
+        if (millis() - brakeWakeUpTime >= 2000) { // 2 second stabilization for safety
+            Serial.println("Brake wake-up: System stabilized, completing transition to Active");
+            Serial.flush();  // Ensure message is sent before final frequency change
+            setPowerState(POWER_ACTIVE);
+            brakeWakeUpInProgress = false;
+        }
+        return; // Don't continue with normal power management during brake wake-up
     }
     
     // Handle state transitions based on authentication and timing
@@ -4825,21 +4860,35 @@ void setPowerState(PowerState newState) {
     switch(newState) {
         case POWER_ACTIVE:
             Serial.begin(115200);  // Re-enable serial
-            delay(10);  // Brief pause for serial initialization
+            delay(20);  // Extended pause for serial initialization
+            Serial.flush();  // Flush before frequency change
             setCpuFrequencyMhz(240);  // Full speed
+            delay(200);  // Extended stabilization delay after major frequency change
+            Serial.begin(115200);  // Re-initialize serial after frequency change
+            delay(50);   // Additional stabilization
+            Serial.flush();  // Ensure serial is stable
+            
             // Make sure RFID is on (if enabled)
             digitalWrite(RFID_SHD, rfidEnabled ? LOW : HIGH);
+            
             // Resume normal BLE advertising and scanning if enabled
             if (bluetoothEnabled && bluetoothInitialized) {
+                delay(50);  // Additional delay before BLE operations
                 startBLEAdvertising(isPairingMode);
+                delay(50);  // Delay between BLE operations for stability
                 startRSSIScan();  // Resume RSSI scanning
             }
             break;
             
         case POWER_LIGHT_SLEEP:
-            Serial.begin(115200);  // Re-enable serial
-            delay(10);  // Brief pause for serial initialization
+            Serial.flush();  // Flush before any changes
+            delay(50);  // Extended pause
             setCpuFrequencyMhz(160);  // 33% reduction
+            delay(150);  // Extended stabilization for frequency change
+            Serial.begin(115200);  // Re-initialize serial after frequency change
+            delay(50);  // Additional stabilization
+            Serial.flush();  // Ensure serial is stable
+            
             // Initialize RFID cycling for light sleep (if enabled)
             rfidLightSleepCycleStart = millis();
             rfidLightSleepOn = true;

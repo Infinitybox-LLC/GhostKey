@@ -381,6 +381,7 @@ bool isPairingMode = false;
 unsigned long pairingModeStartTime = 0;
 bool bluetoothEnabled = true; // Default to enabled
 bool bluetoothInitialized = false;
+bool bluetoothShuttingDown = false; // Flag to prevent operations during shutdown
 bool rfidEnabled = true; // Default to enabled
 
 // System modularity - Ghost Key vs Ghost Power
@@ -435,6 +436,10 @@ bool firstRfidReadDone = false;
 BleKeyboard bleKeyboard("Ghost Key", "Jordan Distributors, Inc", 100);
 BLEServer* pServer = nullptr;
 class MyServerCallbacks;
+
+// Global pointers for proper cleanup
+MyServerCallbacks* pServerCallbacks = nullptr;
+BLESecurity* pSecurity = nullptr;
 
 // Button state tracking
 ButtonState buttonState = {false, false, false, false, 0, 0};
@@ -604,16 +609,39 @@ void cleanupNVSStorage() {
 // Links to: Used by getDevicesJson(), GAP event handler for whitelist checks
 esp_ble_bond_dev_t* getBondedDevicesSafe(int* count) {
     if (sharedBufferInUse) {
+        // Shared buffer in use - check available memory before malloc
         int bondedCount = esp_ble_get_bond_device_num();
         if (bondedCount == 0) {
             *count = 0;
             return nullptr;
         }
-        esp_ble_bond_dev_t* tempBuffer = (esp_ble_bond_dev_t*)malloc(sizeof(esp_ble_bond_dev_t) * bondedCount);
-        if (tempBuffer) {
-            esp_ble_get_bond_device_list(&bondedCount, tempBuffer);
-            *count = bondedCount;
+        
+        // Check available heap before attempting malloc
+        size_t freeHeap = esp_get_free_heap_size();
+        size_t neededSize = sizeof(esp_ble_bond_dev_t) * bondedCount;
+        
+        if (freeHeap < (neededSize + 1024)) { // Reserve 1KB safety margin
+            Serial.printf("ERROR: Insufficient memory for bonded devices. Need: %d, Free: %d\n", neededSize, freeHeap);
+            *count = 0;
+            return nullptr;
         }
+        
+        esp_ble_bond_dev_t* tempBuffer = (esp_ble_bond_dev_t*)malloc(neededSize);
+        if (!tempBuffer) {
+            Serial.printf("ERROR: malloc failed for bonded devices buffer (%d bytes)\n", neededSize);
+            *count = 0;
+            return nullptr;
+        }
+        
+        esp_err_t result = esp_ble_get_bond_device_list(&bondedCount, tempBuffer);
+        if (result != ESP_OK) {
+            Serial.printf("ERROR: Failed to get bonded device list: %d\n", result);
+            free(tempBuffer);
+            *count = 0;
+            return nullptr;
+        }
+        
+        *count = bondedCount;
         return tempBuffer;
     } else {
         sharedBufferInUse = true;
@@ -646,6 +674,19 @@ void releaseBondedDevicesBuffer(esp_ble_bond_dev_t* buffer) {
 void invalidateDeviceCache() {
     jsonCacheValid = false;
     cachedDevicesJson[0] = '\0';
+}
+
+// Memory monitoring function
+void printMemoryStatus() {
+    size_t freeHeap = esp_get_free_heap_size();
+    size_t minFreeHeap = esp_get_minimum_free_heap_size();
+    size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    
+    Serial.printf("MEMORY: Free=%d, Min=%d, Largest=%d bytes\n", freeHeap, minFreeHeap, largestBlock);
+    
+    if (freeHeap < 10000) {
+        Serial.println("WARNING: Low memory detected!");
+    }
 }
 
 // Function to find or create name cache entry
@@ -901,12 +942,13 @@ void initializeBluetooth() {
     pServer = BLEDevice::createServer();
     
     // Set server callbacks
-    pServer->setCallbacks(new MyServerCallbacks());
+    pServerCallbacks = new MyServerCallbacks();
+    pServer->setCallbacks(pServerCallbacks);
     Serial.println("BLE: Server callbacks set");
     
     // Set up security with bonding
     Serial.println("BLE: Setting up security...");
-    BLESecurity* pSecurity = new BLESecurity();
+    pSecurity = new BLESecurity();
     pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);
     pSecurity->setCapability(ESP_IO_CAP_NONE);
     pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
@@ -936,8 +978,12 @@ void initializeBluetooth() {
 
 // Function to start BLE advertising with proper discoverability
 void startBLEAdvertising(bool discoverable) {
-    if(pServer == nullptr) {
-        Serial.println("BLE: ERROR - Server not initialized");
+    if(pServer == nullptr || bluetoothShuttingDown) {
+        if (bluetoothShuttingDown) {
+            Serial.println("BLE: Ignoring advertising request - shutdown in progress");
+        } else {
+            Serial.println("BLE: ERROR - Server not initialized");
+        }
         return;
     }
     
@@ -1028,6 +1074,11 @@ void stopBLEAdvertising() {
 
 // Enhanced GAP event handler for debugging
 void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+    // CRITICAL: Ignore all events if we're shutting down
+    if (bluetoothShuttingDown) {
+        return;
+    }
+    
     switch (event) {
         case ESP_GAP_BLE_SCAN_RESULT_EVT:
             if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT) {
@@ -1093,7 +1144,7 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
             break;
 
         case ESP_GAP_BLE_AUTH_CMPL_EVT:
-            if (param->ble_security.auth_cmpl.success) {
+            if (!bluetoothShuttingDown && param->ble_security.auth_cmpl.success) {
                 Serial.println("BLE: Authentication successful!");
                 
                 // Get the authenticated device address
@@ -1114,7 +1165,7 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
                     delay(200);
                 }
                 
-            } else {
+            } else if (!bluetoothShuttingDown) {
                 Serial.printf("BLE: Authentication failed, error: %d\n", param->ble_security.auth_cmpl.fail_reason);
                 if (pServer != nullptr) {
                     pServer->disconnect(pServer->getConnId());
@@ -1167,18 +1218,22 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
             break;
 
         case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
-            if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-                Serial.println("BLE: Advertising started successfully");
-            } else {
-                Serial.printf("BLE: Advertising start failed: %d\n", param->adv_start_cmpl.status);
+            if (!bluetoothShuttingDown) {
+                if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+                    Serial.println("BLE: Advertising started successfully");
+                } else {
+                    Serial.printf("BLE: Advertising start failed: %d\n", param->adv_start_cmpl.status);
+                }
             }
             break;
 
         case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
-            if (param->adv_stop_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-                Serial.println("BLE: Advertising stopped successfully");
-            } else {
-                Serial.printf("BLE: Advertising stop failed: %d\n", param->adv_stop_cmpl.status);
+            if (!bluetoothShuttingDown) {
+                if (param->adv_stop_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+                    Serial.println("BLE: Advertising stopped successfully");
+                } else {
+                    Serial.printf("BLE: Advertising stop failed: %d\n", param->adv_stop_cmpl.status);
+                }
             }
             break;
 
@@ -1241,6 +1296,11 @@ void disablePairingMode() {
 
 // Function to start RSSI scanning
 void startRSSIScan() {
+    if (bluetoothShuttingDown) {
+        Serial.println("BLE: Ignoring RSSI scan request - shutdown in progress");
+        return;
+    }
+    
     esp_ble_scan_params_t scan_params = {
         .scan_type = BLE_SCAN_TYPE_ACTIVE,
         .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
@@ -1272,34 +1332,51 @@ void shutdownBluetooth() {
         return;
     }
     
-    Serial.println("=== SHUTTING DOWN BLUETOOTH ===");
+    Serial.println("=== DISABLING BLUETOOTH ===");
     
-    // Stop any ongoing operations first
+    // CRITICAL: Set shutdown flag IMMEDIATELY to prevent other functions from interfering
+    bluetoothShuttingDown = true;
+    
+    // Step 1: Stop all scanning operations
+    Serial.println("BLE: Stopping RSSI scanning...");
     stopRSSIScan();
+    delay(100);
     
-    // Reset state variables
+    // Step 2: Stop advertising to prevent new connections
+    if (pServer != nullptr) {
+        Serial.println("BLE: Stopping advertising...");
+        stopBLEAdvertising();
+        delay(100);
+    }
+    
+    // Step 3: Disconnect any active connections
+    if (pServer != nullptr && isBleConnected) {
+        Serial.println("BLE: Disconnecting active connections...");
+        pServer->disconnect(pServer->getConnId());
+        delay(200); // Wait for disconnection
+    }
+    
+    // Step 4: Clear states but keep BLE stack initialized
+    Serial.println("BLE: Clearing authentication states...");
     isBleConnected = false;
     bluetoothAuthenticated = false;
     hasConnectedDevice = false;
     isPairingMode = false;
     pairingModeStartTime = 0;
-    
-    // Clear connected device address
     memset(connectedDeviceAddr, 0, sizeof(connectedDeviceAddr));
     
-    // Stop advertising safely
-    if (pServer != nullptr) {
-        stopBLEAdvertising();
-        delay(100); // Give time for advertising to stop
-    }
-    
-    // Mark as not initialized but don't deinitialize aggressively
-    bluetoothInitialized = false;
-    
-    // Reset RSSI analysis when Bluetooth is disabled
+    // Step 5: Clear RSSI analysis
+    Serial.println("BLE: Clearing RSSI analysis data...");
     resetRSSIAnalysis();
     
-    Serial.println("=== BLUETOOTH SHUTDOWN COMPLETE ===");
+    // Mark as functionally disabled but keep stack alive
+    bluetoothInitialized = false;
+    bluetoothShuttingDown = false;
+    
+    // NOTE: We keep the BLE stack, server, keyboard, and callbacks alive
+    // This avoids crashes and allows quick re-enabling
+    
+    Serial.println("=== BLUETOOTH DISABLED (stack kept alive) ===");
 }
 
 // Function to restart Bluetooth after shutdown
@@ -1308,16 +1385,41 @@ void restartBluetooth() {
         return;
     }
     
-    Serial.println("=== RESTARTING BLUETOOTH ===");
+    Serial.println("=== RE-ENABLING BLUETOOTH ===");
+    printMemoryStatus(); // Check memory before restart
     
-    // Small delay to ensure clean state
-    delay(200);
+    // Clear shutdown flag
+    bluetoothShuttingDown = false;
     
-    // Reinitialize Bluetooth (this will handle BLE setup)
-    initializeBluetooth();
+    // Since we kept the BLE stack alive, we just need to restart operations
+    Serial.println("BLE: Restarting BLE operations on existing stack...");
+    
+    // The server, keyboard, and callbacks should still be valid
+    if (pServer == nullptr) {
+        Serial.println("ERROR: BLE server is null - this shouldn't happen!");
+        Serial.println("Attempting recovery by restarting ESP32...");
+        delay(1000);
+        ESP.restart();
+        return;
+    }
+    
+    // Re-register GAP callback for events (in case it was cleared)
+    esp_ble_gap_register_callback(onGapEvent);
+    Serial.println("BLE: GAP callback re-registered");
+    
+    // Start advertising again
+    Serial.println("BLE: Starting advertising...");
+    startBLEAdvertising(false);
+    
+    // Start RSSI scanning again
+    Serial.println("BLE: Starting RSSI scanning...");
+    startRSSIScan();
+    
+    // Mark as initialized
     bluetoothInitialized = true;
     
-    Serial.println("=== BLUETOOTH RESTART COMPLETE ===");
+    printMemoryStatus(); // Check memory after restart
+    Serial.println("=== BLUETOOTH RE-ENABLED ===");
 }
 
 // ========================================
@@ -1830,15 +1932,17 @@ void loop() {
         // RFID scanning handled in main loop below
         handleButtonPress(); // Push-to-start functionality
     } else {
-        // Ghost Key disabled: Reset authentication states and disable wireless
+        // Ghost Key disabled: Reset Bluetooth but keep RFID for Ghost Power
         bluetoothAuthenticated = false;
-        rfidAuthenticated = false;
         
         if (ghostPowerEnabled) {
-            // Ghost Power only mode: Brake + Accessory authentication
-            updateAccessoryAuthentication();
+            // Ghost Power only mode: RFID authentication ONLY
+            // RFID scanning will continue above for security authentication
             // Configuration mode access still available via button
             handleConfigModeOnly(); // Only handle config mode button press
+        } else {
+            // Both systems disabled: Reset all authentication
+            rfidAuthenticated = false;
         }
     }
     
@@ -1858,8 +1962,8 @@ void loop() {
         lastSecurityCheck = millis();
     }
     
-    // Update BLE connection status (only if Bluetooth is enabled)
-    if (bluetoothEnabled && bluetoothInitialized) {
+    // Update BLE connection status (only if Bluetooth is enabled and not shutting down)
+    if (bluetoothEnabled && bluetoothInitialized && !bluetoothShuttingDown) {
     isBleConnected = bleKeyboard.isConnected();
     
     // RSSI scanning (only when needed and not in deep sleep quiet period)
@@ -1895,11 +1999,25 @@ void loop() {
         server.handleClient();
     }
     
+    // Periodic memory monitoring (every 30 seconds)
+    static unsigned long lastMemoryCheck = 0;
+    if (millis() - lastMemoryCheck >= 30000) {
+        printMemoryStatus();
+        lastMemoryCheck = millis();
+        
+        // Clear caches if memory is low
+        size_t freeHeap = esp_get_free_heap_size();
+        if (freeHeap < 15000) {
+            Serial.println("Low memory detected - clearing caches");
+            invalidateDeviceCache();
+        }
+    }
+    
     // Factory reset detection - start + brake for 30 seconds
     checkFactoryReset();
     
-    // RFID scanning - only when Ghost Key and RFID are enabled
-    if (ghostKeyEnabled && rfidEnabled) {
+    // RFID scanning - when RFID is enabled and either Ghost Key or Ghost Power is enabled
+    if (rfidEnabled && (ghostKeyEnabled || ghostPowerEnabled)) {
         // Track first scan timing
     static bool firstRfidScanStarted = false;
     if (!firstRfidScanStarted) {
@@ -3799,8 +3917,8 @@ void updateSecurityState() {
         // Both systems enabled: RFID/Bluetooth authentication only (no brake+accessory needed)
         isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
     } else if (!ghostKeyEnabled && ghostPowerEnabled) {
-        // Ghost Power only mode: Brake + Accessory authentication
-        isAuthenticated = accessoryInputAuth;
+        // Ghost Power only mode: RFID authentication ONLY
+        isAuthenticated = rfidAuthenticated;
     }
     
     // Security logic: enabled by default, disabled when authenticated or engine running
@@ -4147,6 +4265,11 @@ float sigmoidSignalStrength(float rssi) {
 
 // Add RSSI reading to analysis buffers
 void addRSSIReading(int8_t rssi, esp_bd_addr_t address) {
+    // Don't process if shutting down
+    if (bluetoothShuttingDown) {
+        return;
+    }
+    
     if (!isRSSIValid(rssi)) {
         return;
     }
@@ -4433,6 +4556,11 @@ float calculateStrengthScore() {
 
 // Perform complete RSSI analysis and confidence calculation
 void performRSSIAnalysis() {
+    // Don't perform analysis if shutting down
+    if (bluetoothShuttingDown) {
+        return;
+    }
+    
     unsigned long now = millis();
     
     // Check for signal loss and handle no-signal decay
@@ -4743,8 +4871,15 @@ void updatePowerManagement() {
         return;
     }
     
-    // Get current authentication state
-    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    // Get current authentication state based on enabled systems
+    bool isAuthenticated = false;
+    if (ghostKeyEnabled) {
+        // Ghost Key enabled: RFID or Bluetooth authentication
+        isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    } else if (ghostPowerEnabled) {
+        // Ghost Power only: RFID authentication ONLY
+        isAuthenticated = rfidAuthenticated;
+    }
     
     // Track authentication state changes
     if (isAuthenticated != wasAuthenticated) {
@@ -5013,7 +5148,7 @@ void handleDeepSleepRFID() {
 
 // Handle BLE advertising cycling in deep sleep
 void handleDeepSleepBLE() {
-    if (!bluetoothInitialized) return;
+    if (!bluetoothInitialized || bluetoothShuttingDown) return;
     
     unsigned long currentTime = millis();
     

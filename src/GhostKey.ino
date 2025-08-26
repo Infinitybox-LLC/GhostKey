@@ -271,8 +271,10 @@ enum PowerState {
 #define LIGHT_SLEEP_DELAY_MS 10000      // 10 seconds after losing authentication
 #define BRAKE_WAKEUP_ACTIVE_TIME 30000  // 30 seconds in active mode after brake wake-up
 #define DEEP_SLEEP_DELAY_MS 30000      // 30 seconds after losing authentication
-#define RFID_LIGHT_SLEEP_CYCLE_MS 500   // 500ms on/off cycle for RFID in light sleep
-#define RFID_DEEP_SLEEP_CYCLE_MS 2000    // 2 seconds on/off cycle for RFID in deep sleep
+#define RFID_LIGHT_SLEEP_ON_MS 500      // 500ms on for RFID in light sleep
+#define RFID_LIGHT_SLEEP_OFF_MS 1000    // 1 second off for RFID in light sleep
+#define RFID_DEEP_SLEEP_ON_MS 500       // 500 ms seconds on for RFID in deep sleep
+#define RFID_DEEP_SLEEP_OFF_MS 2000       // 2 seconds off for RFID in deep sleep
 #define BLE_DEEP_SLEEP_INTERVAL_MS 60000 // 1 minute between BLE advertising periods (base)
 #define BLE_DEEP_SLEEP_DURATION_MS 10000 // 10 seconds of advertising in deep sleep
 
@@ -1708,15 +1710,15 @@ void setup() {
     preferences.begin("ghostkey", false);
     isConfigured = preferences.getBool("configured", false);
     isBluetoothPaired = preferences.getBool("bluetooth_paired", false);
-    firstSetupComplete = preferences.getBool("first_setup_complete", false);
+    firstSetupComplete = preferences.getBool("setup_done", false);
     starterPulseTime = preferences.getULong("starter_pulse", STARTER_PULSE_TIME);
     autoLockTimeout = preferences.getULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
     ap_password = preferences.getString("wifi_password", "123456789");
     web_password = preferences.getString("web_password", "1234");
     bluetoothEnabled = preferences.getBool("bt_enabled", true);
     rfidEnabled = preferences.getBool("rfid_enabled", true);
-    ghostKeyEnabled = preferences.getBool("ghost_key_enabled", true);
-    ghostPowerEnabled = preferences.getBool("ghost_power_enabled", true);
+    ghostKeyEnabled = preferences.getBool("ghost_key", true);
+    ghostPowerEnabled = preferences.getBool("ghost_power", true);
     calibrationOffset = preferences.getFloat("cal_offset", 0.0f);
     
     // Legacy RSSI calibration removed - using confidence-based authentication only
@@ -3551,7 +3553,7 @@ void setupWebServer() {
                 }
                 
                 ghostKeyEnabled = newState;
-                preferences.putBool("ghost_key_enabled", ghostKeyEnabled);
+                preferences.putBool("ghost_key", ghostKeyEnabled);
                 
                 Serial.printf("Ghost Key %s\n", ghostKeyEnabled ? "enabled" : "disabled");
                 String message = ghostKeyEnabled ? "Ghost Key enabled." : "Ghost Key disabled.";
@@ -3578,7 +3580,7 @@ void setupWebServer() {
                 }
                 
                 ghostPowerEnabled = newState;
-                preferences.putBool("ghost_power_enabled", ghostPowerEnabled);
+                preferences.putBool("ghost_power", ghostPowerEnabled);
                 
                 Serial.printf("Ghost Power %s\n", ghostPowerEnabled ? "enabled" : "disabled");
                 String message = ghostPowerEnabled ? "Ghost Power enabled." : "Ghost Power disabled.";
@@ -3623,15 +3625,15 @@ void setupWebServer() {
                 ap_password = wifiPass;
                 web_password = webPass;
                 
-                preferences.putBool("ghost_key_enabled", ghostKeyEnabled);
-                preferences.putBool("ghost_power_enabled", ghostPowerEnabled);
+                preferences.putBool("ghost_key", ghostKeyEnabled);
+                preferences.putBool("ghost_power", ghostPowerEnabled);
                 preferences.putBool("bt_enabled", bluetoothEnabled);
                 preferences.putString("wifi_password", ap_password);
                 preferences.putString("web_password", web_password);
                 
                 // Mark setup as complete
                 firstSetupComplete = true;
-                preferences.putBool("first_setup_complete", true);
+                preferences.putBool("setup_done", true);
                 
                 Serial.println("Setup completed successfully");
                 server.send(200, "text/plain", "Setup completed successfully");
@@ -4044,7 +4046,7 @@ void performFactoryReset() {
     // Set defaults
     preferences.putBool("configured", false);
     preferences.putBool("bluetooth_paired", false);
-    preferences.putBool("first_setup_complete", false);
+            preferences.putBool("setup_done", false);
     preferences.putULong("starter_pulse", STARTER_PULSE_TIME);
     preferences.putULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
     preferences.putString("wifi_password", "123456789");
@@ -4736,6 +4738,11 @@ void addCalibrationSample(float rssi, float confidence) {
 
 // Update power management state based on authentication and timing
 void updatePowerManagement() {
+    // Skip power management while in config mode - keep full power for web interface
+    if (currentState == CONFIG_MODE) {
+        return;
+    }
+    
     // Get current authentication state
     bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
     
@@ -4784,10 +4791,14 @@ void updatePowerManagement() {
             setPowerState(POWER_LIGHT_SLEEP);
             Serial.println("Wake-up: Will complete to Active in 2 seconds for stability");
         } else {
-            // From Light Sleep: go directly to Active
+            // From Light Sleep: go directly to Active with extended active time
             setPowerState(POWER_ACTIVE);
             Serial.println("Wake-up: Light Sleep → Active");
             brakeWakeUpInProgress = false; // Complete immediately
+            // Set extended active mode for button/brake wake-up from Light Sleep
+            brakeWakeUpActiveMode = true;
+            brakeWakeUpActiveTime = millis();
+            Serial.printf("Wake-up: Will stay active for %d seconds for phone detection\n", BRAKE_WAKEUP_ACTIVE_TIME / 1000);
         }
         return;
     }
@@ -4898,8 +4909,8 @@ void setPowerState(PowerState newState) {
             delay(50);   // Additional stabilization
             Serial.flush();  // Ensure serial is stable
             
-            // Make sure RFID is on (if enabled)
-            digitalWrite(RFID_SHD, rfidEnabled ? LOW : HIGH);
+            // Make sure RFID is on (if enabled and Ghost Key is enabled)
+            digitalWrite(RFID_SHD, (rfidEnabled && ghostKeyEnabled) ? LOW : HIGH);
             
             // Resume normal BLE advertising and scanning if enabled
             if (bluetoothEnabled && bluetoothInitialized) {
@@ -4919,10 +4930,10 @@ void setPowerState(PowerState newState) {
             delay(50);  // Additional stabilization
             Serial.flush();  // Ensure serial is stable
             
-            // Initialize RFID cycling for light sleep (if enabled)
+            // Initialize RFID cycling for light sleep (if enabled and Ghost Key enabled)
             rfidLightSleepCycleStart = millis();
             rfidLightSleepOn = true;
-            digitalWrite(RFID_SHD, rfidEnabled ? LOW : HIGH);  // Start with RFID on if enabled
+            digitalWrite(RFID_SHD, (rfidEnabled && ghostKeyEnabled) ? LOW : HIGH);  // Start with RFID on if enabled
             break;
             
         case POWER_DEEP_SLEEP:
@@ -4954,8 +4965,8 @@ void setPowerState(PowerState newState) {
 
 // Handle RFID on/off cycling in light sleep
 void handleLightSleepRFID() {
-    if (!rfidEnabled) {
-        // RFID disabled - keep it off
+    if (!rfidEnabled || !ghostKeyEnabled) {
+        // RFID disabled or Ghost Key disabled - keep RFID off to save power
         digitalWrite(RFID_SHD, HIGH);
         return;
     }
@@ -4963,8 +4974,10 @@ void handleLightSleepRFID() {
     unsigned long currentTime = millis();
     unsigned long cycleTime = currentTime - rfidLightSleepCycleStart;
     
-    // Toggle RFID every 500ms
-    if (cycleTime >= RFID_LIGHT_SLEEP_CYCLE_MS) {
+    // Different timing for on vs off periods: 500ms on, 1 second off
+    unsigned long targetTime = rfidLightSleepOn ? RFID_LIGHT_SLEEP_ON_MS : RFID_LIGHT_SLEEP_OFF_MS;
+    
+    if (cycleTime >= targetTime) {
         rfidLightSleepCycleStart = currentTime;
         rfidLightSleepOn = !rfidLightSleepOn;
         
@@ -4976,8 +4989,8 @@ void handleLightSleepRFID() {
 
 // Handle RFID on/off cycling in deep sleep
 void handleDeepSleepRFID() {
-    if (!rfidEnabled) {
-        // RFID disabled - keep it off
+    if (!rfidEnabled || !ghostKeyEnabled) {
+        // RFID disabled or Ghost Key disabled - keep RFID off to save power
         digitalWrite(RFID_SHD, HIGH);
         return;
     }
@@ -4985,8 +4998,10 @@ void handleDeepSleepRFID() {
     unsigned long currentTime = millis();
     unsigned long cycleTime = currentTime - rfidDeepSleepCycleStart;
     
-    // Toggle RFID every 2 seconds
-    if (cycleTime >= RFID_DEEP_SLEEP_CYCLE_MS) {
+    // Different timing for on vs off periods: 500ms on, 2 seconds off
+    unsigned long targetTime = rfidDeepSleepOn ? RFID_DEEP_SLEEP_ON_MS : RFID_DEEP_SLEEP_OFF_MS;
+    
+    if (cycleTime >= targetTime) {
         rfidDeepSleepCycleStart = currentTime;
         rfidDeepSleepOn = !rfidDeepSleepOn;
         

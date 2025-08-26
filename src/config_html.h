@@ -1119,23 +1119,23 @@ const char config_html[] PROGMEM = R"rawliteral(
             const bluetoothNav = document.getElementById('bluetoothNav');
             const rfidNav = document.getElementById('rfidNav');
             
+            // Config section should ALWAYS be visible - contains system toggles and settings
+            configNav.style.display = 'flex';
+            
             if (ghostKeyEnabled) {
-                // Show full interface for Ghost Key
-                configNav.style.display = 'flex';
+                // Show Ghost Key specific sections
                 bluetoothNav.style.display = 'flex';
                 rfidNav.style.display = 'flex';
             } else {
-                // Hide Ghost Key sections if only Ghost Power
-                configNav.style.display = 'none';
+                // Hide Ghost Key specific sections if only Ghost Power
                 bluetoothNav.style.display = 'none';
                 rfidNav.style.display = 'none';
                 
-                // If we're currently viewing a hidden section, switch to security
+                // If we're currently viewing a hidden section, switch to config
                 const activeSection = document.querySelector('.content-section.active');
-                if (activeSection && (activeSection.id === 'configSection' || 
-                                    activeSection.id === 'bluetoothSection' || 
+                if (activeSection && (activeSection.id === 'bluetoothSection' || 
                                     activeSection.id === 'rfidSection')) {
-                    showSection('security');
+                    showSection('config');
                 }
             }
         }

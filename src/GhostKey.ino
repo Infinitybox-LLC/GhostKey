@@ -2319,9 +2319,11 @@ void handleConfigModeOnly() {
         }
     }
 
-    // Check for start button press in config mode with pairing active
-    if (currentState == CONFIG_MODE && buttonPressed == true) {
-        DEBUG_BUTTON_PRINTLN("Start button pressed in pairing mode - Exiting config mode");
+    // Check for start button press in config mode - always exit
+    if (currentState == CONFIG_MODE && 
+        buttonReading == LOW && lastButtonReading == HIGH && 
+        (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+        DEBUG_BUTTON_PRINTLN("Start button pressed in config mode - Exiting config mode");
         exitConfigMode();
         lastButtonPress = millis();
     }
@@ -2373,11 +2375,11 @@ void handleButtonPress() {
         }
     }
 
-    // Check for start button press in config mode with pairing active
-    if (currentState == CONFIG_MODE && isPairingMode && 
+    // Check for start button press in config mode - always exit
+    if (currentState == CONFIG_MODE && 
         buttonReading == LOW && lastButtonReading == HIGH && 
         (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
-        DEBUG_BUTTON_PRINTLN("Start button pressed in pairing mode - Exiting config mode");
+        DEBUG_BUTTON_PRINTLN("Start button pressed in config mode - Exiting config mode");
         exitConfigMode();
         lastButtonPress = millis();
     }
@@ -3521,7 +3523,7 @@ void setupWebServer() {
     });
     
     server.on("/update_web_password", HTTP_POST, [](){
-        Serial.println("Web password update request received");
+        Serial.println("Web PIN update request received");
         if (server.hasArg("plain")) {
             DynamicJsonDocument doc(512);
             DeserializationError error = deserializeJson(doc, server.arg("plain"));
@@ -3529,17 +3531,28 @@ void setupWebServer() {
             if (!error) {
                 const char* newPassword = doc["password"];
                 
-                if (newPassword && strlen(newPassword) >= 4) {
-                    web_password = String(newPassword);
-                    preferences.putString("web_password", web_password);
-                    Serial.printf("Web password updated: %s\n", web_password.c_str());
+                // Validate 4-digit numeric PIN
+                if (newPassword && strlen(newPassword) == 4) {
+                    bool isNumeric = true;
+                    for (int i = 0; i < 4; i++) {
+                        if (!isdigit(newPassword[i])) {
+                            isNumeric = false;
+                            break;
+                        }
+                    }
                     
-                    server.send(200, "text/plain", "Web interface password updated successfully");
-                    return;
+                    if (isNumeric) {
+                        web_password = String(newPassword);
+                        preferences.putString("web_password", web_password);
+                        Serial.printf("Web PIN updated: %s\n", web_password.c_str());
+                        
+                        server.send(200, "text/plain", "Web interface PIN updated successfully");
+                        return;
+                    }
                 }
             }
         }
-        server.send(400, "text/plain", "Invalid request or password too short");
+        server.send(400, "text/plain", "Invalid request - PIN must be exactly 4 digits");
     });
     
     server.on("/update_wifi_password", HTTP_POST, [](){
@@ -3747,8 +3760,18 @@ void setupWebServer() {
                 String webPass = doc["webPassword"];
                 
                 // Validate settings
-                if ((!ghostKey && !ghostPower) || wifiPass.length() < 8 || webPass.length() < 4) {
-                    server.send(400, "text/plain", "Invalid settings - check requirements");
+                bool validWebPin = (webPass.length() == 4);
+                if (validWebPin) {
+                    for (int i = 0; i < 4; i++) {
+                        if (!isdigit(webPass[i])) {
+                            validWebPin = false;
+                            break;
+                        }
+                    }
+                }
+                
+                if ((!ghostKey && !ghostPower) || wifiPass.length() < 8 || !validWebPin) {
+                    server.send(400, "text/plain", "Invalid settings - Web PIN must be exactly 4 digits, WiFi password minimum 8 characters");
                     return;
                 }
                 

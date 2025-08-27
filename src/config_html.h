@@ -6,7 +6,7 @@ const char config_html[] PROGMEM = R"rawliteral(
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, shrink-to-fit=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, shrink-to-fit=no, viewport-fit=cover">
     <title>Ghost Key Configuration</title>
     
     <!-- PWA Manifest -->
@@ -137,13 +137,15 @@ const char config_html[] PROGMEM = R"rawliteral(
         .login-input {
             width: 100%;
             padding: 1rem;
-            font-size: 1.1rem;
+            font-size: 16px; /* iOS needs 16px to prevent zoom */
             border: none;
             border-radius: 12px;
             background: rgba(255,255,255,0.9);
             margin-bottom: 1rem;
             text-align: center;
             letter-spacing: 2px;
+            -webkit-appearance: none;
+            appearance: none;
         }
         
         .login-input:focus {
@@ -344,11 +346,14 @@ const char config_html[] PROGMEM = R"rawliteral(
             width: 100%;
             max-width: 300px;
             padding: 1rem;
-            font-size: 1.1rem;
+            font-size: 16px; /* iOS needs 16px to prevent zoom */
             border: 2px solid #e1e5e9;
             border-radius: 12px;
             background: white;
             transition: all 0.3s;
+            -webkit-appearance: none;
+            appearance: none;
+            box-sizing: border-box;
         }
         
         .form-input:focus {
@@ -1179,13 +1184,13 @@ const char config_html[] PROGMEM = R"rawliteral(
             const newPassword = document.getElementById('newPassword').value;
             const confirmPassword = document.getElementById('confirmPassword').value;
             
-            if (newPassword.length < 4) {
-                showNotification('Web interface password must be at least 4 characters', 'error');
+            if (newPassword.length !== 4 || !/^[0-9]{4}$/.test(newPassword)) {
+                showNotification('Web interface PIN must be exactly 4 digits', 'error');
                 return;
             }
             
             if (newPassword !== confirmPassword) {
-                showNotification('Web interface passwords do not match', 'error');
+                showNotification('Web interface PINs do not match', 'error');
                 return;
             }
             
@@ -1200,10 +1205,10 @@ const char config_html[] PROGMEM = R"rawliteral(
                 
                 document.getElementById('newPassword').value = '';
                 document.getElementById('confirmPassword').value = '';
-                showNotification('Web interface password updated successfully');
+                showNotification('Web interface PIN updated successfully');
                 
             } catch (error) {
-                showNotification('Error updating web interface password: ' + error.message, 'error');
+                showNotification('Error updating web interface PIN: ' + error.message, 'error');
             }
         }
 
@@ -2042,7 +2047,7 @@ const char config_html[] PROGMEM = R"rawliteral(
         <p class="splash-subtitle">Secure Vehicle Access System</p>
         
         <form class="login-form" onsubmit="handleLogin(event)">
-            <input type="password" id="passwordInput" class="login-input" placeholder="Enter PIN or Password" autocomplete="off">
+            <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="passwordInput" class="login-input" placeholder="Enter 4-digit PIN" autocomplete="off">
             <button type="submit" class="login-btn">Unlock</button>
             <div id="loginError" class="login-error"></div>
         </form>
@@ -2319,18 +2324,18 @@ const char config_html[] PROGMEM = R"rawliteral(
                 <!-- Settings Section -->
                 <section class="content-section" id="securitySection">
                     <div class="card">
-                        <h2 class="card-title">Web Interface Password</h2>
+                        <h2 class="card-title">Web Interface PIN</h2>
                         <div class="form-group">
-                            <label class="form-label" for="newPassword">New Web Interface Password</label>
-                            <input type="password" id="newPassword" class="form-input" placeholder="Enter new password" minlength="4">
+                            <label class="form-label" for="newPassword">New Web Interface PIN</label>
+                            <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="newPassword" class="form-input" placeholder="Enter 4-digit PIN" minlength="4">
                         </div>
                         <div class="form-group">
-                            <label class="form-label" for="confirmPassword">Confirm Web Interface Password</label>
-                            <input type="password" id="confirmPassword" class="form-input" placeholder="Confirm new password" minlength="4">
+                            <label class="form-label" for="confirmPassword">Confirm Web Interface PIN</label>
+                            <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="confirmPassword" class="form-input" placeholder="Confirm 4-digit PIN" minlength="4">
                         </div>
-                        <button onclick="updateWebPassword()" class="btn btn-primary">Update Web Interface Password</button>
+                        <button onclick="updateWebPassword()" class="btn btn-primary">Update Web Interface PIN</button>
                         <p style="font-size: 0.9rem; color: #666; margin-top: 1rem;">
-                            This password protects access to this configuration interface. Minimum 4 characters required.
+                            This 4-digit PIN protects access to this configuration interface. Numbers only.
                         </p>
                     </div>
                     

@@ -6,7 +6,7 @@ const char setup_html[] PROGMEM = R"rawliteral(
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, shrink-to-fit=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, shrink-to-fit=no, viewport-fit=cover">
     <title>Ghost Key First Time Setup</title>
     
     <!-- PWA Manifest -->
@@ -329,12 +329,15 @@ const char setup_html[] PROGMEM = R"rawliteral(
             width: 100%;
             max-width: 500px;
             padding: 1.5rem;
-            font-size: 1.1rem;
+            font-size: 16px; /* iOS needs 16px to prevent zoom */
             border: 2px solid #e1e5e9;
             border-radius: 16px;
             background: white;
             transition: all 0.3s ease;
             box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            -webkit-appearance: none;
+            appearance: none;
+            box-sizing: border-box;
         }
         
         .form-input:focus {
@@ -781,8 +784,8 @@ const char setup_html[] PROGMEM = R"rawliteral(
                 return false;
             }
             
-            if (webPassword.length < 4) {
-                showNotification('Web interface password must be at least 4 characters', 'error');
+            if (webPassword.length !== 4 || !/^[0-9]{4}$/.test(webPassword)) {
+                showNotification('Web interface PIN must be exactly 4 digits', 'error');
                 return false;
             }
             
@@ -933,12 +936,12 @@ const char setup_html[] PROGMEM = R"rawliteral(
                 </div>
                 
                 <div class="form-group">
-                    <label class="form-label" for="webPassword">Web Interface Password</label>
-                    <input type="password" id="webPassword" class="form-input" placeholder="Enter web interface password" value="1234">
+                    <label class="form-label" for="webPassword">Web Interface PIN</label>
+                    <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="webPassword" class="form-input" placeholder="Enter 4-digit PIN" value="1234">
                     <div class="requirements">
                         <strong>Requirements:</strong>
                         <ul>
-                            <li>Minimum 4 characters</li>
+                            <li>Exactly 4 digits (numbers only)</li>
                             <li>Used to access this configuration interface</li>
                         </ul>
                     </div>

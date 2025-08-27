@@ -386,6 +386,11 @@ bool ghostKeyEnabled = true;    // RFID/Bluetooth/Push-to-start functionality
 bool ghostPowerEnabled = true;  // Security relay functionality
 bool accessoryInputAuth = false; // Authentication via brake + accessory input
 
+// RFID authentication feedback
+bool wasRfidAuthenticated = false;  // Track previous RFID auth state for buzzer
+bool unauthorizedBeepPlayed = false;  // Prevent repeated unauthorized beeps
+unsigned long lastUnauthorizedBeepTime = 0;  // Reset flag after 5 seconds
+
 // Power management state variables
 PowerState currentPowerState = POWER_ACTIVE;  // Always start in active mode
 bool wasAuthenticated = false;                // Track previous authentication state
@@ -2024,9 +2029,37 @@ void loop() {
         }
         // Handle RFID authentication
         else if (checkRfidKey(tagData)) {
+            // Check if this is the first time RFID auth is happening
+            if (!wasRfidAuthenticated && !rfidAuthenticated) {
+                // First time RFID authentication - pulse buzzer once
+                digitalWrite(BEEPER_PIN, HIGH);
+                delay(100);  // 100ms pulse
+                digitalWrite(BEEPER_PIN, LOW);
+                Serial.println("RFID: Authentication buzzer pulse");
+            }
+            
             rfidAuthenticated = true;
             rfidAuthStartTime = millis();
             Serial.println("RFID: Authenticated for 30 seconds");
+        }
+        // Handle unauthorized RFID key
+        else {
+            // Check if we should play unauthorized beep (only once per 5 seconds)
+            if (!unauthorizedBeepPlayed) {
+                // Unauthorized key scanned - pulse buzzer twice
+                digitalWrite(BEEPER_PIN, HIGH);
+                delay(100);  // 100ms pulse
+                digitalWrite(BEEPER_PIN, LOW);
+                delay(100);  // 100ms gap
+                digitalWrite(BEEPER_PIN, HIGH);
+                delay(100);  // 100ms pulse
+                digitalWrite(BEEPER_PIN, LOW);
+                Serial.println("RFID: Unauthorized key - double buzzer pulse");
+                
+                // Set flag to prevent repeated beeps
+                unauthorizedBeepPlayed = true;
+                lastUnauthorizedBeepTime = millis();
+            }
         }
     }
     
@@ -2035,6 +2068,14 @@ void loop() {
         rfidAuthenticated = false;
         Serial.println("RFID: Authentication expired");
     }
+    
+    // Reset unauthorized beep flag after 5 seconds
+    if (unauthorizedBeepPlayed && (millis() - lastUnauthorizedBeepTime >= 5000)) {
+        unauthorizedBeepPlayed = false;
+    }
+    
+    // Update RFID auth tracking for buzzer logic
+    wasRfidAuthenticated = rfidAuthenticated;
 }
     
     // Check for RSSI scan timeout (if no results after 10 seconds)
@@ -3606,18 +3647,39 @@ void setupWebServer() {
                     return;
                 }
                 
-                // Save all settings
+                // Save all settings except Bluetooth (handled separately)
                 ghostKeyEnabled = ghostKey;
                 ghostPowerEnabled = ghostPower;
-                bluetoothEnabled = bluetooth;
                 ap_password = wifiPass;
                 web_password = webPass;
                 
                 preferences.putBool("ghost_key_enabled", ghostKeyEnabled);
                 preferences.putBool("ghost_power_enabled", ghostPowerEnabled);
-                preferences.putBool("bt_enabled", bluetoothEnabled);
                 preferences.putString("wifi_password", ap_password);
                 preferences.putString("web_password", web_password);
+                
+                // Handle Bluetooth state change using the same logic as the toggle endpoint
+                if (bluetooth != bluetoothEnabled) {
+                    if (bluetooth && !bluetoothEnabled) {
+                        // Enabling Bluetooth - set flag for restart on config exit
+                        bluetoothEnabled = true;
+                        preferences.putBool("bt_enabled", true);
+                        preferences.putBool("bt_restart", true);
+                        restartPendingForBluetooth = true;
+                        Serial.println("Setup: Bluetooth will be enabled when you exit configuration mode");
+                    } else if (!bluetooth && bluetoothEnabled) {
+                        // Disabling Bluetooth
+                        bluetoothEnabled = false;
+                        preferences.putBool("bt_enabled", false);
+                        if (bluetoothInitialized) {
+                            shutdownBluetooth();
+                        }
+                        Serial.println("Setup: Bluetooth disabled and stopped immediately");
+                    }
+                } else {
+                    // No change to Bluetooth state, just save current setting
+                    preferences.putBool("bt_enabled", bluetoothEnabled);
+                }
                 
                 // Mark setup as complete
                 firstSetupComplete = true;

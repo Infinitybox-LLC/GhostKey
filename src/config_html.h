@@ -1047,7 +1047,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 return;
             }
             
-            if (!enabled && !confirm('Are you sure you want to disable Ghost Key? This will remove RFID/Bluetooth authentication and push-to-start functionality.')) {
+            if (!enabled && !confirm('Are you sure you want to disable Ghost Key? This will remove Bluetooth authentication and push-to-start functionality.')) {
                 document.getElementById('ghostKeyEnabled').checked = true;
                 return;
             }
@@ -1124,17 +1124,15 @@ const char config_html[] PROGMEM = R"rawliteral(
                 bluetoothNav.style.display = 'flex';
                 rfidNav.style.display = 'flex';
             } else {
-                // Hide Ghost Key sections if only Ghost Power
-                configNav.style.display = 'none';
-                bluetoothNav.style.display = 'none';
-                rfidNav.style.display = 'none';
+                // Keep config and RFID visible even when Ghost Key disabled
+                configNav.style.display = 'flex';  // Always show configuration
+                bluetoothNav.style.display = 'none';  // Hide only Bluetooth
+                rfidNav.style.display = 'flex';  // Always show RFID management
                 
-                // If we're currently viewing a hidden section, switch to security
+                // If we're currently viewing the hidden Bluetooth section, switch to config
                 const activeSection = document.querySelector('.content-section.active');
-                if (activeSection && (activeSection.id === 'configSection' || 
-                                    activeSection.id === 'bluetoothSection' || 
-                                    activeSection.id === 'rfidSection')) {
-                    showSection('security');
+                if (activeSection && activeSection.id === 'bluetoothSection') {
+                    showSection('config');
                 }
             }
         }

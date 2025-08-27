@@ -1753,10 +1753,10 @@ void setup() {
     calibrationOffset = preferences.getFloat("calibration_offset", 0.0f);
     
     // Check if Bluetooth should be enabled after restart
-    if (preferences.getBool("bt_enable_on_restart", false)) {
+    if (preferences.getBool("bt_restart", false)) {
         bluetoothEnabled = true;
         preferences.putBool("bt_enabled", true);
-        preferences.putBool("bt_enable_on_restart", false); // Clear the flag
+        preferences.putBool("bt_restart", false); // Clear the flag
         DEBUG_PRINTLN("Bluetooth enabled after restart");
     }
     
@@ -1869,15 +1869,17 @@ void loop() {
         // RFID scanning handled in main loop below
         handleButtonPress(); // Push-to-start functionality
     } else {
-        // Ghost Key disabled: Reset authentication states and disable wireless
+        // Ghost Key disabled: Reset Bluetooth but keep RFID for Ghost Power
         bluetoothAuthenticated = false;
-        rfidAuthenticated = false;
         
         if (ghostPowerEnabled) {
-            // Ghost Power only mode: Brake + Accessory authentication
-            updateAccessoryAuthentication();
+            // Ghost Power only mode: RFID authentication (not accessory input)
+            // RFID scanning handled in main loop below
             // Configuration mode access still available via button
             handleConfigModeOnly(); // Only handle config mode button press
+        } else {
+            // Both systems disabled - reset RFID too
+            rfidAuthenticated = false;
         }
     }
     
@@ -1944,8 +1946,8 @@ void loop() {
     // Factory reset detection - start + brake for 30 seconds
     checkFactoryReset();
     
-    // RFID scanning - only when Ghost Key is enabled
-    if (ghostKeyEnabled) {
+    // RFID scanning - when Ghost Key enabled OR when Ghost Power only mode
+    if (ghostKeyEnabled || (!ghostKeyEnabled && ghostPowerEnabled)) {
         // Track first scan timing
     static bool firstRfidScanStarted = false;
     if (!firstRfidScanStarted) {
@@ -2028,15 +2030,12 @@ void loop() {
         }
     }
     
-    // Check RFID authentication timeout (only when Ghost Key is enabled)
+    // Check RFID authentication timeout
     if (rfidAuthenticated && (millis() - rfidAuthStartTime >= RFID_AUTH_TIMEOUT)) {
         rfidAuthenticated = false;
         Serial.println("RFID: Authentication expired");
     }
-} else {
-    // Ghost Key disabled: Reset RFID authentication state
-    rfidAuthenticated = false;
-    }
+}
     
     // Check for RSSI scan timeout (if no results after 10 seconds)
     static bool rssiTimeoutChecked = false;
@@ -3487,7 +3486,7 @@ void setupWebServer() {
                     // Enabling Bluetooth - set flag for restart on config exit
                     bluetoothEnabled = true;
                     preferences.putBool("bt_enabled", true);
-                    preferences.putBool("bt_enable_on_restart", true);
+                    preferences.putBool("bt_restart", true);
                     restartPendingForBluetooth = true;
                     
                     Serial.println("Bluetooth will be enabled when you exit configuration mode");
@@ -3788,8 +3787,8 @@ void updateSecurityState() {
         // Both systems enabled: RFID/Bluetooth authentication only (no brake+accessory needed)
         isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
     } else if (!ghostKeyEnabled && ghostPowerEnabled) {
-        // Ghost Power only mode: Brake + Accessory authentication
-        isAuthenticated = accessoryInputAuth;
+        // Ghost Power only mode: RFID authentication (same as Ghost Key but no push-to-start)
+        isAuthenticated = rfidAuthenticated;
     }
     
     // Security logic: enabled by default, disabled when authenticated or engine running

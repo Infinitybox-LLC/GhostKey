@@ -841,7 +841,7 @@ const char setup_html[] PROGMEM = R"rawliteral(
             <h1 class="setup-title">Welcome to Ghost Key</h1>
             <p class="setup-subtitle">Secure Vehicle Access System</p>
             <div class="welcome-message">
-                <h3>🎉 First Time Setup</h3>
+                <h3>First Time Setup</h3>
                 <p>Let's configure your Ghost Key system. This will only take a few minutes and you can change any of these settings later in the configuration interface.</p>
             </div>
         </div>
@@ -863,7 +863,7 @@ const char setup_html[] PROGMEM = R"rawliteral(
                     <div class="toggle-item">
                         <div class="toggle-info">
                             <div class="toggle-title">Ghost Key System</div>
-                            <div class="toggle-description">RFID/Bluetooth authentication + Push-to-start control</div>
+                            <div class="toggle-description">Bluetooth authentication and Push-to-start control</div>
                         </div>
                         <label class="toggle-switch">
                             <input type="checkbox" id="ghostKeyEnabled" checked>
@@ -874,7 +874,7 @@ const char setup_html[] PROGMEM = R"rawliteral(
                     <div class="toggle-item">
                         <div class="toggle-info">
                             <div class="toggle-title">Ghost Power System</div>
-                            <div class="toggle-description">Security relay control + Vehicle immobilization</div>
+                            <div class="toggle-description">Security relay control and Vehicle immobilization</div>
                         </div>
                         <label class="toggle-switch">
                             <input type="checkbox" id="ghostPowerEnabled" checked>
@@ -884,18 +884,17 @@ const char setup_html[] PROGMEM = R"rawliteral(
                 </div>
                 
                 <div class="requirements">
-                    <strong>⚠️ Important:</strong> At least one system must remain enabled.
+                    <strong>Important:</strong> At least one system must remain enabled.
                 </div>
             </div>
             
             <!-- Bluetooth Configuration Section -->
             <div class="form-section" id="bluetoothSection">
                 <h2 class="section-title">
-                    <span class="emoji">📱</span>
                     Bluetooth Configuration
                 </h2>
                 <p class="section-description">
-                    Enable Bluetooth for smartphone proximity authentication. When enabled, your phone can automatically unlock the vehicle when you're nearby.
+                    Enable Bluetooth for smartphone proximity authentication. When enabled, your phone will automatically authenticate you when you're nearby your vehicle.
                 </p>
                 
                 <div class="toggle-group">
@@ -915,7 +914,6 @@ const char setup_html[] PROGMEM = R"rawliteral(
             <!-- Security Configuration Section -->
             <div class="form-section">
                 <h2 class="section-title">
-                    <span class="emoji">🔐</span>
                     Security Configuration
                 </h2>
                 <p class="section-description">

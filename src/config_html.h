@@ -1283,7 +1283,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 
                 if (!response.ok) throw new Error('Network response was not ok');
                 
-                const message = enabled ? 'Bluetooth enabled.' : 'Bluetooth disabled.';
+                const message = enabled ? 'Bluetooth will take effect after exiting configuration mode and a restart of the system occurs.' : 'Bluetooth disabled.';
                 showNotification(message);
                 updateBluetoothUI(enabled);
                 
@@ -2108,7 +2108,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                                 </label>
                             </div>
                             <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
-                                When disabled, Bluetooth authentication will be completely turned off to save power and improve security. Changes take effect immediately.
+                                When disabled, Bluetooth authentication will be completely turned off to save power and improve security. Changes take effect immediately. When re-enabling bluetooth, changes will take effect after exiting configuration mode and a restart of the system happens.
                             </p>
                         </div>
                     </div>
@@ -2263,7 +2263,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                             </p>
                             
                             <p style="font-size: 0.9rem; color: #ff6b6b; font-weight: 600;">
-                                ⚠️ At least one system must remain enabled
+                                At least one system must remain enabled
                             </p>
                         </div>
                     </div>
@@ -2355,7 +2355,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                             This password is required to connect to the "Ghost Key Configuration" WiFi network. Minimum 8 characters required.
                         </p>
                         <p style="font-size: 0.9rem; color: #28a745; margin-top: 0.5rem;">
-                            💡 Changes will take effect when you exit configuration mode. You won't be disconnected while configuring.
+                            Changes will take effect when you exit configuration mode. You won't be disconnected while configuring.
                         </p>
                     </div>
                     

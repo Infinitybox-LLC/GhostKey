@@ -1895,7 +1895,7 @@ void loop() {
     static unsigned long currentRSSIInterval = RSSI_UPDATE_INTERVAL;  // Default 1000ms
 
     if (bleDeepSleepAdvertising) {
-        currentRSSIInterval = 500;
+        currentRSSIInterval = 100;
     } else {
         currentRSSIInterval = RSSI_UPDATE_INTERVAL;
     }

@@ -401,6 +401,7 @@ bool bleAdvertisingStopped = false;           // Track if we've already stopped 
 
 // Adaptive interval and quick confidence system
 unsigned long adaptiveDeepSleepInterval = 60000;  // Start with 1 minute BLE cycles
+unsigned long currentWindowInterval = 60000;       // Interval for current BLE window (before updates)
 unsigned long lightSleepTimeout = 30000;  // Fixed 2 minutes in light sleep REMEMBER TO CHANGE THIS BACK TO 120000
 int consecutiveWeakConnections = 0;                 // Counter for weak connections
 bool isQuickSampling = false;                      // Currently doing quick confidence check
@@ -1893,15 +1894,14 @@ void loop() {
     static unsigned long lastRSSIScan = 0;
     if (millis() - lastRSSIScan >= RSSI_UPDATE_INTERVAL) {
         int bondedCount = esp_ble_get_bond_device_num();
-        // Don't scan if in deep sleep unless actively advertising
-        bool canScan = (currentPowerState != POWER_DEEP_SLEEP) || bleDeepSleepAdvertising;
+        // Don't scan if in deep sleep unless actively advertising (and not already stopped)
+        bool canScan = (currentPowerState != POWER_DEEP_SLEEP) || (bleDeepSleepAdvertising && !bleAdvertisingStopped);
         if (bondedCount > 0 && (isBleConnected || isPairingMode) && canScan) {
             startRSSIScan();
         }
         lastRSSIScan = millis();
     }
         
-        // Legacy RSSI calibration removed - using confidence-based authentication only;
     
     // Pairing mode timeout check
     if (isPairingMode && pairingModeStartTime > 0) {
@@ -4989,6 +4989,9 @@ void handleDeepSleepBLE() {
             bleAdvertisingStopped = false;  // Reset flag since we're advertising again
             isQuickSampling = false;        // Reset quick sampling state
             quickConfidenceCompleted = false; // Allow one quick confidence check in this BLE window
+            
+            // Capture the current interval for this window (before it might be updated)
+            currentWindowInterval = adaptiveDeepSleepInterval;
             startBLEAdvertising(false);  // Normal advertising, not pairing mode
             startRSSIScan();  // Also start RSSI scanning
             Serial.print("Deep Sleep: BLE window started (80MHz) - ");
@@ -5030,7 +5033,9 @@ void handleDeepSleepBLE() {
                 
                 Serial.print("Deep Sleep: Quick confidence = ");
                 Serial.print(lastQuickConfidence, 1);
-                Serial.println("%");
+                Serial.print("% (");
+                Serial.print(rssiAnalysis.shortTermStats.validSamples);
+                Serial.println(" samples)");
                 
                 if (lastQuickConfidence < QUICK_CONFIDENCE_LOW_THRESHOLD) {
                     // Low confidence - disconnect and stay in deep sleep
@@ -5039,29 +5044,16 @@ void handleDeepSleepBLE() {
                         pServer->disconnect(pServer->getConnId());
                     }
                     
-                    // Save old interval before updating
-                    unsigned long oldInterval = adaptiveDeepSleepInterval;
                     updateAdaptiveInterval(false);  // Increment counter and update interval
                     
-                    // End BLE window early to save power
-                    bleDeepSleepAdvertising = false;
+                    // End BLE operations early but keep CPU at 80MHz
                     stopBLEAdvertising();
                     stopRSSIScan();
-                    bleAdvertisingStopped = true;
+                    bleAdvertisingStopped = true;  // Mark as stopped to prevent restart
                     
-                    // Jump to next cycle using the OLD interval
-                    bleDeepSleepAdvertiseStart += oldInterval;
+                    Serial.println("Deep Sleep: BLE ended early, waiting for window to complete");
                     
-                    // Reduce CPU frequency for quiet period
-                    Serial.print("Deep Sleep: Ending BLE window early, starting new ");
-                    Serial.print(adaptiveDeepSleepInterval / 1000);
-                    Serial.println("s cycle (40MHz)");
-                    Serial.flush();
-                    delay(50);
-                    setCpuFrequencyMhz(40);
-                    delay(50);
-                    Serial.end();
-                    return;  // Exit function to prevent double processing
+                    // Don't advance the timer - let the normal cycle completion handle it
                 } else if (lastQuickConfidence >= QUICK_CONFIDENCE_HIGH_THRESHOLD) {
                     // High confidence - user approaching, reset adaptive and go to light sleep
                     Serial.println("Deep Sleep: High confidence detected - user approaching!");
@@ -5080,10 +5072,16 @@ void handleDeepSleepBLE() {
         }
         
         // Check if full adaptive cycle is complete (BLE window ends)
-        if (currentTime - bleDeepSleepAdvertiseStart >= adaptiveDeepSleepInterval) {
+        // Use original interval for current window, not updated interval
+        if (currentTime - bleDeepSleepAdvertiseStart >= currentWindowInterval) {
             bleDeepSleepAdvertising = false;
-            stopBLEAdvertising();
-            stopRSSIScan();  // Also stop RSSI scanning
+            
+            // Only stop BLE if not already stopped by early termination
+            if (!bleAdvertisingStopped) {
+                stopBLEAdvertising();
+                stopRSSIScan();  // Also stop RSSI scanning
+            }
+            
             isQuickSampling = false;  // Reset quick sampling
             bleAdvertisingStopped = true;  // Mark as stopped
             

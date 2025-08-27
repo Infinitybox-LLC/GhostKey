@@ -406,6 +406,7 @@ int consecutiveWeakConnections = 0;                 // Counter for weak connecti
 bool isQuickSampling = false;                      // Currently doing quick confidence check
 unsigned long quickSamplingStart = 0;              // When quick sampling started
 float lastQuickConfidence = 0.0f;                 // Last calculated quick confidence
+bool quickConfidenceCompleted = false;             // Prevent multiple quick confidence per BLE window
 #define QUICK_SAMPLING_DURATION 3000              // 3 seconds for quick check
 #define QUICK_CONFIDENCE_LOW_THRESHOLD 35.0f      // Below this = stay in deep sleep
 #define QUICK_CONFIDENCE_HIGH_THRESHOLD 45.0f     // Above this = reset adaptive, immediate response
@@ -875,9 +876,14 @@ class MyServerCallbacks: public BLEServerCallbacks {
         
         invalidateDeviceCache();
         
-        // Restart advertising after disconnect
-        Serial.println("BLE: Restarting advertising after disconnect...");
-        startBLEAdvertising(isPairingMode);
+        // Only restart advertising if NOT in deep sleep BLE window
+        // Deep sleep BLE window management controls advertising during deep sleep
+        if (currentPowerState != POWER_DEEP_SLEEP || !bleDeepSleepAdvertising) {
+            Serial.println("BLE: Restarting advertising after disconnect...");
+            startBLEAdvertising(isPairingMode);
+        } else {
+            Serial.println("BLE: In deep sleep BLE window - not restarting advertising (managed by deep sleep handler)");
+        }
     }
 };
 
@@ -1083,13 +1089,24 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
                                     saveDeviceRSSI(param->scan_rst.bda, param->scan_rst.rssi);
                                     
                                     // If we're connected but haven't identified the device yet, do it now
+                                    // Only identify once per connection - check if we already have this device address
                                     if (isBleConnected && !hasConnectedDevice) {
-                                        Serial.println("BLE: Identifying connected bonded device from RSSI scan");
-                                        memcpy(connectedDeviceAddr, param->scan_rst.bda, sizeof(esp_bd_addr_t));
-                                        hasConnectedDevice = true;
-                                        Serial.printf("BLE: Connected device identified: %02x:%02x:%02x:%02x:%02x:%02x\n",
-                                            connectedDeviceAddr[0], connectedDeviceAddr[1], connectedDeviceAddr[2],
-                                            connectedDeviceAddr[3], connectedDeviceAddr[4], connectedDeviceAddr[5]);
+                                        bool isAlreadyIdentified = false;
+                                        for (int j = 0; j < 6; j++) {
+                                            if (connectedDeviceAddr[j] != 0) {
+                                                isAlreadyIdentified = true;
+                                                break;
+                                            }
+                                        }
+                                        
+                                        if (!isAlreadyIdentified) {
+                                            Serial.println("BLE: Identifying connected bonded device from RSSI scan");
+                                            memcpy(connectedDeviceAddr, param->scan_rst.bda, sizeof(esp_bd_addr_t));
+                                            hasConnectedDevice = true;
+                                            Serial.printf("BLE: Connected device identified: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                                                connectedDeviceAddr[0], connectedDeviceAddr[1], connectedDeviceAddr[2],
+                                                connectedDeviceAddr[3], connectedDeviceAddr[4], connectedDeviceAddr[5]);
+                                        }
                                     }
                                 } else {
                                     Serial.printf("BLE: Discarded invalid RSSI %d dBm from scan result\n", param->scan_rst.rssi);
@@ -4950,6 +4967,11 @@ void handleDeepSleepBLE() {
     
     unsigned long currentTime = millis();
     
+    // Safety check to prevent negative wraparound
+    if (bleDeepSleepAdvertiseStart > currentTime) {
+        bleDeepSleepAdvertiseStart = currentTime;
+    }
+    
     if (!bleDeepSleepAdvertising) {
         // Check if it's time to start advertising (using adaptive deep sleep interval)
         if (currentTime - bleDeepSleepAdvertiseStart >= adaptiveDeepSleepInterval - BLE_DEEP_SLEEP_DURATION_MS) {
@@ -4966,6 +4988,7 @@ void handleDeepSleepBLE() {
             // DON'T reset bleDeepSleepAdvertiseStart - keep cycle timing intact
             bleAdvertisingStopped = false;  // Reset flag since we're advertising again
             isQuickSampling = false;        // Reset quick sampling state
+            quickConfidenceCompleted = false; // Allow one quick confidence check in this BLE window
             startBLEAdvertising(false);  // Normal advertising, not pairing mode
             startRSSIScan();  // Also start RSSI scanning
             Serial.print("Deep Sleep: BLE window started (80MHz) - ");
@@ -4990,10 +5013,11 @@ void handleDeepSleepBLE() {
         }
     } else {
         // During advertising period - check for device connections and do quick sampling
-        if (isBleConnected && hasConnectedDevice && !isQuickSampling && !bluetoothAuthenticated) {
-            // Device just connected - start quick confidence sampling
+        if (isBleConnected && hasConnectedDevice && !isQuickSampling && !bluetoothAuthenticated && !quickConfidenceCompleted) {
+            // Device just connected - start quick confidence sampling (only once per BLE window)
             isQuickSampling = true;
             quickSamplingStart = currentTime;
+            quickConfidenceCompleted = true;  // Prevent multiple quick confidence checks in this BLE window
             Serial.println("Deep Sleep: Device connected, starting quick confidence sampling...");
         }
         
@@ -5014,7 +5038,30 @@ void handleDeepSleepBLE() {
                     if (pServer != nullptr) {
                         pServer->disconnect(pServer->getConnId());
                     }
-                    consecutiveWeakConnections++;
+                    
+                    // Save old interval before updating
+                    unsigned long oldInterval = adaptiveDeepSleepInterval;
+                    updateAdaptiveInterval(false);  // Increment counter and update interval
+                    
+                    // End BLE window early to save power
+                    bleDeepSleepAdvertising = false;
+                    stopBLEAdvertising();
+                    stopRSSIScan();
+                    bleAdvertisingStopped = true;
+                    
+                    // Jump to next cycle using the OLD interval
+                    bleDeepSleepAdvertiseStart += oldInterval;
+                    
+                    // Reduce CPU frequency for quiet period
+                    Serial.print("Deep Sleep: Ending BLE window early, starting new ");
+                    Serial.print(adaptiveDeepSleepInterval / 1000);
+                    Serial.println("s cycle (40MHz)");
+                    Serial.flush();
+                    delay(50);
+                    setCpuFrequencyMhz(40);
+                    delay(50);
+                    Serial.end();
+                    return;  // Exit function to prevent double processing
                 } else if (lastQuickConfidence >= QUICK_CONFIDENCE_HIGH_THRESHOLD) {
                     // High confidence - user approaching, reset adaptive and go to light sleep
                     Serial.println("Deep Sleep: High confidence detected - user approaching!");
@@ -5040,8 +5087,8 @@ void handleDeepSleepBLE() {
             isQuickSampling = false;  // Reset quick sampling
             bleAdvertisingStopped = true;  // Mark as stopped
             
-            // Reset cycle for next 60-second period
-            bleDeepSleepAdvertiseStart = currentTime;
+            // Start new cycle - add the adaptive interval to maintain proper timing
+            bleDeepSleepAdvertiseStart += adaptiveDeepSleepInterval;
             
             // Reduce CPU frequency for quiet period
             Serial.print("Deep Sleep: BLE window ended, starting new ");
@@ -5107,8 +5154,14 @@ void updateAdaptiveInterval(bool success) {
         // Failed authentication - increase deep sleep intervals (longer between BLE checks)
         consecutiveWeakConnections++;
         
-        // Progressive interval increases: 1min -> 2min -> 5min -> 10min -> 20min (max)
-        if (consecutiveWeakConnections >= 1 && adaptiveDeepSleepInterval < 120000) {
+        // Progressive interval increases: 1min -> 2min -> 5min -> 10min -> 20min -> reset to 1min
+        if (consecutiveWeakConnections >= 5) {
+            // After 5 consecutive weak connections (reached max), reset to be reactive again
+            resetAdaptiveInterval();
+            consecutiveWeakConnections = 1;  // Start at 1 to go to 2-minute interval next
+            adaptiveDeepSleepInterval = 120000;  // 2 minutes
+            Serial.println("Adaptive: Reset cycle after reaching maximum - back to 2 minute interval");
+        } else if (consecutiveWeakConnections >= 1 && adaptiveDeepSleepInterval < 120000) {
             adaptiveDeepSleepInterval = 120000;  // 2 minutes
         } else if (consecutiveWeakConnections >= 2 && adaptiveDeepSleepInterval < 300000) {
             adaptiveDeepSleepInterval = 300000;  // 5 minutes

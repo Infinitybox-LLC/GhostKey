@@ -851,7 +851,6 @@ const char setup_html[] PROGMEM = R"rawliteral(
             <!-- System Configuration Section -->
             <div class="form-section">
                 <h2 class="section-title">
-                    <span class="emoji">🔧</span>
                     System Configuration
                 </h2>
                 <p class="section-description">

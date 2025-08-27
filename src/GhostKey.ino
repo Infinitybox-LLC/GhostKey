@@ -391,6 +391,16 @@ bool wasRfidAuthenticated = false;  // Track previous RFID auth state for buzzer
 bool unauthorizedBeepPlayed = false;  // Prevent repeated unauthorized beeps
 unsigned long lastUnauthorizedBeepTime = 0;  // Reset flag after 5 seconds
 
+// RFID config mode entry (Ghost Power only mode)
+bool rfidHeldForConfig = false;       // Track if RFID is being held for config
+unsigned long rfidConfigHoldStartTime = 0;  // When RFID hold started
+#define RFID_CONFIG_HOLD_TIME 10000   // 10 seconds to enter config mode
+
+// RFID config mode exit
+bool rfidHeldForConfigExit = false;   // Track if RFID is being held to exit config
+unsigned long rfidConfigExitHoldStartTime = 0;  // When RFID exit hold started
+#define RFID_CONFIG_EXIT_HOLD_TIME 10000  // 10 seconds to exit config mode
+
 // Power management state variables
 PowerState currentPowerState = POWER_ACTIVE;  // Always start in active mode
 bool wasAuthenticated = false;                // Track previous authentication state
@@ -549,6 +559,12 @@ int ledFadeAmount = 5;
 #define LED_PWM_CHANNEL 0
 #define LED_PWM_RESOLUTION 8
 #define LED_PWM_DUTY_CYCLE 255
+
+// Buzzer PWM configuration
+#define BUZZER_PWM_FREQ 700        // 700 Hz tone
+#define BUZZER_PWM_CHANNEL 1        // Use channel 1
+#define BUZZER_PWM_RESOLUTION 8     // 8-bit resolution
+#define BUZZER_PWM_DUTY_CYCLE 200   // duty cycle (200/255)
 
 // WiFi configuration
 const char* ap_ssid = "Ghost Key Configuration";
@@ -2032,28 +2048,49 @@ void loop() {
             // Check if this is the first time RFID auth is happening
             if (!wasRfidAuthenticated && !rfidAuthenticated) {
                 // First time RFID authentication - pulse buzzer once
-                digitalWrite(BEEPER_PIN, HIGH);
-                delay(100);  // 100ms pulse
-                digitalWrite(BEEPER_PIN, LOW);
+                buzzerPulse(100);  // 100ms PWM tone
                 Serial.println("RFID: Authentication buzzer pulse");
             }
             
             rfidAuthenticated = true;
             rfidAuthStartTime = millis();
             Serial.println("RFID: Authenticated for 30 seconds");
+            
+            // Start RFID config hold timer in Ghost Power only mode (for entry)
+            if (!ghostKeyEnabled && ghostPowerEnabled && currentState != CONFIG_MODE) {
+                if (!rfidHeldForConfig) {
+                    rfidHeldForConfig = true;
+                    rfidConfigHoldStartTime = millis();
+                    Serial.println("RFID: Config hold timer started (Ghost Power only mode)");
+                }
+            }
+            
+            // Start RFID config exit hold timer in Ghost Power only mode (for exit)
+            if (!ghostKeyEnabled && ghostPowerEnabled && currentState == CONFIG_MODE) {
+                if (!rfidHeldForConfigExit) {
+                    rfidHeldForConfigExit = true;
+                    rfidConfigExitHoldStartTime = millis();
+                    Serial.println("RFID: Config exit hold timer started (Ghost Power only mode)");
+                }
+            }
         }
         // Handle unauthorized RFID key
         else {
-            // Check if we should play unauthorized beep (only once per 5 seconds)
-            if (!unauthorizedBeepPlayed) {
+            // Check if this is a valid tag (not background EMF)
+            bool isValidTag = false;
+            for(int n = 0; n < 5; n++) {
+                if(tagData[n] != 0) {
+                    isValidTag = true;
+                    break;
+                }
+            }
+            
+            // Only beep for actual unauthorized tags, not background EMF (0,0,0,0,0)
+            if (isValidTag && !unauthorizedBeepPlayed) {
                 // Unauthorized key scanned - pulse buzzer twice
-                digitalWrite(BEEPER_PIN, HIGH);
-                delay(100);  // 100ms pulse
-                digitalWrite(BEEPER_PIN, LOW);
-                delay(100);  // 100ms gap
-                digitalWrite(BEEPER_PIN, HIGH);
-                delay(100);  // 100ms pulse
-                digitalWrite(BEEPER_PIN, LOW);
+                buzzerPulse(100);  // 100ms PWM tone
+                delay(100);        // 100ms gap
+                buzzerPulse(100);  // 100ms PWM tone
                 Serial.println("RFID: Unauthorized key - double buzzer pulse");
                 
                 // Set flag to prevent repeated beeps
@@ -2067,6 +2104,58 @@ void loop() {
     if (rfidAuthenticated && (millis() - rfidAuthStartTime >= RFID_AUTH_TIMEOUT)) {
         rfidAuthenticated = false;
         Serial.println("RFID: Authentication expired");
+    }
+    
+    // Handle RFID config mode hold logic (Ghost Power only mode)
+    if (!ghostKeyEnabled && ghostPowerEnabled && currentState != CONFIG_MODE) {
+        // Reset hold timer if RFID is no longer authenticated
+        if (rfidHeldForConfig && !rfidAuthenticated) {
+            rfidHeldForConfig = false;
+            Serial.println("RFID: Config hold timer reset (tag removed)");
+        }
+        
+        // Check for 10-second hold to enter config mode
+        if (rfidHeldForConfig && rfidAuthenticated) {
+            unsigned long holdDuration = millis() - rfidConfigHoldStartTime;
+            if (holdDuration >= RFID_CONFIG_HOLD_TIME) {
+                rfidHeldForConfig = false; // Reset flag
+                Serial.println("RFID: 10-second hold detected - Entering config mode (Ghost Power only)");
+                
+                // 2-second buzzer for config mode entry
+                buzzerOn();
+                delay(2000);
+                buzzerOff();
+                Serial.println("RFID: Config mode entry buzzer (2 seconds)");
+                
+                enterConfigMode();
+            }
+        }
+    }
+    
+    // Handle RFID config mode exit logic (Ghost Power only mode)
+    if (!ghostKeyEnabled && ghostPowerEnabled && currentState == CONFIG_MODE) {
+        // Reset exit hold timer if RFID is no longer authenticated
+        if (rfidHeldForConfigExit && !rfidAuthenticated) {
+            rfidHeldForConfigExit = false;
+            Serial.println("RFID: Config exit hold timer reset (tag removed)");
+        }
+        
+        // Check for 10-second hold to exit config mode
+        if (rfidHeldForConfigExit && rfidAuthenticated) {
+            unsigned long exitHoldDuration = millis() - rfidConfigExitHoldStartTime;
+            if (exitHoldDuration >= RFID_CONFIG_EXIT_HOLD_TIME) {
+                rfidHeldForConfigExit = false; // Reset flag
+                Serial.println("RFID: 10-second hold detected - Exiting config mode (Ghost Power only)");
+                
+                // 1-second buzzer for config mode exit (different from entry)
+                buzzerOn();
+                delay(1000);
+                buzzerOff();
+                Serial.println("RFID: Config mode exit buzzer (1 second)");
+                
+                exitConfigMode();
+            }
+        }
     }
     
     // Reset unauthorized beep flag after 5 seconds
@@ -2159,6 +2248,10 @@ void setupPins() {
     ledcSetup(LED_PWM_CHANNEL, LED_PWM_FREQ, LED_PWM_RESOLUTION);
     ledcAttachPin(BUTTON_LED_PIN, LED_PWM_CHANNEL);
     
+    // PWM for buzzer
+    ledcSetup(BUZZER_PWM_CHANNEL, BUZZER_PWM_FREQ, BUZZER_PWM_RESOLUTION);
+    ledcAttachPin(BEEPER_PIN, BUZZER_PWM_CHANNEL);
+    
     // Relay control pins
     pinMode(RELAY_ACCESSORY, OUTPUT);
     pinMode(RELAY_IGNITION1, OUTPUT);
@@ -2169,6 +2262,7 @@ void setupPins() {
     // Start with everything off
     digitalWrite(LED_PIN, LOW);
     ledcWrite(LED_PWM_CHANNEL, 0);
+    ledcWrite(BUZZER_PWM_CHANNEL, 0);  // Start with buzzer off
     
     digitalWrite(RELAY_ACCESSORY, LOW);
     digitalWrite(RELAY_IGNITION1, LOW);
@@ -2177,7 +2271,20 @@ void setupPins() {
     digitalWrite(RELAY_SECURITY, LOW);
 }
 
+// Buzzer control functions
+void buzzerOn() {
+    ledcWrite(BUZZER_PWM_CHANNEL, BUZZER_PWM_DUTY_CYCLE);  // 50% duty cycle for tone
+}
 
+void buzzerOff() {
+    ledcWrite(BUZZER_PWM_CHANNEL, 0);  // Turn off
+}
+
+void buzzerPulse(int duration_ms) {
+    buzzerOn();
+    delay(duration_ms);
+    buzzerOff();
+}
 
 // handleConfigModeOnly - Only handle config mode button press (for Ghost Power only)
 // Called from: main loop() when Ghost Key is disabled but Ghost Power is enabled
@@ -2213,9 +2320,7 @@ void handleConfigModeOnly() {
     }
 
     // Check for start button press in config mode with pairing active
-    if (currentState == CONFIG_MODE && isPairingMode && 
-        buttonReading == LOW && lastButtonReading == HIGH && 
-        (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+    if (currentState == CONFIG_MODE && buttonPressed == true) {
         DEBUG_BUTTON_PRINTLN("Start button pressed in pairing mode - Exiting config mode");
         exitConfigMode();
         lastButtonPress = millis();

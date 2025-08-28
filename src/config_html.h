@@ -6,7 +6,7 @@ const char config_html[] PROGMEM = R"rawliteral(
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, shrink-to-fit=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, shrink-to-fit=no, viewport-fit=cover">
     <title>Ghost Key Configuration</title>
     
     <!-- PWA Manifest -->
@@ -137,13 +137,15 @@ const char config_html[] PROGMEM = R"rawliteral(
         .login-input {
             width: 100%;
             padding: 1rem;
-            font-size: 1.1rem;
+            font-size: 16px; /* iOS needs 16px to prevent zoom */
             border: none;
             border-radius: 12px;
             background: rgba(255,255,255,0.9);
             margin-bottom: 1rem;
             text-align: center;
             letter-spacing: 2px;
+            -webkit-appearance: none;
+            appearance: none;
         }
         
         .login-input:focus {
@@ -344,11 +346,14 @@ const char config_html[] PROGMEM = R"rawliteral(
             width: 100%;
             max-width: 300px;
             padding: 1rem;
-            font-size: 1.1rem;
+            font-size: 16px; /* iOS needs 16px to prevent zoom */
             border: 2px solid #e1e5e9;
             border-radius: 12px;
             background: white;
             transition: all 0.3s;
+            -webkit-appearance: none;
+            appearance: none;
+            box-sizing: border-box;
         }
         
         .form-input:focus {
@@ -1048,7 +1053,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 return;
             }
             
-            if (!enabled && !confirm('Are you sure you want to disable Ghost Key? This will remove RFID/Bluetooth authentication and push-to-start functionality.')) {
+            if (!enabled && !confirm('Are you sure you want to disable Ghost Key? This will remove Bluetooth authentication and push-to-start functionality.')) {
                 document.getElementById('ghostKeyEnabled').checked = true;
                 return;
             }
@@ -1125,17 +1130,15 @@ const char config_html[] PROGMEM = R"rawliteral(
                 bluetoothNav.style.display = 'flex';
                 rfidNav.style.display = 'flex';
             } else {
-                // Hide Ghost Key sections if only Ghost Power
-                configNav.style.display = 'none';
-                bluetoothNav.style.display = 'none';
-                rfidNav.style.display = 'none';
+                // Keep config and RFID visible even when Ghost Key disabled
+                configNav.style.display = 'flex';  // Always show configuration
+                bluetoothNav.style.display = 'none';  // Hide only Bluetooth
+                rfidNav.style.display = 'flex';  // Always show RFID management
                 
-                // If we're currently viewing a hidden section, switch to security
+                // If we're currently viewing the hidden Bluetooth section, switch to config
                 const activeSection = document.querySelector('.content-section.active');
-                if (activeSection && (activeSection.id === 'configSection' || 
-                                    activeSection.id === 'bluetoothSection' || 
-                                    activeSection.id === 'rfidSection')) {
-                    showSection('security');
+                if (activeSection && activeSection.id === 'bluetoothSection') {
+                    showSection('config');
                 }
             }
         }
@@ -1182,13 +1185,13 @@ const char config_html[] PROGMEM = R"rawliteral(
             const newPassword = document.getElementById('newPassword').value;
             const confirmPassword = document.getElementById('confirmPassword').value;
             
-            if (newPassword.length < 4) {
-                showNotification('Web interface password must be at least 4 characters', 'error');
+            if (newPassword.length !== 4 || !/^[0-9]{4}$/.test(newPassword)) {
+                showNotification('Web interface PIN must be exactly 4 digits', 'error');
                 return;
             }
             
             if (newPassword !== confirmPassword) {
-                showNotification('Web interface passwords do not match', 'error');
+                showNotification('Web interface PINs do not match', 'error');
                 return;
             }
             
@@ -1203,10 +1206,10 @@ const char config_html[] PROGMEM = R"rawliteral(
                 
                 document.getElementById('newPassword').value = '';
                 document.getElementById('confirmPassword').value = '';
-                showNotification('Web interface password updated successfully');
+                showNotification('Web interface PIN updated successfully');
                 
             } catch (error) {
-                showNotification('Error updating web interface password: ' + error.message, 'error');
+                showNotification('Error updating web interface PIN: ' + error.message, 'error');
             }
         }
 
@@ -1284,7 +1287,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 
                 if (!response.ok) throw new Error('Network response was not ok');
                 
-                const message = enabled ? 'Bluetooth enabled.' : 'Bluetooth disabled.';
+                const message = enabled ? 'Bluetooth will take effect after exiting configuration mode and a restart of the system occurs.' : 'Bluetooth disabled.';
                 showNotification(message);
                 updateBluetoothUI(enabled);
                 
@@ -1741,11 +1744,11 @@ const char config_html[] PROGMEM = R"rawliteral(
             // Signal status
             let signalText = 'Active';
             if (data.signalLost) {
-                signalText = '🔴 Signal Lost';
+                signalText = 'Signal Lost';
             } else if (data.sampleQuality < 50) {
-                signalText = '🟡 Weak Signal';
+                signalText = 'Weak Signal';
             } else {
-                signalText = '🟢 Strong Signal';
+                signalText = 'Strong Signal';
             }
             document.getElementById('signalStatus').textContent = signalText;
 
@@ -2036,8 +2039,27 @@ const char config_html[] PROGMEM = R"rawliteral(
                 
                 lastScrollTop = scrollTop;
             }
+                }
+
+        // Developer Tools Toggle
+        function toggleDeveloperMode() {
+            const toggle = document.getElementById('developerModeToggle');
+            const section = document.getElementById('confidencePlottingSection');
+            
+            if (toggle.checked) {
+                section.style.display = 'block';
+                showNotification('Developer tools enabled - confidence plotting now available');
+            } else {
+                section.style.display = 'none';
+                showNotification('Developer tools disabled');
+                
+                // Stop plotting if it's running
+                if (isPlotting) {
+                    stopPlotting();
+                }
+            }
         }
-        
+
         // Initialize page
         document.addEventListener('DOMContentLoaded', () => {
             checkAuth();
@@ -2105,7 +2127,7 @@ const char config_html[] PROGMEM = R"rawliteral(
         <p class="splash-subtitle">Secure Vehicle Access System</p>
         
         <form class="login-form" onsubmit="handleLogin(event)">
-            <input type="password" id="passwordInput" class="login-input" placeholder="Enter PIN or Password" autocomplete="off">
+            <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="passwordInput" class="login-input" placeholder="Enter 4-digit PIN" autocomplete="off">
             <button type="submit" class="login-btn">Unlock</button>
             <div id="loginError" class="login-error"></div>
         </form>
@@ -2169,7 +2191,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                                 </label>
                             </div>
                             <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
-                                When disabled, Bluetooth authentication will be completely turned off to save power and improve security. Changes take effect immediately.
+                                When disabled, Bluetooth authentication will be completely turned off to save power and improve security. Changes take effect immediately. When re-enabling bluetooth, changes will take effect after exiting configuration mode and a restart of the system happens.
                             </p>
                         </div>
                     </div>
@@ -2186,14 +2208,14 @@ const char config_html[] PROGMEM = R"rawliteral(
                     </div>
                     
                     <div class="card">
-                        <h2 class="card-title">🎯 Proximity Calibration</h2>
+                        <h2 class="card-title"> Proximity Calibration</h2>
                         <div style="margin-bottom: 1.5rem;">
                             <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
                                 Calibrate the system for your specific installation. Position your phone where you want authentication to work, then run calibration.
                             </p>
                             <div style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
                                 <button onclick="startCalibration()" class="btn btn-primary" id="startCalibrationBtn">
-                                    🎯 Start Calibration
+                                    Start Calibration
                                 </button>
                                 <button onclick="stopCalibration()" class="btn btn-secondary" id="stopCalibrationBtn" disabled>
                                     ⏹️ Stop Early
@@ -2215,13 +2237,8 @@ const char config_html[] PROGMEM = R"rawliteral(
                                     <span>Time Remaining:</span>
                                     <span id="calibrationTimer">--</span>
                                 </div>
-                                <div style="display: flex; justify-content: space-between;">
-                                    <span>Samples Collected:</span>
-                                    <span id="calibrationSamples">0</span>
-                                </div>
-                            </div>
                             <p style="font-size: 0.8rem; color: #666; margin-top: 1rem;">
-                                📍 <strong>Instructions:</strong><br>
+                                <strong>Instructions:</strong><br>
                                 1. Position your phone where you want authentication to work<br>
                                 2. Click "Start Calibration" and keep your phone in position<br>
                                 3. Wait 30 seconds for data collection to complete<br>
@@ -2234,8 +2251,22 @@ const char config_html[] PROGMEM = R"rawliteral(
                         <div class="card">Loading devices...</div>
                     </div>
                     
-                    <!-- Confidence Plotting (moved from separate section) -->
+                    <!-- Developer Testing Toggle -->
                     <div class="card">
+                        <h2 class="card-title">Developer Tools</h2>
+                        <div style="margin-bottom: 1rem;">
+                            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                <input type="checkbox" id="developerModeToggle" onchange="toggleDeveloperMode()" style="margin: 0;">
+                                <span>Enable Testing & Plotting Tools</span>
+                            </label>
+                            <p style="font-size: 0.9rem; color: #666; margin-top: 0.5rem;">
+                                Show advanced confidence plotting and debugging tools.
+                            </p>
+                        </div>
+                    </div>
+                    
+                    <!-- Confidence Plotting (moved from separate section) -->
+                    <div class="card" id="confidencePlottingSection" style="display: none;">
                         <h2 class="card-title">📈 Confidence Over Time</h2>
                         <div style="margin-bottom: 1.5rem;">
                             <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
@@ -2324,7 +2355,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                             </p>
                             
                             <p style="font-size: 0.9rem; color: #ff6b6b; font-weight: 600;">
-                                ⚠️ At least one system must remain enabled
+                                At least one system must remain enabled
                             </p>
                         </div>
                     </div>
@@ -2398,18 +2429,18 @@ const char config_html[] PROGMEM = R"rawliteral(
                 <!-- Settings Section -->
                 <section class="content-section" id="securitySection">
                     <div class="card">
-                        <h2 class="card-title">Web Interface Password</h2>
+                        <h2 class="card-title">Web Interface PIN</h2>
                         <div class="form-group">
-                            <label class="form-label" for="newPassword">New Web Interface Password</label>
-                            <input type="password" id="newPassword" class="form-input" placeholder="Enter new password" minlength="4">
+                            <label class="form-label" for="newPassword">New Web Interface PIN</label>
+                            <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="newPassword" class="form-input" placeholder="Enter 4-digit PIN" minlength="4">
                         </div>
                         <div class="form-group">
-                            <label class="form-label" for="confirmPassword">Confirm Web Interface Password</label>
-                            <input type="password" id="confirmPassword" class="form-input" placeholder="Confirm new password" minlength="4">
+                            <label class="form-label" for="confirmPassword">Confirm Web Interface PIN</label>
+                            <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="confirmPassword" class="form-input" placeholder="Confirm 4-digit PIN" minlength="4">
                         </div>
-                        <button onclick="updateWebPassword()" class="btn btn-primary">Update Web Interface Password</button>
+                        <button onclick="updateWebPassword()" class="btn btn-primary">Update Web Interface PIN</button>
                         <p style="font-size: 0.9rem; color: #666; margin-top: 1rem;">
-                            This password protects access to this configuration interface. Minimum 4 characters required.
+                            This 4-digit PIN protects access to this configuration interface. Numbers only.
                         </p>
                     </div>
                     
@@ -2432,7 +2463,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                             This password is required to connect to the "Ghost Key Configuration" WiFi network. Minimum 8 characters required.
                         </p>
                         <p style="font-size: 0.9rem; color: #28a745; margin-top: 0.5rem;">
-                            💡 Changes will take effect when you exit configuration mode. You won't be disconnected while configuring.
+                            Changes will take effect when you exit configuration mode. You won't be disconnected while configuring.
                         </p>
                     </div>
                     

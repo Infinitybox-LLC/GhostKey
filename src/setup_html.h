@@ -6,7 +6,7 @@ const char setup_html[] PROGMEM = R"rawliteral(
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, shrink-to-fit=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, shrink-to-fit=no, viewport-fit=cover">
     <title>Ghost Key First Time Setup</title>
     
     <!-- PWA Manifest -->
@@ -329,12 +329,15 @@ const char setup_html[] PROGMEM = R"rawliteral(
             width: 100%;
             max-width: 500px;
             padding: 1.5rem;
-            font-size: 1.1rem;
+            font-size: 16px; /* iOS needs 16px to prevent zoom */
             border: 2px solid #e1e5e9;
             border-radius: 16px;
             background: white;
             transition: all 0.3s ease;
             box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            -webkit-appearance: none;
+            appearance: none;
+            box-sizing: border-box;
         }
         
         .form-input:focus {
@@ -781,8 +784,8 @@ const char setup_html[] PROGMEM = R"rawliteral(
                 return false;
             }
             
-            if (webPassword.length < 4) {
-                showNotification('Web interface password must be at least 4 characters', 'error');
+            if (webPassword.length !== 4 || !/^[0-9]{4}$/.test(webPassword)) {
+                showNotification('Web interface PIN must be exactly 4 digits', 'error');
                 return false;
             }
             
@@ -841,7 +844,7 @@ const char setup_html[] PROGMEM = R"rawliteral(
             <h1 class="setup-title">Welcome to Ghost Key</h1>
             <p class="setup-subtitle">Secure Vehicle Access System</p>
             <div class="welcome-message">
-                <h3>🎉 First Time Setup</h3>
+                <h3>First Time Setup</h3>
                 <p>Let's configure your Ghost Key system. This will only take a few minutes and you can change any of these settings later in the configuration interface.</p>
             </div>
         </div>
@@ -851,7 +854,6 @@ const char setup_html[] PROGMEM = R"rawliteral(
             <!-- System Configuration Section -->
             <div class="form-section">
                 <h2 class="section-title">
-                    <span class="emoji">🔧</span>
                     System Configuration
                 </h2>
                 <p class="section-description">
@@ -863,7 +865,7 @@ const char setup_html[] PROGMEM = R"rawliteral(
                     <div class="toggle-item">
                         <div class="toggle-info">
                             <div class="toggle-title">Ghost Key System</div>
-                            <div class="toggle-description">RFID/Bluetooth authentication + Push-to-start control</div>
+                            <div class="toggle-description">Bluetooth authentication and Push-to-start control</div>
                         </div>
                         <label class="toggle-switch">
                             <input type="checkbox" id="ghostKeyEnabled" checked>
@@ -874,7 +876,7 @@ const char setup_html[] PROGMEM = R"rawliteral(
                     <div class="toggle-item">
                         <div class="toggle-info">
                             <div class="toggle-title">Ghost Power System</div>
-                            <div class="toggle-description">Security relay control + Vehicle immobilization</div>
+                            <div class="toggle-description">Security relay control and Vehicle immobilization</div>
                         </div>
                         <label class="toggle-switch">
                             <input type="checkbox" id="ghostPowerEnabled" checked>
@@ -884,18 +886,17 @@ const char setup_html[] PROGMEM = R"rawliteral(
                 </div>
                 
                 <div class="requirements">
-                    <strong>⚠️ Important:</strong> At least one system must remain enabled.
+                    <strong>Important:</strong> At least one system must remain enabled.
                 </div>
             </div>
             
             <!-- Bluetooth Configuration Section -->
             <div class="form-section" id="bluetoothSection">
                 <h2 class="section-title">
-                    <span class="emoji">📱</span>
                     Bluetooth Configuration
                 </h2>
                 <p class="section-description">
-                    Enable Bluetooth for smartphone proximity authentication. When enabled, your phone can automatically unlock the vehicle when you're nearby.
+                    Enable Bluetooth for smartphone proximity authentication. When enabled, your phone will automatically authenticate you when you're nearby your vehicle.
                 </p>
                 
                 <div class="toggle-group">
@@ -915,7 +916,6 @@ const char setup_html[] PROGMEM = R"rawliteral(
             <!-- Security Configuration Section -->
             <div class="form-section">
                 <h2 class="section-title">
-                    <span class="emoji">🔐</span>
                     Security Configuration
                 </h2>
                 <p class="section-description">
@@ -936,12 +936,12 @@ const char setup_html[] PROGMEM = R"rawliteral(
                 </div>
                 
                 <div class="form-group">
-                    <label class="form-label" for="webPassword">Web Interface Password</label>
-                    <input type="password" id="webPassword" class="form-input" placeholder="Enter web interface password" value="1234">
+                    <label class="form-label" for="webPassword">Web Interface PIN</label>
+                    <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="webPassword" class="form-input" placeholder="Enter 4-digit PIN" value="1234">
                     <div class="requirements">
                         <strong>Requirements:</strong>
                         <ul>
-                            <li>Minimum 4 characters</li>
+                            <li>Exactly 4 digits (numbers only)</li>
                             <li>Used to access this configuration interface</li>
                         </ul>
                     </div>

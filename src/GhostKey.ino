@@ -17,6 +17,10 @@
 #include "config_html.h"
 #include "setup_html.h"
 #include <esp32-hal-cpu.h>
+#include <esp_sleep.h>
+#include <driver/rtc_io.h>
+#include <esp_bt.h>
+#include <esp_bt_main.h>
 
 // ========================================
 // JDI LOGO SVG - STORED IN PROGMEM
@@ -358,6 +362,13 @@ struct RSSIAnalysis {
     esp_bd_addr_t deviceAddress = {0};
     bool hasDevice = false;
 };
+
+// ========================================
+// RTC MEMORY VARIABLES (preserved during deep sleep)
+// ========================================
+RTC_DATA_ATTR uint32_t bootCount = 0;
+RTC_DATA_ATTR uint32_t deepSleepCycles = 0;
+RTC_DATA_ATTR bool wasInDeepSleep = false;
 
 // ========================================
 // GLOBAL VARIABLES
@@ -1747,6 +1758,41 @@ void resetAdaptiveInterval();
 // MAIN SETUP - Runs once on boot
 // ========================================
 void setup() {
+    // Increment boot count and check wake-up reason
+    bootCount++;
+    
+    // Check wake-up reason and handle deep sleep wake-up
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    
+    if (wasInDeepSleep && wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
+        // Woke up from deep sleep via GPIO35 (start button)
+        // Gradually step up CPU frequency for stability
+        setCpuFrequencyMhz(80);   // Start at 80MHz
+        delay(100);
+        setCpuFrequencyMhz(160);  // Step to 160MHz
+        delay(100);
+        setCpuFrequencyMhz(240);  // Final speed
+        delay(100);
+        
+        Serial.begin(115200);
+        delay(50);
+        Serial.println("\n\n=== WAKE-UP FROM DEEP SLEEP ===");
+        Serial.printf("Boot count: %d, Deep sleep cycles: %d\n", bootCount, deepSleepCycles);
+        Serial.println("Woke up from GPIO35 (start button press)");
+        Serial.println("CPU frequency stepped up: 80->160->240MHz");
+        
+        // Set initial power state to Light Sleep after wake-up
+        currentPowerState = POWER_LIGHT_SLEEP;
+        wasInDeepSleep = false; // Clear flag
+        
+        // Mark that we need to reinitialize Bluetooth
+        bluetoothInitialized = false;
+    } else {
+        // Normal boot or other wake-up reason
+        setCpuFrequencyMhz(240); // Set to full speed immediately
+        wasInDeepSleep = false;
+    }
+    
     systemBootTime = millis();
     Serial.begin(115200);
     DEBUG_PRINTLN("\n\n=== GhostKey System Starting ===");
@@ -5114,29 +5160,42 @@ void setPowerState(PowerState newState) {
             break;
             
         case POWER_DEEP_SLEEP:
-            // Stop any ongoing RSSI scanning and advertising first
+            // ESP32 HARDWARE DEEP SLEEP: Maximum power savings
+            Serial.println("Entering ESP32 hardware deep sleep - wake on GPIO35 (start button)");
+            Serial.flush();
+            
+            // Stop all peripherals
             if (bluetoothEnabled && bluetoothInitialized) {
                 stopRSSIScan();
                 stopBLEAdvertising();
+                // Deinitialize Bluetooth to save power
+                esp_bluedroid_deinit();
+                esp_bluedroid_disable();
+                esp_bt_controller_deinit();
+                esp_bt_controller_disable();
             }
-            delay(10);  // Brief pause to ensure operations complete
             
-            // Initialize deep sleep timing
-            rfidDeepSleepCycleStart = millis();
-            rfidDeepSleepOn = true;
-            // Start quiet period - BLE window will start after 50 seconds
-            bleDeepSleepAdvertiseStart = millis();  // Start of 60-second cycle
-            bleDeepSleepAdvertising = false;
-            bleAdvertisingStopped = true;   // Start in stopped state for quiet period
-            isQuickSampling = false;        // Reset quick sampling
+            // Turn off RFID
+            digitalWrite(RFID_SHD, HIGH);
             
-            // Start Deep Sleep at lower frequency (will be raised during BLE windows)
-            setCpuFrequencyMhz(40);   // Start with power-saving frequency
+            // Turn off other peripherals
+            digitalWrite(LED_PIN, LOW);
+            ledcWrite(LED_PWM_CHANNEL, 0);
+            ledcWrite(BUZZER_PWM_CHANNEL, 0);
             
-            Serial.println("Deep Sleep: Starting with 50-second quiet period");
-            Serial.flush();  // Ensure final message is sent
-            delay(10);  // Brief pause before disabling serial
-            Serial.end();  // Disable serial to prevent issues during deep sleep
+            // Configure GPIO35 (BUTTON_PIN) for wake-up
+            esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0); // Wake on LOW (button press)
+            
+            // Configure RTC timer wake-up as backup (optional - can be removed if you want manual-only)
+            // esp_sleep_enable_timer_wakeup(300 * 1000000); // 5 minutes backup timer
+            
+            // Set RTC memory flag
+            wasInDeepSleep = true;
+            deepSleepCycles++;
+            
+            // Enter hardware deep sleep
+            esp_deep_sleep_start();
+            // Code never reaches here - ESP32 restarts on wake-up
             break;
     }
 }
@@ -5161,160 +5220,16 @@ void handleLightSleepRFID() {
 
 // Handle RFID on/off cycling in deep sleep
 void handleDeepSleepRFID() {
-    unsigned long currentTime = millis();
-    unsigned long cycleTime = currentTime - rfidDeepSleepCycleStart;
-    
-    // Different timing for ON and OFF states
-    unsigned long targetTime = rfidDeepSleepOn ? RFID_DEEP_SLEEP_ON_MS : RFID_DEEP_SLEEP_OFF_MS;
-    
-    if (cycleTime >= targetTime) {
-        rfidDeepSleepCycleStart = currentTime;
-        rfidDeepSleepOn = !rfidDeepSleepOn;
-        
-        // Control RFID module power via SHD pin
-        // SHD HIGH = shutdown/sleep mode, LOW = active
-        digitalWrite(RFID_SHD, rfidDeepSleepOn ? LOW : HIGH);
-    }
+    // BASELINE DRAW: Keep RFID off during deep sleep to save power
+    // Instead of cycling, just ensure RFID stays off
+    digitalWrite(RFID_SHD, HIGH);  // Keep RFID in shutdown/sleep mode
 }
 
-// Handle BLE advertising cycling in deep sleep
+// Handle deep sleep - no automatic wake-up, only manual brake/start button wake-up
 void handleDeepSleepBLE() {
-    if (!bluetoothInitialized) return;
-    
-    unsigned long currentTime = millis();
-    
-    // Safety check to prevent negative wraparound
-    if (bleDeepSleepAdvertiseStart > currentTime) {
-        bleDeepSleepAdvertiseStart = currentTime;
-    }
-    
-    if (!bleDeepSleepAdvertising) {
-        // Check if it's time to start advertising (using adaptive deep sleep interval)
-        if (currentTime - bleDeepSleepAdvertiseStart >= adaptiveDeepSleepInterval - BLE_DEEP_SLEEP_DURATION_MS) {
-            // Increase CPU frequency for BLE operations
-            setCpuFrequencyMhz(80);  // Higher speed for reliable BLE operations
-            delay(50);  // Longer pause for proper stabilization
-            
-            // Re-initialize serial after frequency change
-            Serial.begin(115200);
-            delay(50);  // Allow serial to stabilize
-            
-            // Start advertising and scanning for 10 seconds
-            bleDeepSleepAdvertising = true;
-            // DON'T reset bleDeepSleepAdvertiseStart - keep cycle timing intact
-            bleAdvertisingStopped = false;  // Reset flag since we're advertising again
-            isQuickSampling = false;        // Reset quick sampling state
-            quickConfidenceCompleted = false; // Allow one quick confidence check in this BLE window
-            
-            // Capture the current interval for this window (before it might be updated)
-            currentWindowInterval = adaptiveDeepSleepInterval;
-            startBLEAdvertising(false);  // Normal advertising, not pairing mode
-            startRSSIScan();  // Also start RSSI scanning
-            Serial.print("Deep Sleep: BLE window started (80MHz) - ");
-            Serial.print(adaptiveDeepSleepInterval / 1000);
-            Serial.println("s cycle");
-        } else {
-            // Stop advertising and scanning only once when entering quiet period
-            if (!bleAdvertisingStopped) {
-                stopBLEAdvertising();
-                stopRSSIScan();  // Also stop RSSI scanning
-                // Disconnect any connected devices during quiet period to prevent stale connections
-                if (pServer != nullptr && isBleConnected) {
-                    pServer->disconnect(pServer->getConnId());
-                    Serial.println("Deep Sleep: Disconnecting BLE device for quiet period");
-                }
-                // Clear connection state for clean transitions
-                hasConnectedDevice = false;
-                bluetoothAuthenticated = false;
-                isQuickSampling = false;  // Reset quick sampling
-                bleAdvertisingStopped = true;
-            }
-        }
-    } else {
-        // During advertising period - check for device connections and do quick sampling
-        if (isBleConnected && hasConnectedDevice && !isQuickSampling && !bluetoothAuthenticated && !quickConfidenceCompleted) {
-            // Device just connected - start quick confidence sampling (only once per BLE window)
-            isQuickSampling = true;
-            quickSamplingStart = currentTime;
-            quickConfidenceCompleted = true;  // Prevent multiple quick confidence checks in this BLE window
-            Serial.println("Deep Sleep: Device connected, starting quick confidence sampling...");
-        }
-        
-        // Handle quick sampling process
-        if (isQuickSampling) {
-            if (currentTime - quickSamplingStart >= QUICK_SAMPLING_DURATION) {
-                // Quick sampling complete - calculate confidence and make decision
-                lastQuickConfidence = calculateQuickConfidence();
-                isQuickSampling = false;
-                
-                Serial.print("Deep Sleep: Quick confidence = ");
-                Serial.print(lastQuickConfidence, 1);
-                Serial.print("% (");
-                Serial.print(rssiAnalysis.shortTermStats.validSamples);
-                Serial.println(" samples)");
-                
-                if (lastQuickConfidence < QUICK_CONFIDENCE_LOW_THRESHOLD) {
-                    // Low confidence - disconnect and stay in deep sleep
-                    Serial.println("Deep Sleep: Low confidence, disconnecting and staying in deep sleep");
-                    if (pServer != nullptr) {
-                        pServer->disconnect(pServer->getConnId());
-                    }
-                    
-                    updateAdaptiveInterval(false);  // Increment counter and update interval
-                    
-                    // End BLE operations early but keep CPU at 80MHz
-                    stopBLEAdvertising();
-                    stopRSSIScan();
-                    bleAdvertisingStopped = true;  // Mark as stopped to prevent restart
-                    
-                    Serial.println("Deep Sleep: BLE ended early, waiting for window to complete");
-                    
-                    // Don't advance the timer - let the normal cycle completion handle it
-                } else if (lastQuickConfidence >= QUICK_CONFIDENCE_HIGH_THRESHOLD) {
-                    // High confidence - user approaching, reset adaptive and go to light sleep
-                    Serial.println("Deep Sleep: High confidence detected - user approaching!");
-                    resetAdaptiveInterval();
-                    setPowerState(POWER_LIGHT_SLEEP);
-                    return;
-                } else {
-                    // Medium confidence - go to light sleep with fixed timeout
-                    Serial.print("Deep Sleep: Medium confidence, going to light sleep (timeout: ");
-                    Serial.print(lightSleepTimeout);
-                    Serial.println("ms)");
-                    setPowerState(POWER_LIGHT_SLEEP);
-                    return;
-                }
-            }
-        }
-        
-        // Check if full adaptive cycle is complete (BLE window ends)
-        // Use original interval for current window, not updated interval
-        if (currentTime - bleDeepSleepAdvertiseStart >= currentWindowInterval) {
-            bleDeepSleepAdvertising = false;
-            
-            // Only stop BLE if not already stopped by early termination
-            if (!bleAdvertisingStopped) {
-                stopBLEAdvertising();
-                stopRSSIScan();  // Also stop RSSI scanning
-            }
-            
-            isQuickSampling = false;  // Reset quick sampling
-            bleAdvertisingStopped = true;  // Mark as stopped
-            
-            // Start new cycle - add the adaptive interval to maintain proper timing
-            bleDeepSleepAdvertiseStart += adaptiveDeepSleepInterval;
-            
-            // Reduce CPU frequency for quiet period
-            Serial.print("Deep Sleep: BLE window ended, starting new ");
-            Serial.print(adaptiveDeepSleepInterval / 1000);
-            Serial.println("s cycle (40MHz)");
-            Serial.flush();  // Ensure output completes before frequency change
-            delay(50);  // Longer pause for proper stabilization
-            setCpuFrequencyMhz(40);  // Lower speed for power savings
-            delay(50);  // Additional stabilization
-            Serial.end();  // Disable serial in deep sleep quiet period
-        }
-    }
+    // BASELINE DRAW: Deep sleep stays in deep sleep indefinitely 
+    // Only wakes up on brake/start button press (handled in updatePowerManagement)
+    // No automatic timeouts, no BLE windows - maximum power savings
 }
 
 // ========================================
@@ -5359,46 +5274,14 @@ float calculateQuickConfidence() {
 
 // Update adaptive interval based on Deep Sleep outcome
 void updateAdaptiveInterval(bool success) {
-    if (success) {
-        // Successful authentication - reset to fast intervals
-        resetAdaptiveInterval();
-        consecutiveWeakConnections = 0;
-        Serial.println("Adaptive: Reset to fast intervals (successful auth)");
-    } else {
-        // Failed authentication - increase deep sleep intervals (longer between BLE checks)
-        consecutiveWeakConnections++;
-        
-        // Progressive interval increases: 1min -> 2min -> 5min -> 10min -> 20min -> reset to 1min
-        if (consecutiveWeakConnections >= 5) {
-            // After 5 consecutive weak connections (reached max), reset to be reactive again
-            resetAdaptiveInterval();
-            consecutiveWeakConnections = 1;  // Start at 1 to go to 2-minute interval next
-            adaptiveDeepSleepInterval = 120000;  // 2 minutes
-            Serial.println("Adaptive: Reset cycle after reaching maximum - back to 2 minute interval");
-        } else if (consecutiveWeakConnections >= 1 && adaptiveDeepSleepInterval < 120000) {
-            adaptiveDeepSleepInterval = 120000;  // 2 minutes
-        } else if (consecutiveWeakConnections >= 2 && adaptiveDeepSleepInterval < 300000) {
-            adaptiveDeepSleepInterval = 300000;  // 5 minutes
-        } else if (consecutiveWeakConnections >= 3 && adaptiveDeepSleepInterval < 600000) {
-            adaptiveDeepSleepInterval = 600000;  // 10 minutes
-        } else if (consecutiveWeakConnections >= 4 && adaptiveDeepSleepInterval < 1200000) {
-            adaptiveDeepSleepInterval = 1200000;  // 20 minutes (max)
-        }
-        
-        Serial.print("Adaptive: Deep sleep interval increased to ");
-        Serial.print(adaptiveDeepSleepInterval);
-        Serial.print("ms (consecutive weak: ");
-        Serial.print(consecutiveWeakConnections);
-        Serial.println(")");
-        Serial.flush();  // Ensure serial output completes before frequency change
-    }
+    // BASELINE DRAW: Disable adaptive intervals - always use fixed 90-second deep sleep
+    // Do nothing - adaptive timing is disabled for maximum power savings
 }
 
 // Reset adaptive interval to fastest setting
 void resetAdaptiveInterval() {
-    adaptiveDeepSleepInterval = 60000;  // Reset to 1 minute
-    consecutiveWeakConnections = 0;
-    Serial.println("Adaptive: Deep sleep interval reset to minimum (1 minute)");
+    // BASELINE DRAW: Disable adaptive intervals - always use fixed 90-second deep sleep
+    // Do nothing - adaptive timing is disabled for maximum power savings
 }
 
 // ========================================

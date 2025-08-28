@@ -1795,6 +1795,9 @@ void setup() {
         quickConfidenceCompleted = false;
         bluetoothInitialized = false;  // Need to reinitialize BLE stack
         
+        // Set timer for BLE window duration (not full cycle)
+        bleDeepSleepAdvertiseStart = millis();
+        
         Serial.println("ESP32 Deep Sleep: Woke for BLE window, CPU at 80MHz");
     } else {
         // Normal boot (power-on, reset, or first boot)
@@ -5157,24 +5160,21 @@ void setPowerState(PowerState newState) {
             break;
             
         case POWER_DEEP_SLEEP:
+            Serial.printf("setPowerState(POWER_DEEP_SLEEP): useHardwareDeepSleep=%s\n", useHardwareDeepSleep ? "true" : "false");
+            Serial.flush();
             if (useHardwareDeepSleep) {
                 // ESP32 Hardware Deep Sleep Mode
                 Serial.println("ESP32 Deep Sleep: Entering hardware deep sleep mode");
                 Serial.flush();
                 
-                // Stop Bluetooth stack completely
+                // Stop Bluetooth operations (stack will be reset on wake-up)
                 if (bluetoothEnabled && bluetoothInitialized) {
-                    Serial.println("ESP32 Deep Sleep: Stopping BLE stack");
+                    Serial.println("ESP32 Deep Sleep: Stopping BLE operations");
                     stopRSSIScan();
                     stopBLEAdvertising();
                     delay(100);
-                    
-                    // Deinitialize Bluetooth stack for maximum power savings
-                    esp_bluedroid_deinit();
-                    esp_bluedroid_disable();
-                    esp_bt_controller_deinit();
-                    esp_bt_controller_disable();
-                    delay(100);
+                    Serial.println("ESP32 Deep Sleep: BLE operations stopped");
+                    // Note: BLE stack will be completely reset on hardware wake-up
                 }
                 
                 // Turn off RFID completely in hardware deep sleep
@@ -5196,12 +5196,16 @@ void setPowerState(PowerState newState) {
                 deepSleepEntryTime = millis();
                 
                 Serial.printf("ESP32 Deep Sleep: Cycle #%d, wake sources: Start button (GPIO35) + 10s timer\n", deepSleepCycles);
+                Serial.println("ESP32 Deep Sleep: Calling esp_deep_sleep_start() NOW...");
                 Serial.flush();
-                delay(100);
+                delay(200);
                 
                 // Enter ESP32 hardware deep sleep
                 esp_deep_sleep_start();
-                // Code never reaches here - system will restart on wake-up
+                
+                // If we reach here, deep sleep failed
+                Serial.println("ERROR: esp_deep_sleep_start() returned - this should never happen!");
+                Serial.flush();
                 
             } else {
                 // Fallback to software deep sleep (original implementation)
@@ -5271,10 +5275,8 @@ void handleDeepSleepRFID() {
 // Handle BLE advertising cycling in deep sleep
 // Note: With hardware deep sleep, this function mainly handles the BLE window after timer wake-up
 void handleDeepSleepBLE() {
-    // Skip if using hardware deep sleep and not in a BLE window
-    if (useHardwareDeepSleep && !bleDeepSleepAdvertising) {
-        return;
-    }
+    // For hardware deep sleep, we only need to handle the BLE window and its completion
+    // Don't skip - we need to check for window completion even when not advertising
     
     if (!bluetoothInitialized) return;
     
@@ -5366,8 +5368,9 @@ void handleDeepSleepBLE() {
             }
         }
         
-        // Check if fixed 20-second cycle is complete (BLE window ends)
-        if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_INTERVAL_MS) {
+        // Check if BLE window duration is complete
+        unsigned long windowDuration = useHardwareDeepSleep ? BLE_DEEP_SLEEP_DURATION_MS : BLE_DEEP_SLEEP_INTERVAL_MS;
+        if (currentTime - bleDeepSleepAdvertiseStart >= windowDuration) {
             bleDeepSleepAdvertising = false;
             
             // Only stop BLE if not already stopped by early termination
@@ -5383,8 +5386,34 @@ void handleDeepSleepBLE() {
                 Serial.println("ESP32 Deep Sleep: BLE window ended, entering hardware deep sleep");
                 Serial.flush();
                 delay(100);
-                setPowerState(POWER_DEEP_SLEEP);  // This will trigger hardware deep sleep
-                return;  // Never reached due to esp_deep_sleep_start()
+                
+                // Call setPowerState directly here instead of through function call
+                Serial.println("ESP32 Deep Sleep: About to call esp_deep_sleep_start() directly");
+                Serial.flush();
+                
+                // Turn off RFID and LEDs
+                digitalWrite(RFID_SHD, HIGH);
+                digitalWrite(LED_PIN, LOW);
+                digitalWrite(BUTTON_LED_PIN, LOW);
+                
+                // Configure wake-up sources
+                esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
+                esp_sleep_enable_timer_wakeup(10 * 1000000ULL);
+                
+                // Store deep sleep state in RTC memory
+                wasInDeepSleep = true;
+                deepSleepCycles++;
+                
+                Serial.printf("ESP32 Deep Sleep: Calling esp_deep_sleep_start() NOW - Cycle #%d\n", deepSleepCycles);
+                Serial.flush();
+                delay(200);
+                
+                // Enter ESP32 hardware deep sleep
+                esp_deep_sleep_start();
+                
+                // Should never reach here
+                Serial.println("ERROR: esp_deep_sleep_start() failed!");
+                return;
             } else {
                 // Software deep sleep: continue with timing logic
                 bleDeepSleepAdvertiseStart += BLE_DEEP_SLEEP_INTERVAL_MS;

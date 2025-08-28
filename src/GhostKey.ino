@@ -272,8 +272,8 @@ enum PowerState {
 };
 
 // Power management timing constants
-#define LIGHT_SLEEP_DELAY_MS 10000      // 10 seconds after losing authentication
-#define DEEP_SLEEP_DELAY_MS 30000      // 30 seconds after losing authentication
+#define LIGHT_SLEEP_DELAY_MS 20000      // 20 seconds after losing authentication
+#define DEEP_SLEEP_DELAY_MS 30000      // 30 seconds after losing authentication (unused - now goes Active→Deep Sleep)
 #define RFID_LIGHT_SLEEP_ON_MS 200      // 200ms ON time for RFID in light sleep
 #define RFID_LIGHT_SLEEP_OFF_MS 500     // 500ms OFF time for RFID in light sleep
 #define RFID_DEEP_SLEEP_ON_MS 100       // 100ms ON time for RFID in deep sleep
@@ -419,7 +419,7 @@ bool bleDeepSleepAdvertising = false;         // Whether BLE is currently advert
 bool bleAdvertisingStopped = false;           // Track if we've already stopped advertising
 
 // Deep sleep confidence system
-unsigned long lightSleepTimeout = 30000;  // Fixed timeout in light sleep REMEMBER TO CHANGE THIS BACK TO 120000
+unsigned long lightSleepTimeout = 0;  // Skip light sleep - go directly from Active to Deep Sleep
 bool quickConfidenceCompleted = false;             // Prevent multiple confidence checks per BLE window
 #define QUICK_CONFIDENCE_LOW_THRESHOLD 35.0f      // Below this = stay in deep sleep
 #define QUICK_CONFIDENCE_HIGH_THRESHOLD 45.0f     // Above this = immediate response
@@ -437,6 +437,10 @@ unsigned long brakeWakeUpTime = 0;                // When brake wake-up started
 bool brakeWakeUpActiveMode = false;               // Extended active time after brake/button wake-up
 unsigned long brakeWakeUpActiveTime = 0;          // When extended active mode started
 #define BRAKE_WAKEUP_ACTIVE_TIME 30000            // 30 seconds to allow phone to connect
+
+// LED status blinking
+unsigned long lastLedBlink = 0;                  // Last LED blink time
+bool ledState = false;                           // Current LED state (on/off)
 
 // Bluetooth restart management
 bool restartPendingForBluetooth = false;         // Restart needed when exiting config mode
@@ -1745,6 +1749,31 @@ void handleDeepSleepRFID();
 void handleDeepSleepBLE();
 // Deep sleep confidence checking uses standard RSSI analysis
 
+// Handle LED status blinking based on power state
+void handleStatusLED() {
+    unsigned long currentTime = millis();
+    unsigned long blinkInterval = 0;
+    
+    // Set blink interval based on power state
+    if (currentPowerState == POWER_ACTIVE) {
+        blinkInterval = 1000;  // Blink every 1 second in Active mode
+    } else if (currentPowerState == POWER_LIGHT_SLEEP) {
+        blinkInterval = 2000;  // Blink every 2 seconds in Light Sleep mode
+    } else {
+        // Deep Sleep or other states - turn off LED
+        digitalWrite(LED_PIN, LOW);
+        ledState = false;
+        return;
+    }
+    
+    // Check if it's time to toggle the LED
+    if (currentTime - lastLedBlink >= blinkInterval) {
+        ledState = !ledState;  // Toggle LED state
+        digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+        lastLedBlink = currentTime;
+    }
+}
+
 // ========================================
 // MAIN SETUP - Runs once on boot
 // ========================================
@@ -1928,6 +1957,9 @@ void setup() {
 void loop() {
     // Power management first - affects all other systems
     updatePowerManagement();
+    
+    // Handle LED status blinking
+    handleStatusLED();
     
     // Core system updates
     updateSystemState();
@@ -4089,7 +4121,7 @@ void printSystemStatus() {
             if (!isAuthenticated) {
                 unsigned long timeToLightSleep = LIGHT_SLEEP_DELAY_MS - (currentTime - lastUnauthenticatedTime);
                 if (timeToLightSleep > 0 && timeToLightSleep <= LIGHT_SLEEP_DELAY_MS) {
-                    Serial.print(" - Light Sleep in ");
+                    Serial.print(" - Deep Sleep in ");
                     Serial.print(timeToLightSleep / 1000);
                     Serial.print("s");
                 }
@@ -4104,7 +4136,7 @@ void printSystemStatus() {
             Serial.print(lightSleepTimeout);
             Serial.print("ms");
             if (!isAuthenticated) {
-                unsigned long totalTimeout = LIGHT_SLEEP_DELAY_MS + lightSleepTimeout;
+                unsigned long totalTimeout = lightSleepTimeout;
                 unsigned long timeToDeepSleep = totalTimeout - (currentTime - lastUnauthenticatedTime);
                 if (timeToDeepSleep > 0 && timeToDeepSleep <= totalTimeout) {
                     Serial.print(" - Deep Sleep in ");
@@ -5058,11 +5090,18 @@ void updatePowerManagement() {
         } else {
             // Normal timeout
             if (millis() - lastUnauthenticatedTime >= LIGHT_SLEEP_DELAY_MS) {
-                setPowerState(POWER_LIGHT_SLEEP);
+                // Skip Light Sleep if timeout is 0 (direct Active → Deep Sleep)
+                if (lightSleepTimeout == 0) {
+                    Serial.println("Light Sleep timeout is 0ms, going directly to Deep Sleep");
+                    setPowerState(POWER_DEEP_SLEEP);
+                } else {
+                    setPowerState(POWER_LIGHT_SLEEP);
+                }
             }
         }
     } else if (!isAuthenticated && currentPowerState == POWER_LIGHT_SLEEP) {
-        // Check if we should transition to Deep Sleep using fixed timeout
+        // Check if we should transition to Deep Sleep
+        // Total time = LIGHT_SLEEP_DELAY_MS (Active time) + lightSleepTimeout (Light Sleep time)
         if (millis() - lastUnauthenticatedTime >= (LIGHT_SLEEP_DELAY_MS + lightSleepTimeout)) {
             Serial.print("Light Sleep timeout reached (");
             Serial.print(lightSleepTimeout);
@@ -5335,8 +5374,8 @@ void handleDeepSleepBLE() {
         }
     } else {
         // During advertising period - track peak confidence but don't act until window ends
-        if (isBleConnected && hasConnectedDevice && !bluetoothAuthenticated) {
-            // Use standard RSSI analysis confidence
+        if (isBleConnected && hasConnectedDevice) {
+            // Use standard RSSI analysis confidence (track regardless of auth status)
             float currentConfidence = rssiAnalysis.totalConfidence;
             
             // Track the peak confidence during this BLE window (for end-of-window decision)
@@ -5365,6 +5404,9 @@ void handleDeepSleepBLE() {
                     // Reset peak confidence tracking
                     peakConfidenceThisWindow = 0.0f;
                     hasValidSamplesThisWindow = false;
+                    
+                    // Reset timeout timer for Light Sleep (give it fresh timeout window)
+                    lastUnauthenticatedTime = millis();
                     
                     // Immediate transition to Light Sleep (like brake wake-up)
                     setPowerState(POWER_LIGHT_SLEEP);
@@ -5427,6 +5469,8 @@ void handleDeepSleepBLE() {
                     // Reset static variables for next window
                     peakConfidenceThisWindow = 0.0f;
                     hasValidSamplesThisWindow = false;
+                    // Reset timeout timer for Light Sleep (give it fresh timeout window)
+                    lastUnauthenticatedTime = millis();
                     setPowerState(POWER_LIGHT_SLEEP);
                     return;
                 } else {

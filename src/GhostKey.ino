@@ -5324,47 +5324,54 @@ void handleDeepSleepBLE() {
             }
         }
     } else {
-        // During advertising period - check for device connections and use standard RSSI confidence
-        if (isBleConnected && hasConnectedDevice && !bluetoothAuthenticated && !quickConfidenceCompleted) {
-            // Device connected - check standard RSSI confidence (only once per BLE window)
-            quickConfidenceCompleted = true;  // Prevent multiple confidence checks in this BLE window
-            
+        // During advertising period - continuously monitor RSSI confidence for connected devices
+        if (isBleConnected && hasConnectedDevice && !bluetoothAuthenticated) {
             // Use standard RSSI analysis confidence
             float currentConfidence = rssiAnalysis.totalConfidence;
             
-            Serial.print("Deep Sleep: RSSI confidence = ");
-            Serial.print(currentConfidence, 1);
-            Serial.print("% (");
-            Serial.print(rssiAnalysis.shortTermStats.validSamples);
-            Serial.println(" samples)");
-            
-            if (currentConfidence < QUICK_CONFIDENCE_LOW_THRESHOLD) {
-                // Low confidence - disconnect and stay in deep sleep
-                Serial.println("Deep Sleep: Low confidence, disconnecting and staying in deep sleep");
-                if (pServer != nullptr) {
-                    pServer->disconnect(pServer->getConnId());
+            // Only check if we have sufficient samples
+            if (rssiAnalysis.shortTermStats.validSamples >= 3) {
+                
+                if (currentConfidence >= QUICK_CONFIDENCE_HIGH_THRESHOLD) {
+                    // High confidence - user approaching, go to light sleep immediately
+                    Serial.print("Deep Sleep: High confidence detected (");
+                    Serial.print(currentConfidence, 1);
+                    Serial.print("% with ");
+                    Serial.print(rssiAnalysis.shortTermStats.validSamples);
+                    Serial.println(" samples) - user approaching!");
+                    setPowerState(POWER_LIGHT_SLEEP);
+                    return;
+                } else if (currentConfidence >= 35.0f && currentConfidence < QUICK_CONFIDENCE_HIGH_THRESHOLD) {
+                    // Medium confidence - go to light sleep with fixed timeout
+                    Serial.print("Deep Sleep: Medium confidence detected (");
+                    Serial.print(currentConfidence, 1);
+                    Serial.print("% with ");
+                    Serial.print(rssiAnalysis.shortTermStats.validSamples);
+                    Serial.println(" samples) - going to light sleep");
+                    setPowerState(POWER_LIGHT_SLEEP);
+                    return;
                 }
                 
-                // End BLE operations early but keep CPU at 80MHz
-                stopBLEAdvertising();
-                stopRSSIScan();
-                bleAdvertisingStopped = true;  // Mark as stopped to prevent restart
-                
-                Serial.println("Deep Sleep: BLE ended early, waiting for window to complete");
-                
-                // Don't advance the timer - let the normal cycle completion handle it
-            } else if (currentConfidence >= QUICK_CONFIDENCE_HIGH_THRESHOLD) {
-                // High confidence - user approaching, go to light sleep
-                Serial.println("Deep Sleep: High confidence detected - user approaching!");
-                setPowerState(POWER_LIGHT_SLEEP);
-                return;
-            } else {
-                // Medium confidence - go to light sleep with fixed timeout
-                Serial.print("Deep Sleep: Medium confidence, going to light sleep (timeout: ");
-                Serial.print(lightSleepTimeout);
-                Serial.println("ms)");
-                setPowerState(POWER_LIGHT_SLEEP);
-                return;
+                // Low confidence handling - only disconnect once per window
+                if (currentConfidence < QUICK_CONFIDENCE_LOW_THRESHOLD && !quickConfidenceCompleted) {
+                    quickConfidenceCompleted = true;  // Prevent multiple disconnects
+                    Serial.print("Deep Sleep: Low confidence (");
+                    Serial.print(currentConfidence, 1);
+                    Serial.print("% with ");
+                    Serial.print(rssiAnalysis.shortTermStats.validSamples);
+                    Serial.println(" samples) - disconnecting and staying in deep sleep");
+                    
+                    if (pServer != nullptr) {
+                        pServer->disconnect(pServer->getConnId());
+                    }
+                    
+                    // End BLE operations early but keep CPU at 80MHz
+                    stopBLEAdvertising();
+                    stopRSSIScan();
+                    bleAdvertisingStopped = true;  // Mark as stopped to prevent restart
+                    
+                    Serial.println("Deep Sleep: BLE ended early, waiting for window to complete");
+                }
             }
         }
         

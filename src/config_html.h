@@ -1684,11 +1684,11 @@ const char config_html[] PROGMEM = R"rawliteral(
             // Signal status
             let signalText = 'Active';
             if (data.signalLost) {
-                signalText = '🔴 Signal Lost';
+                signalText = 'Signal Lost';
             } else if (data.sampleQuality < 50) {
-                signalText = '🟡 Weak Signal';
+                signalText = 'Weak Signal';
             } else {
-                signalText = '🟢 Strong Signal';
+                signalText = 'Strong Signal';
             }
             document.getElementById('signalStatus').textContent = signalText;
 
@@ -1979,8 +1979,27 @@ const char config_html[] PROGMEM = R"rawliteral(
                 
                 lastScrollTop = scrollTop;
             }
+                }
+
+        // Developer Tools Toggle
+        function toggleDeveloperMode() {
+            const toggle = document.getElementById('developerModeToggle');
+            const section = document.getElementById('confidencePlottingSection');
+            
+            if (toggle.checked) {
+                section.style.display = 'block';
+                showNotification('Developer tools enabled - confidence plotting now available');
+            } else {
+                section.style.display = 'none';
+                showNotification('Developer tools disabled');
+                
+                // Stop plotting if it's running
+                if (isPlotting) {
+                    stopPlotting();
+                }
+            }
         }
-        
+
         // Initialize page
         document.addEventListener('DOMContentLoaded', () => {
             checkAuth();
@@ -2128,14 +2147,14 @@ const char config_html[] PROGMEM = R"rawliteral(
                     </div>
                     
                     <div class="card">
-                        <h2 class="card-title">🎯 Proximity Calibration</h2>
+                        <h2 class="card-title"> Proximity Calibration</h2>
                         <div style="margin-bottom: 1.5rem;">
                             <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
                                 Calibrate the system for your specific installation. Position your phone where you want authentication to work, then run calibration.
                             </p>
                             <div style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
                                 <button onclick="startCalibration()" class="btn btn-primary" id="startCalibrationBtn">
-                                    🎯 Start Calibration
+                                    Start Calibration
                                 </button>
                                 <button onclick="stopCalibration()" class="btn btn-secondary" id="stopCalibrationBtn" disabled>
                                     ⏹️ Stop Early
@@ -2157,13 +2176,8 @@ const char config_html[] PROGMEM = R"rawliteral(
                                     <span>Time Remaining:</span>
                                     <span id="calibrationTimer">--</span>
                                 </div>
-                                <div style="display: flex; justify-content: space-between;">
-                                    <span>Samples Collected:</span>
-                                    <span id="calibrationSamples">0</span>
-                                </div>
-                            </div>
                             <p style="font-size: 0.8rem; color: #666; margin-top: 1rem;">
-                                📍 <strong>Instructions:</strong><br>
+                                <strong>Instructions:</strong><br>
                                 1. Position your phone where you want authentication to work<br>
                                 2. Click "Start Calibration" and keep your phone in position<br>
                                 3. Wait 30 seconds for data collection to complete<br>
@@ -2176,8 +2190,22 @@ const char config_html[] PROGMEM = R"rawliteral(
                         <div class="card">Loading devices...</div>
                     </div>
                     
-                    <!-- Confidence Plotting (moved from separate section) -->
+                    <!-- Developer Testing Toggle -->
                     <div class="card">
+                        <h2 class="card-title">Developer Tools</h2>
+                        <div style="margin-bottom: 1rem;">
+                            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                <input type="checkbox" id="developerModeToggle" onchange="toggleDeveloperMode()" style="margin: 0;">
+                                <span>Enable Testing & Plotting Tools</span>
+                            </label>
+                            <p style="font-size: 0.9rem; color: #666; margin-top: 0.5rem;">
+                                Show advanced confidence plotting and debugging tools.
+                            </p>
+                        </div>
+                    </div>
+                    
+                    <!-- Confidence Plotting (moved from separate section) -->
+                    <div class="card" id="confidencePlottingSection" style="display: none;">
                         <h2 class="card-title">📈 Confidence Over Time</h2>
                         <div style="margin-bottom: 1.5rem;">
                             <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">

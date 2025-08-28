@@ -13,6 +13,10 @@
 #include <BleKeyboard.h>
 #include <nvs_flash.h>
 #include <esp_gap_ble_api.h>
+#include <esp_sleep.h>
+#include <driver/rtc_io.h>
+#include <esp_bt.h>
+#include <esp_bt_main.h>
 #include <ArduinoJson.h>
 #include "config_html.h"
 #include "setup_html.h"
@@ -419,6 +423,13 @@ unsigned long lightSleepTimeout = 30000;  // Fixed timeout in light sleep REMEMB
 bool quickConfidenceCompleted = false;             // Prevent multiple confidence checks per BLE window
 #define QUICK_CONFIDENCE_LOW_THRESHOLD 35.0f      // Below this = stay in deep sleep
 #define QUICK_CONFIDENCE_HIGH_THRESHOLD 45.0f     // Above this = immediate response
+
+// ESP32 Hardware Deep Sleep RTC Memory Variables
+RTC_DATA_ATTR uint32_t bootCount = 0;
+RTC_DATA_ATTR uint32_t deepSleepCycles = 0;
+RTC_DATA_ATTR bool wasInDeepSleep = false;
+RTC_DATA_ATTR unsigned long deepSleepEntryTime = 0;
+RTC_DATA_ATTR bool useHardwareDeepSleep = true;  // Toggle between software and hardware deep sleep
 
 // Brake/button wake-up tracking
 bool brakeWakeUpInProgress = false;              // Currently in brake wake-up sequence
@@ -1745,6 +1756,52 @@ void setup() {
     DEBUG_PRINT("System boot time: ");
     DEBUG_PRINT(systemBootTime);
     DEBUG_PRINTLN("ms");
+    
+    // Check wake-up cause and handle ESP32 hardware deep sleep
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    bootCount++;
+    
+    if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0 && wasInDeepSleep) {
+        // Woke from hardware deep sleep via start button (GPIO35)
+        Serial.printf("ESP32 Deep Sleep: Wake-up #%d from start button press\n", bootCount);
+        Serial.printf("ESP32 Deep Sleep: Total deep sleep cycles: %d\n", deepSleepCycles);
+        
+        // Gradual CPU frequency step-up for stability
+        setCpuFrequencyMhz(80);   // Start at 80MHz
+        delay(100);
+        setCpuFrequencyMhz(160);  // Step to 160MHz
+        delay(100);
+        setCpuFrequencyMhz(240);  // Final step to 240MHz
+        delay(100);
+        
+        // Start in light sleep mode after hardware deep sleep wake-up
+        currentPowerState = POWER_LIGHT_SLEEP;
+        bluetoothInitialized = false;  // Need to reinitialize BLE stack
+        wasInDeepSleep = false;        // Reset flag
+        
+        Serial.println("ESP32 Deep Sleep: CPU frequency stepped up, starting in Light Sleep mode");
+    } else if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER && wasInDeepSleep) {
+        // Woke from timer (BLE window time)
+        Serial.printf("ESP32 Deep Sleep: Wake-up #%d from RTC timer (BLE window)\n", bootCount);
+        
+        // Gradual CPU frequency step-up for BLE operations
+        setCpuFrequencyMhz(80);   // BLE operations frequency
+        delay(50);
+        
+        // Start in deep sleep mode but with BLE window active
+        currentPowerState = POWER_DEEP_SLEEP;
+        bleDeepSleepAdvertising = true;
+        bleAdvertisingStopped = false;
+        quickConfidenceCompleted = false;
+        bluetoothInitialized = false;  // Need to reinitialize BLE stack
+        
+        Serial.println("ESP32 Deep Sleep: Woke for BLE window, CPU at 80MHz");
+    } else {
+        // Normal boot (power-on, reset, or first boot)
+        Serial.printf("ESP32: Normal boot #%d\n", bootCount);
+        wasInDeepSleep = false;
+        currentPowerState = POWER_ACTIVE;  // Start in active mode
+    }
     
     // Hardware setup
     setupPins();
@@ -4095,10 +4152,14 @@ void printSystemStatus() {
     
     // Show deep sleep status
     if (currentPowerState == POWER_DEEP_SLEEP || currentPowerState == POWER_LIGHT_SLEEP) {
-        Serial.print("Deep Sleep System: Fixed 20s cycles (10s quiet + 10s BLE)");
+        Serial.print("Deep Sleep System: ");
+        Serial.print(useHardwareDeepSleep ? "ESP32 Hardware" : "Software");
+        Serial.print(" - Fixed 20s cycles (10s quiet + 10s BLE)");
         Serial.print(", Current confidence=");
         Serial.print(rssiAnalysis.totalConfidence, 1);
-        Serial.println("%");
+        Serial.print("%, Boot #");
+        Serial.print(bootCount);
+        Serial.println();
     }
     
     Serial.print("\nLED States - ACC: ");
@@ -5096,28 +5157,77 @@ void setPowerState(PowerState newState) {
             break;
             
         case POWER_DEEP_SLEEP:
-            // Stop any ongoing RSSI scanning and advertising first
-            if (bluetoothEnabled && bluetoothInitialized) {
-                stopRSSIScan();
-                stopBLEAdvertising();
+            if (useHardwareDeepSleep) {
+                // ESP32 Hardware Deep Sleep Mode
+                Serial.println("ESP32 Deep Sleep: Entering hardware deep sleep mode");
+                Serial.flush();
+                
+                // Stop Bluetooth stack completely
+                if (bluetoothEnabled && bluetoothInitialized) {
+                    Serial.println("ESP32 Deep Sleep: Stopping BLE stack");
+                    stopRSSIScan();
+                    stopBLEAdvertising();
+                    delay(100);
+                    
+                    // Deinitialize Bluetooth stack for maximum power savings
+                    esp_bluedroid_deinit();
+                    esp_bluedroid_disable();
+                    esp_bt_controller_deinit();
+                    esp_bt_controller_disable();
+                    delay(100);
+                }
+                
+                // Turn off RFID completely in hardware deep sleep
+                digitalWrite(RFID_SHD, HIGH);
+                
+                // Turn off all LEDs
+                digitalWrite(LED_PIN, LOW);
+                digitalWrite(BUTTON_LED_PIN, LOW);
+                
+                // Configure wake-up source: GPIO35 (start button) on LOW signal
+                esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
+                
+                // Configure timer wake-up for BLE windows (10 seconds)
+                esp_sleep_enable_timer_wakeup(10 * 1000000ULL); // 10 seconds in microseconds
+                
+                // Store deep sleep state in RTC memory
+                wasInDeepSleep = true;
+                deepSleepCycles++;
+                deepSleepEntryTime = millis();
+                
+                Serial.printf("ESP32 Deep Sleep: Cycle #%d, wake sources: Start button (GPIO35) + 10s timer\n", deepSleepCycles);
+                Serial.flush();
+                delay(100);
+                
+                // Enter ESP32 hardware deep sleep
+                esp_deep_sleep_start();
+                // Code never reaches here - system will restart on wake-up
+                
+            } else {
+                // Fallback to software deep sleep (original implementation)
+                // Stop any ongoing RSSI scanning and advertising first
+                if (bluetoothEnabled && bluetoothInitialized) {
+                    stopRSSIScan();
+                    stopBLEAdvertising();
+                }
+                delay(10);  // Brief pause to ensure operations complete
+                
+                // Initialize deep sleep timing
+                rfidDeepSleepCycleStart = millis();
+                rfidDeepSleepOn = true;
+                // Start quiet period - BLE window will start after 10 seconds
+                bleDeepSleepAdvertiseStart = millis();  // Start of 20-second cycle
+                bleDeepSleepAdvertising = false;
+                bleAdvertisingStopped = true;   // Start in stopped state for quiet period
+                
+                // Start Deep Sleep at lower frequency (will be raised during BLE windows)
+                setCpuFrequencyMhz(40);   // Start with power-saving frequency
+                
+                Serial.println("Deep Sleep: Starting with 10-second quiet period (fixed 20s cycles)");
+                Serial.flush();  // Ensure final message is sent
+                delay(10);  // Brief pause before disabling serial
+                Serial.end();  // Disable serial to prevent issues during deep sleep
             }
-            delay(10);  // Brief pause to ensure operations complete
-            
-            // Initialize deep sleep timing
-            rfidDeepSleepCycleStart = millis();
-            rfidDeepSleepOn = true;
-            // Start quiet period - BLE window will start after 10 seconds
-            bleDeepSleepAdvertiseStart = millis();  // Start of 20-second cycle
-            bleDeepSleepAdvertising = false;
-            bleAdvertisingStopped = true;   // Start in stopped state for quiet period
-            
-            // Start Deep Sleep at lower frequency (will be raised during BLE windows)
-            setCpuFrequencyMhz(40);   // Start with power-saving frequency
-            
-            Serial.println("Deep Sleep: Starting with 10-second quiet period (fixed 20s cycles)");
-            Serial.flush();  // Ensure final message is sent
-            delay(10);  // Brief pause before disabling serial
-            Serial.end();  // Disable serial to prevent issues during deep sleep
             break;
     }
 }
@@ -5159,7 +5269,13 @@ void handleDeepSleepRFID() {
 }
 
 // Handle BLE advertising cycling in deep sleep
+// Note: With hardware deep sleep, this function mainly handles the BLE window after timer wake-up
 void handleDeepSleepBLE() {
+    // Skip if using hardware deep sleep and not in a BLE window
+    if (useHardwareDeepSleep && !bleDeepSleepAdvertising) {
+        return;
+    }
+    
     if (!bluetoothInitialized) return;
     
     unsigned long currentTime = millis();
@@ -5262,16 +5378,25 @@ void handleDeepSleepBLE() {
             
             bleAdvertisingStopped = true;  // Mark as stopped
             
-            // Start new cycle - add the fixed interval to maintain proper timing
-            bleDeepSleepAdvertiseStart += BLE_DEEP_SLEEP_INTERVAL_MS;
-            
-            // Reduce CPU frequency for quiet period
-            Serial.println("Deep Sleep: BLE window ended, starting new 20s cycle (40MHz)");
-            Serial.flush();  // Ensure output completes before frequency change
-            delay(50);  // Longer pause for proper stabilization
-            setCpuFrequencyMhz(40);  // Lower speed for power savings
-            delay(50);  // Additional stabilization
-            Serial.end();  // Disable serial in deep sleep quiet period
+            if (useHardwareDeepSleep) {
+                // Hardware deep sleep: enter new deep sleep cycle
+                Serial.println("ESP32 Deep Sleep: BLE window ended, entering hardware deep sleep");
+                Serial.flush();
+                delay(100);
+                setPowerState(POWER_DEEP_SLEEP);  // This will trigger hardware deep sleep
+                return;  // Never reached due to esp_deep_sleep_start()
+            } else {
+                // Software deep sleep: continue with timing logic
+                bleDeepSleepAdvertiseStart += BLE_DEEP_SLEEP_INTERVAL_MS;
+                
+                // Reduce CPU frequency for quiet period
+                Serial.println("Deep Sleep: BLE window ended, starting new 20s cycle (40MHz)");
+                Serial.flush();  // Ensure output completes before frequency change
+                delay(50);  // Longer pause for proper stabilization
+                setCpuFrequencyMhz(40);  // Lower speed for power savings
+                delay(50);  // Additional stabilization
+                Serial.end();  // Disable serial in deep sleep quiet period
+            }
         }
     }
 }

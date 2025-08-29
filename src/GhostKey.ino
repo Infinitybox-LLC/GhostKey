@@ -182,8 +182,8 @@ const char manifest_json[] PROGMEM = R"({
 // ========================================
 #define MAX_BONDS 3
 #define BOND_STORAGE_NAMESPACE "ble_bonds"
-#define DEVICE_NAME_KEY "dev_name_"
-#define DEVICE_PRIORITY_KEY "dev_priority_"
+#define DEVICE_NAME_KEY "dn_"
+#define DEVICE_PRIORITY_KEY "dp_"
 #define MAX_RSSI -30
 #define MIN_RSSI -100
 #define RSSI_UPDATE_INTERVAL 1000
@@ -648,7 +648,7 @@ esp_ble_bond_dev_t* getBondedDevicesSafe(int* count) {
         esp_ble_bond_dev_t* tempBuffer = (esp_ble_bond_dev_t*)malloc(sizeof(esp_ble_bond_dev_t) * bondedCount);
         if (tempBuffer) {
             esp_ble_get_bond_device_list(&bondedCount, tempBuffer);
-            *count = bondedCount;
+        *count = bondedCount;
         }
         return tempBuffer;
     } else {
@@ -733,11 +733,14 @@ void saveDeviceName(esp_bd_addr_t address, const char* name) {
                  DEVICE_NAME_KEY, address[0], address[1], address[2], 
                  address[3], address[4], address[5]);
 
+        Serial.printf("Saving device name to NVS - Key: %s, Name: %s\n", key, name);
         err = nvs_set_str(handle, key, name);
         if (err == ESP_OK) {
             nvs_commit(handle);
             nameCache[cacheIndex].nvsStored = true;
-            Serial.printf("Device name saved: %s\n", name);
+            Serial.printf("Device name saved successfully to NVS: %s\n", name);
+        } else {
+            Serial.printf("Failed to save device name to NVS: %d\n", err);
         }
         nvs_close(handle);
     }
@@ -759,6 +762,7 @@ bool getDeviceName(esp_bd_addr_t address, char* name, size_t max_len) {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(BOND_STORAGE_NAMESPACE, NVS_READONLY, &handle);
     if (err != ESP_OK) {
+        Serial.printf("Failed to open NVS namespace '%s' for device name lookup: %d\n", BOND_STORAGE_NAMESPACE, err);
         return false;
     }
 
@@ -767,11 +771,14 @@ bool getDeviceName(esp_bd_addr_t address, char* name, size_t max_len) {
              DEVICE_NAME_KEY, address[0], address[1], address[2], 
              address[3], address[4], address[5]);
 
+    Serial.printf("Looking for device name with key: %s\n", key);
+
     size_t required_size = max_len;
     err = nvs_get_str(handle, key, name, &required_size);
     nvs_close(handle);
     
     if (err == ESP_OK) {
+        Serial.printf("Device name loaded from NVS: %s\n", name);
         // Store in cache for future access
         int cacheIndex = findOrCreateNameCacheEntry(address);
         strncpy(nameCache[cacheIndex].name, name, sizeof(nameCache[cacheIndex].name) - 1);
@@ -779,6 +786,8 @@ bool getDeviceName(esp_bd_addr_t address, char* name, size_t max_len) {
         nameCache[cacheIndex].hasCustomName = true;
         nameCache[cacheIndex].nvsStored = true;
         return true;
+    } else {
+        Serial.printf("Device name not found in NVS (key: %s), error: %d\n", key, err);
     }
     
     return false;
@@ -913,8 +922,8 @@ class MyServerCallbacks: public BLEServerCallbacks {
         // Only restart advertising if NOT in deep sleep BLE window
         // Deep sleep BLE window management controls advertising during deep sleep
         if (currentPowerState != POWER_DEEP_SLEEP || !bleDeepSleepAdvertising) {
-            Serial.println("BLE: Restarting advertising after disconnect...");
-            startBLEAdvertising(isPairingMode);
+        Serial.println("BLE: Restarting advertising after disconnect...");
+        startBLEAdvertising(isPairingMode);
         } else {
             Serial.println("BLE: In deep sleep BLE window - not restarting advertising (managed by deep sleep handler)");
         }
@@ -978,7 +987,7 @@ void initializeBluetooth() {
 // Function to start BLE advertising with proper discoverability
 void startBLEAdvertising(bool discoverable) {
     if(pServer == nullptr) {
-        Serial.println("BLE: ERROR - Server not initialized");
+            Serial.println("BLE: ERROR - Server not initialized");
         return;
     }
     
@@ -1229,18 +1238,18 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
             break;
 
         case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
-            if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-                Serial.println("BLE: Advertising started successfully");
-            } else {
-                Serial.printf("BLE: Advertising start failed: %d\n", param->adv_start_cmpl.status);
+                if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+                    Serial.println("BLE: Advertising started successfully");
+                } else {
+                    Serial.printf("BLE: Advertising start failed: %d\n", param->adv_start_cmpl.status);
             }
             break;
 
         case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
-            if (param->adv_stop_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-                Serial.println("BLE: Advertising stopped successfully");
-            } else {
-                Serial.printf("BLE: Advertising stop failed: %d\n", param->adv_stop_cmpl.status);
+                if (param->adv_stop_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+                    Serial.println("BLE: Advertising stopped successfully");
+                } else {
+                    Serial.printf("BLE: Advertising stop failed: %d\n", param->adv_stop_cmpl.status);
             }
             break;
 
@@ -1775,7 +1784,6 @@ void handleButtonPress();
 void handleBrakeInput();
 void updateSystemState();
 void controlRelays();
-void checkAutoLock();
 void enterConfigMode();
 void exitConfigMode();
 void updateSecurityState();
@@ -1878,16 +1886,16 @@ void setup() {
     // Load saved settings from flash
     preferences.begin("ghostkey", false);
     isConfigured = preferences.getBool("configured", false);
-    isBluetoothPaired = preferences.getBool("bluetooth_paired", false);
-    firstSetupComplete = preferences.getBool("first_setup_complete", false);
+    isBluetoothPaired = preferences.getBool("bt_paired", false);
+    firstSetupComplete = preferences.getBool("setup_done", false);
     starterPulseTime = preferences.getULong("starter_pulse", STARTER_PULSE_TIME);
-    autoLockTimeout = preferences.getULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
+    autoLockTimeout = preferences.getULong("auto_lock", AUTO_LOCK_TIMEOUT);
     ap_password = preferences.getString("wifi_password", "123456789");
     web_password = preferences.getString("web_password", "1234");
     bluetoothEnabled = preferences.getBool("bt_enabled", true);
-    ghostKeyEnabled = preferences.getBool("ghost_key_enabled", true);
-    ghostPowerEnabled = preferences.getBool("ghost_power_enabled", true);
-    calibrationOffset = preferences.getFloat("calibration_offset", 0.0f);
+    ghostKeyEnabled = preferences.getBool("gk_enabled", true);
+    ghostPowerEnabled = preferences.getBool("gp_enabled", true);
+    calibrationOffset = preferences.getFloat("cal_offset", 0.0f);
     
     // Check if Bluetooth should be enabled after restart
     if (preferences.getBool("bt_restart", false)) {
@@ -2031,8 +2039,6 @@ void loop() {
         // Security relay control handled in updateSecurityState()
     }
     
-    checkAutoLock();
-    
     // Periodic security check
     if (millis() - lastSecurityCheck >= SECURITY_CHECK_INTERVAL) {
         updateSecurityState();
@@ -2165,8 +2171,8 @@ void loop() {
         // Handle RFID authentication
         else if (checkRfidKey(tagData)) {
             // Check if this is the first time RFID auth is happening
-            if (!wasRfidAuthenticated && !rfidAuthenticated) {
-                // First time RFID authentication - pulse buzzer once
+            if (!wasRfidAuthenticated && !rfidAuthenticated && currentState != CONFIG_MODE) {
+                // First time RFID authentication - pulse buzzer once (not in config mode)
                 buzzerPulse(100);  // 100ms PWM tone
                 Serial.println("RFID: Authentication buzzer pulse");
             }
@@ -2205,8 +2211,8 @@ void loop() {
             }
             
             // Only beep for actual unauthorized tags, not background EMF (0,0,0,0,0)
-            if (isValidTag && !unauthorizedBeepPlayed) {
-                // Unauthorized key scanned - pulse buzzer twice
+            if (isValidTag && !unauthorizedBeepPlayed && currentState != CONFIG_MODE) {
+                // Unauthorized key scanned - pulse buzzer twice (not in config mode)
                 buzzerPulse(100);  // 100ms PWM tone
                 delay(100);        // 100ms gap
                 buzzerPulse(100);  // 100ms PWM tone
@@ -2284,7 +2290,7 @@ void loop() {
     
     // Update RFID auth tracking for buzzer logic
     wasRfidAuthenticated = rfidAuthenticated;
-}
+    }
     
     // Check for RSSI scan timeout (if no results after 10 seconds)
     static bool rssiTimeoutChecked = false;
@@ -2428,13 +2434,20 @@ void handleConfigModeOnly() {
         }
     }
 
-    // Check for long press without brake - config mode can be accessed
+    // Check for long press without brake - config mode can be accessed (authentication required)
     if (buttonPressed && !brakeHeld && !isLongPressDetected) {
         unsigned long pressDuration = millis() - buttonPressStartTime;
         if (pressDuration >= CONFIG_MODE_PRESS_TIME) {
             isLongPressDetected = true;
-            DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode (Ghost Power only)");
-            enterConfigMode();
+            
+            // Check authentication before allowing config mode
+            bool isAuthenticated = rfidAuthenticated || (bluetoothAuthenticated);
+            if (isAuthenticated) {
+                DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode (Ghost Power only)");
+                enterConfigMode();
+            } else {
+                DEBUG_BUTTON_PRINTLN("Long press detected but not authenticated - Access denied");
+            }
         }
     }
 
@@ -2484,20 +2497,27 @@ void handleButtonPress() {
         }
     }
 
-    // Check for long press without brake - config mode can be accessed regardless of security state
+    // Check for long press without brake - config mode can be accessed (authentication required)
     if (buttonPressed && !brakeHeld && !isLongPressDetected) {
         unsigned long pressDuration = millis() - buttonPressStartTime;
         if (pressDuration >= CONFIG_MODE_PRESS_TIME) {
             isLongPressDetected = true;
-            DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode (security override)");
-            enterConfigMode();
+            
+            // Check authentication before allowing config mode
+            bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+            if (isAuthenticated) {
+                DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode (authenticated)");
+                enterConfigMode();
+            } else {
+                DEBUG_BUTTON_PRINTLN("Long press detected but not authenticated - Access denied");
+            }
         }
     }
 
     // Check for start button press in config mode - always exit
     if (currentState == CONFIG_MODE && 
         buttonReading == LOW && lastButtonReading == HIGH && 
-        (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+        (millis() - lastButtonPress) > 1000) {
         DEBUG_BUTTON_PRINTLN("Start button pressed in config mode - Exiting config mode");
         exitConfigMode();
         lastButtonPress = millis();
@@ -2695,11 +2715,14 @@ void triggerStartRelayPulse() {
     startRelayPulsing = true;
 }
 
-void checkAutoLock() {
-    // TBD
-}
 
 void enterConfigMode() {
+    // Check authentication before allowing config mode access
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    if (!isAuthenticated) {
+        DEBUG_PRINTLN("Not authenticated - Access denied");
+        return;
+    }
     currentState = CONFIG_MODE;
     DEBUG_PRINTLN("Entering configuration mode");
     
@@ -3493,33 +3516,62 @@ void setupWebServer() {
         server.send(200, "text/plain", status);
     });
     
-    // Set device name endpoint
-    server.on("/setname", HTTP_POST, [](){
-        Serial.println("Set device name request received");
-        if (server.hasArg("plain")) {
+
+    // Bluetooth rename endpoint (new inline editing style)
+    server.on("/bluetooth_rename", HTTP_POST, [](){
+        Serial.println("Bluetooth rename request received");
+        
+        if (!server.hasArg("plain")) {
+            Serial.println("Bluetooth rename: No JSON body");
+            server.send(400, "text/plain", "No request body");
+            return;
+        }
+        
             DynamicJsonDocument doc(512);
             DeserializationError error = deserializeJson(doc, server.arg("plain"));
             
-            if (!error) {
+        if (error) {
+            Serial.printf("Bluetooth rename: JSON parse error: %s\n", error.c_str());
+            server.send(400, "text/plain", "Invalid JSON");
+            return;
+        }
+        
                 const char* macStr = doc["mac"];
                 const char* name = doc["name"];
                 
-                if (macStr && name) {
+        Serial.printf("Bluetooth rename: MAC=%s, Name=%s\n", macStr ? macStr : "NULL", name ? name : "NULL");
+        
+        if (!macStr || !name) {
+            Serial.println("Bluetooth rename: Missing mac or name field");
+            server.send(400, "text/plain", "Missing mac or name");
+            return;
+        }
+        
+        if (strlen(name) == 0 || strlen(name) > 32) {
+            Serial.printf("Bluetooth rename: Invalid name length: %d\n", strlen(name));
+            server.send(400, "text/plain", "Name must be 1-32 characters");
+            return;
+        }
+        
                     esp_bd_addr_t address;
                     int parsed = sscanf(macStr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
                         &address[0], &address[1], &address[2],
                         &address[3], &address[4], &address[5]);
                     
-                    if (parsed == 6) {
-                        saveDeviceName(address, name);
-                        invalidateDeviceCache();
-                        server.send(200, "text/plain", "Device name updated");
+        if (parsed != 6) {
+            Serial.printf("Bluetooth rename: MAC parse failed, parsed %d fields\n", parsed);
+            server.send(400, "text/plain", "Invalid MAC address format");
                         return;
                     }
-                }
-            }
-        }
-        server.send(400, "text/plain", "Invalid request");
+        
+        Serial.printf("Bluetooth rename: Saving name '%s' for device %02x:%02x:%02x:%02x:%02x:%02x\n", 
+                     name, address[0], address[1], address[2], address[3], address[4], address[5]);
+        
+        saveDeviceName(address, name);
+        // Don't invalidate cache to avoid interrupting user experience
+        
+        Serial.println("Bluetooth rename: Success!");
+        server.send(200, "text/plain", "Bluetooth device renamed successfully");
     });
     
     // Remove device endpoint
@@ -3591,7 +3643,7 @@ void setupWebServer() {
             // Validate the input
             if (newTimeout >= 5000 && newTimeout <= 120000) {
                 autoLockTimeout = newTimeout;
-                preferences.putULong("auto_lock_timeout", autoLockTimeout);
+                preferences.putULong("auto_lock", autoLockTimeout);
                 DEBUG_PRINT("Auto-lock timeout updated to: ");
                 DEBUG_PRINT(autoLockTimeout);
                 DEBUG_PRINTLN("ms");
@@ -3661,15 +3713,15 @@ void setupWebServer() {
                     }
                     
                     if (isNumeric) {
-                        web_password = String(newPassword);
-                        preferences.putString("web_password", web_password);
+                    web_password = String(newPassword);
+                    preferences.putString("web_password", web_password);
                         Serial.printf("Web PIN updated: %s\n", web_password.c_str());
-                        
+                    
                         server.send(200, "text/plain", "Web interface PIN updated successfully");
-                        return;
-                    }
+                    return;
                 }
             }
+        }
         }
         server.send(400, "text/plain", "Invalid request - PIN must be exactly 4 digits");
     });
@@ -3783,7 +3835,7 @@ void setupWebServer() {
                 // Apply the change immediately
                 if (newState && !bluetoothEnabled) {
                     // Enabling Bluetooth - set flag for restart on config exit
-                    bluetoothEnabled = true;
+                                         bluetoothEnabled = true;
                     preferences.putBool("bt_enabled", true);
                     preferences.putBool("bt_restart", true);
                     restartPendingForBluetooth = true;
@@ -3840,7 +3892,7 @@ void setupWebServer() {
                 }
                 
                 ghostKeyEnabled = newState;
-                preferences.putBool("ghost_key_enabled", ghostKeyEnabled);
+                preferences.putBool("gk_enabled", ghostKeyEnabled);
                 
                 Serial.printf("Ghost Key %s\n", ghostKeyEnabled ? "enabled" : "disabled");
                 String message = ghostKeyEnabled ? "Ghost Key enabled." : "Ghost Key disabled.";
@@ -3867,7 +3919,7 @@ void setupWebServer() {
                 }
                 
                 ghostPowerEnabled = newState;
-                preferences.putBool("ghost_power_enabled", ghostPowerEnabled);
+                preferences.putBool("gp_enabled", ghostPowerEnabled);
                 
                 Serial.printf("Ghost Power %s\n", ghostPowerEnabled ? "enabled" : "disabled");
                 String message = ghostPowerEnabled ? "Ghost Power enabled." : "Ghost Power disabled.";
@@ -3921,8 +3973,8 @@ void setupWebServer() {
                 ap_password = wifiPass;
                 web_password = webPass;
                 
-                preferences.putBool("ghost_key_enabled", ghostKeyEnabled);
-                preferences.putBool("ghost_power_enabled", ghostPowerEnabled);
+                preferences.putBool("gk_enabled", ghostKeyEnabled);
+                preferences.putBool("gp_enabled", ghostPowerEnabled);
                 preferences.putString("wifi_password", ap_password);
                 preferences.putString("web_password", web_password);
                 
@@ -3951,7 +4003,7 @@ void setupWebServer() {
                 
                 // Mark setup as complete
                 firstSetupComplete = true;
-                preferences.putBool("first_setup_complete", true);
+                preferences.putBool("setup_done", true);
                 
                 Serial.println("Setup completed successfully");
                 server.send(200, "text/plain", "Setup completed successfully");
@@ -4360,15 +4412,15 @@ void performFactoryReset() {
     
     // Set defaults
     preferences.putBool("configured", false);
-    preferences.putBool("bluetooth_paired", false);
-    preferences.putBool("first_setup_complete", false);
+    preferences.putBool("bt_paired", false);
+    preferences.putBool("setup_done", false);
     preferences.putULong("starter_pulse", STARTER_PULSE_TIME);
-    preferences.putULong("auto_lock_timeout", AUTO_LOCK_TIMEOUT);
+    preferences.putULong("auto_lock", AUTO_LOCK_TIMEOUT);
     preferences.putString("wifi_password", "123456789");
     preferences.putString("web_password", "1234");
     preferences.putBool("bt_enabled", true);
-    preferences.putBool("ghost_key_enabled", true);
-    preferences.putBool("ghost_power_enabled", true);
+    preferences.putBool("gk_enabled", true);
+    preferences.putBool("gp_enabled", true);
     
     // Clean up Bluetooth bonds
     cleanupNVSStorage();
@@ -5013,7 +5065,7 @@ void stopCalibration() {
     calibrationOffset = newOffset;
     
     // Save to preferences
-    preferences.putFloat("calibration_offset", calibrationOffset);
+            preferences.putFloat("cal_offset", calibrationOffset);
     
     Serial.println("=== CALIBRATION COMPLETE ===");
     Serial.printf("Samples collected: %d\n", calibrationSampleCount);
@@ -5027,7 +5079,7 @@ void stopCalibration() {
 // Reset calibration to default
 void resetCalibration() {
     calibrationOffset = 0.0f;
-    preferences.putFloat("calibration_offset", calibrationOffset);
+            preferences.putFloat("cal_offset", calibrationOffset);
     Serial.println("Calibration reset to default (no offset)");
 }
 
@@ -5152,7 +5204,7 @@ void updatePowerManagement() {
                     Serial.println("Light Sleep timeout is 0ms, going directly to Deep Sleep");
                     setPowerState(POWER_DEEP_SLEEP);
                 } else {
-                    setPowerState(POWER_LIGHT_SLEEP);
+                setPowerState(POWER_LIGHT_SLEEP);
                 }
             }
         }
@@ -5305,26 +5357,26 @@ void setPowerState(PowerState newState) {
                 
             } else {
                 // Fallback to software deep sleep (original implementation)
-                // Stop any ongoing RSSI scanning and advertising first
-                if (bluetoothEnabled && bluetoothInitialized) {
-                    stopRSSIScan();
-                    stopBLEAdvertising();
-                }
-                delay(10);  // Brief pause to ensure operations complete
-                
-                // Initialize deep sleep timing
-                rfidDeepSleepCycleStart = millis();
-                rfidDeepSleepOn = true;
+            // Stop any ongoing RSSI scanning and advertising first
+            if (bluetoothEnabled && bluetoothInitialized) {
+                stopRSSIScan();
+                stopBLEAdvertising();
+            }
+            delay(10);  // Brief pause to ensure operations complete
+            
+            // Initialize deep sleep timing
+            rfidDeepSleepCycleStart = millis();
+            rfidDeepSleepOn = true;
                 // Start quiet period - BLE window will start after 10 seconds
                 bleDeepSleepAdvertiseStart = millis();  // Start of 20-second cycle
-                bleDeepSleepAdvertising = false;
-                bleAdvertisingStopped = true;   // Start in stopped state for quiet period
-                
-                // Start Deep Sleep at lower frequency (will be raised during BLE windows)
-                setCpuFrequencyMhz(40);   // Start with power-saving frequency
-                
+            bleDeepSleepAdvertising = false;
+            bleAdvertisingStopped = true;   // Start in stopped state for quiet period
+            
+            // Start Deep Sleep at lower frequency (will be raised during BLE windows)
+            setCpuFrequencyMhz(40);   // Start with power-saving frequency
+            
                 Serial.println("Deep Sleep: Starting with 10-second quiet period (fixed 20s cycles)");
-                Serial.flush();  // Ensure final message is sent
+            Serial.flush();  // Ensure final message is sent
                 delay(10);  // Brief pause before disabling serial
                 Serial.end();  // Disable serial to prevent issues during deep sleep
             }
@@ -5508,8 +5560,8 @@ void handleDeepSleepBLE() {
             
             // Only stop BLE if not already stopped by early termination
             if (!bleAdvertisingStopped) {
-                stopBLEAdvertising();
-                stopRSSIScan();  // Also stop RSSI scanning
+            stopBLEAdvertising();
+            stopRSSIScan();  // Also stop RSSI scanning
             }
             
             bleAdvertisingStopped = true;  // Mark as stopped
@@ -5575,7 +5627,7 @@ void handleDeepSleepBLE() {
                 // Should never reach here
                 Serial.println("ERROR: esp_deep_sleep_start() failed!");
                 return;
-            } else {
+    } else {
                 // Software deep sleep: continue with timing logic
                 bleDeepSleepAdvertiseStart += BLE_DEEP_SLEEP_INTERVAL_MS;
                 

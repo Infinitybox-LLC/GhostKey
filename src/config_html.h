@@ -1266,8 +1266,17 @@ const char config_html[] PROGMEM = R"rawliteral(
                 const response = await fetchWithTimeout('/bluetooth_status');
                 if (response.ok) {
                     const data = await response.json();
-                    document.getElementById('bluetoothEnabled').checked = data.enabled;
+                    console.log('Loading Bluetooth status:', data);
+                    
+                    const checkbox = document.getElementById('bluetoothEnabled');
+                    if (checkbox) {
+                        checkbox.checked = data.enabled;
+                        console.log('Checkbox updated to:', data.enabled);
+                    }
+                    
                     updateBluetoothUI(data.enabled);
+                } else {
+                    console.error('Failed to load Bluetooth status:', response.status);
                 }
             } catch (error) {
                 console.error('Error loading Bluetooth status:', error);
@@ -1343,11 +1352,22 @@ const char config_html[] PROGMEM = R"rawliteral(
         }
 
         async function updateDevices() {
-            // Check if Bluetooth is enabled first
-            const bluetoothToggle = document.getElementById('bluetoothEnabled');
-            if (bluetoothToggle && !bluetoothToggle.checked) {
-                document.getElementById('devicesList').innerHTML = '<div class="card"><p style="color: #888;">Bluetooth is disabled. Enable Bluetooth above to manage devices.</p></div>';
-                return;
+            // Check Bluetooth status from server instead of relying on checkbox state
+            try {
+                const statusResponse = await fetchWithTimeout('/bluetooth_status');
+                if (statusResponse.ok) {
+                    const statusData = await statusResponse.json();
+                    console.log('Bluetooth status check:', statusData);
+                    
+                    if (!statusData.enabled) {
+                        document.getElementById('devicesList').innerHTML = '<div class="card"><p style="color: #888;">Bluetooth is disabled. Enable Bluetooth above to manage devices.</p></div>';
+                        return;
+                    }
+                } else {
+                    console.error('Failed to get Bluetooth status');
+                }
+            } catch (error) {
+                console.error('Error checking Bluetooth status:', error);
             }
             
             try {
@@ -1367,21 +1387,19 @@ const char config_html[] PROGMEM = R"rawliteral(
                         
                         html += '<div class="device-card">';
                         html += '<div class="device-header">';
-                        html += '<div>';
-                        html += '<div class="device-name">' + (device.name || 'Unknown Device') + '</div>';
-                        html += '<div class="device-mac">' + device.mac + '</div>';
+                        html += '<div style="flex: 1;">';
+                        html += '<div class="device-name">';
+                        html += '<input type="text" value="' + (device.name || 'Unknown Device') + '" ';
+                        html += 'onblur="renameBluetoothDevice(\'' + device.mac + '\', this.value)" ';
+                        html += 'style="background: transparent; border: 1px solid #ddd; padding: 8px 12px; border-radius: 4px; font-weight: bold; width: 100%; font-size: 1.1rem; margin-right: 5px;">';
+                        html += '</div>';
                         html += '</div>';
                         html += '<div class="signal-indicator">';
                         html += '<div class="signal-light ' + signalClass + '" title="Signal: ' + (device.rssi === -99 ? 'No Data' : device.rssi + ' dBm') + '"></div>';
                         html += '</div>';
                         html += '</div>';
                         
-                        html += '<div>';
-                        html += '<input type="text" class="form-input" id="name_' + index + '" placeholder="Enter device name" value="' + (device.name || '') + '" style="margin-bottom: 1rem;">';
-                        html += '</div>';
-                        
                         html += '<div class="device-actions">';
-                        html += '<button onclick="setDeviceName(\'' + device.mac + '\', ' + index + ')" class="btn btn-primary">Set Name</button>';
                         html += '<button onclick="togglePriority(\'' + device.mac + '\')" class="btn btn-secondary">';
                         html += device.priority ? 'Remove Priority' : 'Set Priority';
                         html += '</button>';
@@ -1411,28 +1429,40 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
         }
 
-        async function setDeviceName(mac, index) {
-            const nameInput = document.getElementById('name_' + index);
-            const name = nameInput.value.trim();
-            
-            if (!name) {
-                showNotification('Please enter a device name', 'error');
+        async function renameBluetoothDevice(mac, newName) {
+            // Validate name
+            if (!newName || newName.trim().length === 0) {
+                showNotification('Device name cannot be empty', 'error');
                 return;
             }
             
+            if (newName.length > 32) {
+                showNotification('Device name too long (max 32 characters)', 'error');
+                return;
+            }
+            
+            console.log('Renaming Bluetooth device:', mac, 'to:', newName.trim());
+            
             try {
-                const response = await fetchWithTimeout('/setname', {
+                const response = await fetchWithTimeout('/bluetooth_rename', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mac, name })
-                });
+                    body: JSON.stringify({ mac: mac, name: newName.trim() })
+                }, 10000); // Longer timeout for rename operations
                 
-                if (!response.ok) throw new Error('Network response was not ok');
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('Bluetooth rename failed:', response.status, errorText);
+                    throw new Error(`Server error: ${errorText}`);
+                }
                 
-                showNotification('Device name updated successfully');
-                await updateDevices();
+                console.log('Bluetooth device renamed successfully');
+                showNotification('Bluetooth device renamed successfully');
+                // No reload - name is already updated in the input field
             } catch (error) {
-                showNotification('Error setting device name: ' + error.message, 'error');
+                console.error('Bluetooth rename error:', error);
+                showNotification('Error renaming device: ' + error.message, 'error');
+                // Don't reload on error to preserve user's typing
             }
         }
 
@@ -2064,7 +2094,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                     const activeSection = document.querySelector('.content-section.active');
                     if (activeSection && activeSection.id === 'bluetoothSection') {
                         loadBluetoothStatus();
-                        updateDevices();
+                        // Don't refresh device list to avoid interrupting typing
                         updateCalibrationStatus();
                         // Also update plotting if active
                         if (isPlotting) {
@@ -2180,6 +2210,10 @@ const char config_html[] PROGMEM = R"rawliteral(
                         </div>
                     </div>
                     
+                    <div id="devicesList">
+                        <div class="card">Loading devices...</div>
+                    </div>
+                    
                     <div class="card">
                         <h2 class="card-title"> Proximity Calibration</h2>
                         <div style="margin-bottom: 1.5rem;">
@@ -2218,10 +2252,6 @@ const char config_html[] PROGMEM = R"rawliteral(
                                 4. System will automatically calculate the optimal offset
                             </p>
                         </div>
-                    </div>
-                    
-                    <div id="devicesList">
-                        <div class="card">Loading devices...</div>
                     </div>
                     
                     <!-- Developer Testing Toggle -->
@@ -2363,18 +2393,6 @@ const char config_html[] PROGMEM = R"rawliteral(
                     
                     <div class="card">
                         <h2 class="card-title">RFID Key Management</h2>
-                        
-                        <!-- RFID Status -->
-                        <div class="status-grid" style="margin-bottom: 2rem;">
-                            <div class="status-item">
-                                <div class="status-label">RFID Status</div>
-                                <div class="status-value" id="rfidStatus">Loading...</div>
-                            </div>
-                            <div class="status-item">
-                                <div class="status-label">Stored Keys</div>
-                                <div class="status-value" id="storedKeys">Loading...</div>
-                            </div>
-                        </div>
                         
                         <div style="margin-bottom: 2rem;">
                             <button onclick="toggleRfidPairing()" class="btn btn-primary">Toggle RFID Pairing Mode</button>

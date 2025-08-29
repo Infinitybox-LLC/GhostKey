@@ -2552,12 +2552,12 @@ void handleButtonPress() {
                 if (engineRunning) {
                     // If engine is running, only allow turning off
                     DEBUG_PRINTLN("Engine sequence stopped");
-                    engineRunning = false;
                     systemState = 0;  // Set to OFF
                     startRelayActive = false;
                     lastEngineShutdown = millis();  // Record time of engine shutdown
                     controlRelays();
-                } else if (!startRelayActive) {
+                    engineRunning = false;
+                } else if (!startRelayActive && !engineRunning) {
                     // Only allow starting sequence if engine is not running and not already starting
                     DEBUG_PRINTLN("Starting engine sequence...");
                     startRelayActive = true;
@@ -2568,9 +2568,9 @@ void handleButtonPress() {
                 DEBUG_BUTTON_PRINTLN("Not authenticated (Bluetooth) - Access denied");
                 // Error feedback
                 for (int i = 0; i < 3; i++) {
-                    digitalWrite(LED_PIN, HIGH);
+                    digitalWrite(BUTTON_LED_PIN, HIGH);
                     delay(50);
-                    digitalWrite(LED_PIN, LOW);
+                    digitalWrite(BUTTON_LED_PIN, LOW);
                     delay(50);
                 }
             }
@@ -4157,6 +4157,13 @@ void updateBluetoothAuthentication() {
                     connectedDeviceAddr[0], connectedDeviceAddr[1], connectedDeviceAddr[2],
                     connectedDeviceAddr[3], connectedDeviceAddr[4], connectedDeviceAddr[5], rssi);
             }
+        } else {
+            // Show which device we're currently tracking for analysis
+            if (rssiAnalysis.hasDevice) {
+                Serial.printf("Auth lost - Currently tracking: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                             rssiAnalysis.deviceAddress[0], rssiAnalysis.deviceAddress[1], rssiAnalysis.deviceAddress[2],
+                             rssiAnalysis.deviceAddress[3], rssiAnalysis.deviceAddress[4], rssiAnalysis.deviceAddress[5]);
+            }
         }
     }
 }
@@ -4375,24 +4382,36 @@ void checkFactoryReset() {
     bool startPressed = (digitalRead(BUTTON_PIN) == LOW);
     bool brakePressed = (digitalRead(BRAKE_PIN) == LOW);
     
+    static unsigned long initialHoldStart = 0;
+    static bool initialHoldDetected = false;
+    
     if (startPressed && brakePressed) {
-        if (!factoryResetInProgress) {
-            factoryResetInProgress = true;
-            factoryResetStartTime = millis();
-            DEBUG_PRINTLN("Factory reset sequence started - hold for 30 seconds");
+        if (!initialHoldDetected) {
+            // Start tracking the initial hold
+            initialHoldDetected = true;
+            initialHoldStart = millis();
         } else {
-            unsigned long holdDuration = millis() - factoryResetStartTime;
-            if (holdDuration >= FACTORY_RESET_TIME) {
-                performFactoryReset();
-            } else {
-                // Visual feedback during reset sequence
-                static unsigned long lastFeedback = 0;
-                if (millis() - lastFeedback >= 1000) {
-                    digitalWrite(LED_PIN, !digitalRead(LED_PIN)); // Toggle LED
-                    DEBUG_PRINT("Factory reset in progress: ");
-                    DEBUG_PRINT((FACTORY_RESET_TIME - holdDuration) / 1000);
-                    DEBUG_PRINTLN(" seconds remaining");
-                    lastFeedback = millis();
+            unsigned long holdDuration = millis() - initialHoldStart;
+            
+            if (holdDuration >= 10000 && !factoryResetInProgress) {
+                // After 10 seconds, start the factory reset sequence
+                factoryResetInProgress = true;
+                factoryResetStartTime = millis();
+                DEBUG_PRINTLN("Factory reset sequence started - hold for 30 seconds");
+            } else if (factoryResetInProgress) {
+                unsigned long resetDuration = millis() - factoryResetStartTime;
+                if (resetDuration >= FACTORY_RESET_TIME) {
+                    performFactoryReset();
+                } else {
+                    // Visual feedback during reset sequence
+                    static unsigned long lastFeedback = 0;
+                    if (millis() - lastFeedback >= 1000) {
+                        digitalWrite(LED_PIN, !digitalRead(LED_PIN)); // Toggle LED
+                        DEBUG_PRINT("Factory reset in progress: ");
+                        DEBUG_PRINT((FACTORY_RESET_TIME - resetDuration) / 1000);
+                        DEBUG_PRINTLN(" seconds remaining");
+                        lastFeedback = millis();
+                    }
                 }
             }
         }
@@ -4401,6 +4420,10 @@ void checkFactoryReset() {
             factoryResetInProgress = false;
             digitalWrite(LED_PIN, LOW); // Turn off LED
             DEBUG_PRINTLN("Factory reset sequence cancelled");
+        }
+        if (initialHoldDetected) {
+            initialHoldDetected = false;
+            DEBUG_PRINTLN("Factory reset initial hold cancelled");
         }
     }
 }
@@ -4540,9 +4563,14 @@ void addRSSIReading(int8_t rssi, esp_bd_addr_t address) {
     if (!rssiAnalysis.hasDevice) {
         memcpy(rssiAnalysis.deviceAddress, address, sizeof(esp_bd_addr_t));
         rssiAnalysis.hasDevice = true;
+        Serial.printf("RSSI Analysis: Started tracking device %02x:%02x:%02x:%02x:%02x:%02x\n",
+                     address[0], address[1], address[2], address[3], address[4], address[5]);
     } else if (memcmp(rssiAnalysis.deviceAddress, address, sizeof(esp_bd_addr_t)) != 0) {
         // Different device - reset analysis
-        resetRSSIAnalysis();
+        Serial.printf("RSSI Analysis: Device switch detected! Old: %02x:%02x:%02x:%02x:%02x:%02x, New: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                     rssiAnalysis.deviceAddress[0], rssiAnalysis.deviceAddress[1], rssiAnalysis.deviceAddress[2],
+                     rssiAnalysis.deviceAddress[3], rssiAnalysis.deviceAddress[4], rssiAnalysis.deviceAddress[5],
+                     address[0], address[1], address[2], address[3], address[4], address[5]);
         memcpy(rssiAnalysis.deviceAddress, address, sizeof(esp_bd_addr_t));
         rssiAnalysis.hasDevice = true;
     }
@@ -5127,6 +5155,14 @@ void updatePowerManagement() {
             setPowerState(POWER_ACTIVE);
         }
         return;  // Don't do any other power management in config mode
+    }
+    
+    // If engine is running, always stay in POWER_ACTIVE for reliable operation
+    if (engineRunning) {
+        if (currentPowerState != POWER_ACTIVE) {
+            setPowerState(POWER_ACTIVE);
+        }
+        return;  // Don't do any other power management when engine is running
     }
     
     // Get current authentication state

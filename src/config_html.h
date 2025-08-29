@@ -910,7 +910,6 @@ const char config_html[] PROGMEM = R"rawliteral(
                     updateCalibrationStatus();
                     loadPlottingInterface(); // Load plotting interface when showing bluetooth
                 } else if (sectionName === 'rfid') {
-                    loadRfidStatus();
                     loadRfidKeys();
                     // Load RFID status and stored keys
                     loadSystemStatus().catch(error => {
@@ -1320,64 +1319,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
         }
 
-        // RFID Enable/Disable Functions
-        async function loadRfidStatus() {
-            try {
-                const response = await fetchWithTimeout('/rfid_status');
-                if (response.ok) {
-                    const data = await response.json();
-                    document.getElementById('rfidEnabled').checked = data.enabled;
-                    updateRfidUI(data.enabled);
-                }
-            } catch (error) {
-                console.error('Error loading RFID status:', error);
-            }
-        }
-
-        async function toggleRfidEnabled() {
-            const enabled = document.getElementById('rfidEnabled').checked;
-            
-            try {
-                const response = await fetchWithTimeout('/rfid_toggle', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ enabled: enabled })
-                });
-                
-                if (!response.ok) throw new Error('Network response was not ok');
-                
-                const message = enabled ? 'RFID enabled.' : 'RFID disabled.';
-                showNotification(message);
-                updateRfidUI(enabled);
-                
-            } catch (error) {
-                // Revert toggle on error
-                document.getElementById('rfidEnabled').checked = !enabled;
-                showNotification('Error updating RFID setting: ' + error.message, 'error');
-            }
-        }
-
-        function updateRfidUI(enabled) {
-            const pairingButton = document.querySelector('button[onclick="toggleRfidPairing()"]');
-            const keysList = document.getElementById('rfidKeysList');
-            
-            if (enabled) {
-                pairingButton.disabled = false;
-                pairingButton.style.opacity = '1';
-                if (keysList) {
-                    keysList.style.opacity = '1';
-                    keysList.style.pointerEvents = 'auto';
-                }
-            } else {
-                pairingButton.disabled = true;
-                pairingButton.style.opacity = '0.5';
-                if (keysList) {
-                    keysList.style.opacity = '0.5';
-                    keysList.style.pointerEvents = 'none';
-                    keysList.innerHTML = '<div class="card"><p style="color: #888;">RFID is disabled. Enable RFID above to manage keys.</p></div>';
-                }
-            }
-        }
+        // RFID Management Functions (toggle removed - RFID always enabled)
 
         // Bluetooth Functions with timeout
         async function fetchWithTimeout(url, options = {}, timeout = 5000) {
@@ -1554,9 +1496,12 @@ const char config_html[] PROGMEM = R"rawliteral(
                     data.forEach((key, index) => {
                         html += '<div class="device-card">';
                         html += '<div class="device-header">';
-                        html += '<div>';
-                        html += '<div class="device-name">' + (key.name || 'RFID Key #' + (index + 1)) + '</div>';
-                        html += '<div class="device-mac">' + key.id + '</div>';
+                        html += '<div style="flex: 1;">';
+                        html += '<div class="device-name">';
+                        html += '<input type="text" value="' + (key.name || 'RFID Key #' + (index + 1)) + '" ';
+                        html += 'onblur="renameRfidKey(' + index + ', this.value)" ';
+                        html += 'style="background: transparent; border: 1px solid #ddd; padding: 8px 12px; border-radius: 4px; font-weight: bold; width: 100%; font-size: 1.1rem;">';
+                        html += '</div>';
                         html += '</div>';
                         html += '</div>';
                         
@@ -1607,6 +1552,35 @@ const char config_html[] PROGMEM = R"rawliteral(
                 await loadRfidKeys();
             } catch (error) {
                 showNotification('Error removing key: ' + error.message, 'error');
+            }
+        }
+
+        async function renameRfidKey(index, newName) {
+            // Validate name
+            if (!newName || newName.trim().length === 0) {
+                showNotification('Key name cannot be empty', 'error');
+                return;
+            }
+            
+            if (newName.length > 32) {
+                showNotification('Key name too long (max 32 characters)', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetchWithTimeout('/rfid_rename', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ index: index, name: newName.trim() })
+                });
+                
+                if (!response.ok) throw new Error('Network response was not ok');
+                
+                showNotification('RFID key renamed successfully');
+                // No reload - name is already updated in the input field
+            } catch (error) {
+                showNotification('Error renaming key: ' + error.message, 'error');
+                // Don't reload on error to preserve user's typing
             }
         }
 
@@ -2107,8 +2081,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                         loadSystemStatus();
                         loadSystemConfig(); // Refresh system toggles
                     } else if (activeSection && activeSection.id === 'rfidSection') {
-                        loadRfidStatus();
-                        loadRfidKeys();
+                        // Only refresh system status, not RFID keys (to avoid interrupting typing)
                         loadSystemStatus(); // For RFID status and stored keys
                     } else if (activeSection && activeSection.id === 'securitySection') {
                         // Settings section - only load passwords
@@ -2383,18 +2356,9 @@ const char config_html[] PROGMEM = R"rawliteral(
                 <section class="content-section" id="rfidSection">
                     <div class="card">
                         <h2 class="card-title">RFID Configuration</h2>
-                        <div class="form-group" style="margin-bottom: 2rem;">
-                            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
-                                <label class="form-label" for="rfidEnabled" style="margin-bottom: 0;">Enable RFID Authentication</label>
-                                <label class="toggle-switch">
-                                    <input type="checkbox" id="rfidEnabled" onchange="toggleRfidEnabled()">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
-                                When disabled, RFID authentication will be completely turned off to save power and improve security. Changes take effect immediately.
-                            </p>
-                        </div>
+                        <p style="font-size: 0.9rem; color: #666; margin-bottom: 2rem;">
+                            RFID authentication is always enabled. Use the controls below to manage your RFID keys.
+                        </p>
                     </div>
                     
                     <div class="card">

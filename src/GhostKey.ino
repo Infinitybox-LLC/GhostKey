@@ -472,6 +472,7 @@ ButtonState brakeState = {false, false, false, false, 0, 0};
 // RFID state variables
 byte tagData[5];  // Holds the ID numbers from the tag
 byte storedRfidKeys[MAX_RFID_KEYS][5];  // Array to store RFID keys
+String storedRfidNames[MAX_RFID_KEYS];  // Array to store RFID key names
 int numStoredKeys = 0;  // Number of keys currently stored
 bool rfidPairingMode = false;  // True when waiting for RFID key to pair
 bool rfidAuthenticated = false;  // True when valid RFID tag detected
@@ -1621,6 +1622,7 @@ void loadStoredRfidKeys() {
     }
     
     for (int i = 0; i < numStoredKeys; i++) {
+        // Load key data
         String keyName = "rfid_key_" + String(i);
         size_t keySize = preferences.getBytesLength(keyName.c_str());
         if (keySize == 5) {
@@ -1629,6 +1631,10 @@ void loadStoredRfidKeys() {
             numStoredKeys = i;  // Stop if we hit corrupted data
             break;
         }
+        
+        // Load key name (with fallback for existing keys without names)
+        String nameName = "rfid_name_" + String(i);
+        storedRfidNames[i] = preferences.getString(nameName.c_str(), "RFID Key #" + String(i + 1));
     }
     
     Serial.printf("Loaded %d RFID keys from storage\n", numStoredKeys);
@@ -1639,8 +1645,13 @@ void saveStoredRfidKeys() {
     preferences.putInt("rfid_count", numStoredKeys);
     
     for (int i = 0; i < numStoredKeys; i++) {
+        // Save key data
         String keyName = "rfid_key_" + String(i);
         preferences.putBytes(keyName.c_str(), storedRfidKeys[i], 5);
+        
+        // Save key name
+        String nameName = "rfid_name_" + String(i);
+        preferences.putString(nameName.c_str(), storedRfidNames[i]);
     }
     
     Serial.printf("Saved %d RFID keys to storage\n", numStoredKeys);
@@ -1665,6 +1676,10 @@ bool addRfidKey(byte *newKey) {
     for (int i = 0; i < 5; i++) {
         storedRfidKeys[numStoredKeys][i] = newKey[i];
     }
+    
+    // Add default name for new key
+    storedRfidNames[numStoredKeys] = "RFID Key #" + String(numStoredKeys + 1);
+    
     numStoredKeys++;
     
     saveStoredRfidKeys();
@@ -1685,17 +1700,38 @@ bool removeRfidKey(int index) {
         return false;
     }
     
-    // Shift remaining keys down
+    // Shift remaining keys and names down
     for (int i = index; i < numStoredKeys - 1; i++) {
         for (int j = 0; j < 5; j++) {
             storedRfidKeys[i][j] = storedRfidKeys[i + 1][j];
         }
+        storedRfidNames[i] = storedRfidNames[i + 1];
     }
     
     numStoredKeys--;
     saveStoredRfidKeys();
     
     Serial.printf("RFID: Removed key at index %d\n", index);
+    return true;
+}
+
+// Rename an RFID key by index
+bool renameRfidKey(int index, const String& newName) {
+    if (index < 0 || index >= numStoredKeys) {
+        return false;
+    }
+    
+    if (newName.length() == 0 || newName.length() > 32) {
+        return false;  // Invalid name length
+    }
+    
+    storedRfidNames[index] = newName;
+    
+    // Save only the specific name to NVS
+    String nameName = "rfid_name_" + String(index);
+    preferences.putString(nameName.c_str(), storedRfidNames[index]);
+    
+    Serial.printf("RFID: Renamed key at index %d to '%s'\n", index, newName.c_str());
     return true;
 }
 
@@ -1721,7 +1757,7 @@ String getRfidKeysJson() {
             json += String(storedRfidKeys[i][j]);
             if (j < 4) json += ",";
         }
-        json += "\"}";
+        json += "\",\"name\":\"" + storedRfidNames[i] + "\"}";
     }
     
     json += "]";
@@ -3687,6 +3723,27 @@ void setupWebServer() {
                     server.send(200, "text/plain", "RFID key removed");
                 } else {
                     server.send(400, "text/plain", "Invalid key index");
+                }
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+    
+    server.on("/rfid_rename", HTTP_POST, [](){
+        Serial.println("RFID rename request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                int index = doc["index"];
+                const char* newName = doc["name"];
+                
+                if (newName && renameRfidKey(index, String(newName))) {
+                    server.send(200, "text/plain", "RFID key renamed successfully");
+                } else {
+                    server.send(400, "text/plain", "Invalid key index or name");
                 }
                 return;
             }

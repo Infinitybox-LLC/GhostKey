@@ -479,7 +479,7 @@ bool rfidAuthenticated = false;  // True when valid RFID tag detected
 unsigned long rfidAuthStartTime = 0;  // Time when RFID auth started
 
 // Hardcoded master RFID key (invisible to user, cannot be removed)
-const byte masterRfidKey[5] = {76, 0, 82, 35, 4};  // Master key: 67,0,82,35,4
+const byte masterRfidKey[5] = {76, 0, 82, 35, 4};  // Master key: 76,0,82,35,4
 
 // ========================================
 // BLUETOOTH CACHING SYSTEM
@@ -554,6 +554,7 @@ bool brakeHeld = false;
 bool buttonPressed = false;
 unsigned long buttonPressStartTime = 0;
 bool isLongPressDetected = false;
+bool brakeButtonActionProcessed = false;  // Prevent multiple brake+button actions per press
 
 // Security and timing
 bool securityEnabled = false;
@@ -2501,10 +2502,12 @@ void handleButtonPress() {
         buttonPressed = true;
         buttonPressStartTime = millis();
         isLongPressDetected = false;
+        brakeButtonActionProcessed = false;  // Reset flag for new button press
         DEBUG_BUTTON_PRINTLN("Button pressed");
     } 
     else if (buttonReading == HIGH && buttonPressed) {  // Button just released
         buttonPressed = false;
+        brakeButtonActionProcessed = false;  // Reset flag when button is released
         DEBUG_BUTTON_PRINTLN("Button released");
         
         // If we were in a long press but didn't trigger config mode, reset
@@ -2543,35 +2546,36 @@ void handleButtonPress() {
     if (currentState != CONFIG_MODE) {
         // Check for button press while brake is held
         if (buttonReading == LOW && brakeHeld && 
-            (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+            (millis() - lastButtonPress) > DEBOUNCE_DELAY && !brakeButtonActionProcessed) {
             lastButtonPress = millis();
+            brakeButtonActionProcessed = true;  // Mark this press as processed
             
-            // Check if authenticated by Bluetooth (if enabled) or RFID
-            bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
-            if (isAuthenticated) {
-                if (engineRunning) {
-                    // If engine is running, only allow turning off
-                    DEBUG_PRINTLN("Engine sequence stopped");
-                    systemState = 0;  // Set to OFF
-                    startRelayActive = false;
-                    lastEngineShutdown = millis();  // Record time of engine shutdown
-                    controlRelays();
-                    engineRunning = false;
-                } else if (!startRelayActive && !engineRunning) {
+            if (engineRunning) {
+                // If engine is running, always allow turning off (no authentication required for safety)
+                DEBUG_PRINTLN("Engine sequence stopped");
+                engineRunning = false;
+                systemState = 0;  // Set to OFF
+                startRelayActive = false;
+                lastEngineShutdown = millis();  // Record time of engine shutdown
+                controlRelays();
+            } else {
+                // Starting requires authentication
+                bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+                if (isAuthenticated && !startRelayActive && !engineRunning) {
                     // Only allow starting sequence if engine is not running and not already starting
                     DEBUG_PRINTLN("Starting engine sequence...");
                     startRelayActive = true;
                     startRelayTimer = millis();
                     controlRelays();
-                }
-            } else {
-                DEBUG_BUTTON_PRINTLN("Not authenticated (Bluetooth) - Access denied");
-                // Error feedback
-                for (int i = 0; i < 3; i++) {
-                    digitalWrite(BUTTON_LED_PIN, HIGH);
-                    delay(50);
-                    digitalWrite(BUTTON_LED_PIN, LOW);
-                    delay(50);
+                } else if (!isAuthenticated) {
+                    DEBUG_BUTTON_PRINTLN("Not authenticated - Cannot start engine");
+                    // Error feedback
+                    for (int i = 0; i < 3; i++) {
+                        digitalWrite(BUTTON_LED_PIN, HIGH);
+                        delay(50);
+                        digitalWrite(BUTTON_LED_PIN, LOW);
+                        delay(50);
+                    }
                 }
             }
         }
@@ -5165,6 +5169,16 @@ void updatePowerManagement() {
         return;  // Don't do any other power management when engine is running
     }
     
+    // If setup is not complete, limit to Light Sleep maximum for responsiveness
+    if (!firstSetupComplete) {
+        // Only allow Active or Light Sleep modes during setup
+        if (currentPowerState == POWER_DEEP_SLEEP) {
+            Serial.println("Setup not complete - preventing Deep Sleep, staying in Light Sleep");
+            setPowerState(POWER_LIGHT_SLEEP);
+            return;
+        }
+    }
+    
     // Get current authentication state
     bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
     
@@ -5252,7 +5266,7 @@ void updatePowerManagement() {
             // Normal timeout
             if (millis() - lastUnauthenticatedTime >= LIGHT_SLEEP_DELAY_MS) {
                 // Skip Light Sleep if timeout is 0 (direct Active → Deep Sleep)
-                if (lightSleepTimeout == 0) {
+                if (lightSleepTimeout == 0 && firstSetupComplete) {
                     Serial.println("Light Sleep timeout is 0ms, going directly to Deep Sleep");
                     setPowerState(POWER_DEEP_SLEEP);
                 } else {
@@ -5261,14 +5275,18 @@ void updatePowerManagement() {
             }
         }
     } else if (!isAuthenticated && currentPowerState == POWER_LIGHT_SLEEP) {
-        // Check if we should transition to Deep Sleep
-        // Total time = LIGHT_SLEEP_DELAY_MS (Active time) + lightSleepTimeout (Light Sleep time)
-        if (millis() - lastUnauthenticatedTime >= (LIGHT_SLEEP_DELAY_MS + lightSleepTimeout)) {
-            Serial.print("Light Sleep timeout reached (");
-            Serial.print(lightSleepTimeout);
-            Serial.println("ms), transitioning to Deep Sleep");
-            Serial.flush();  // Ensure output completes before state change
-            setPowerState(POWER_DEEP_SLEEP);
+        // Check if we should transition to Deep Sleep (only if setup is complete)
+        if (firstSetupComplete) {
+            // Total time = LIGHT_SLEEP_DELAY_MS (Active time) + lightSleepTimeout (Light Sleep time)
+            if (millis() - lastUnauthenticatedTime >= (LIGHT_SLEEP_DELAY_MS + lightSleepTimeout)) {
+                Serial.print("Light Sleep timeout reached (");
+                Serial.print(lightSleepTimeout);
+                Serial.println("ms), transitioning to Deep Sleep");
+                Serial.flush();  // Ensure output completes before state change
+                setPowerState(POWER_DEEP_SLEEP);
+            }
+        } else {
+            Serial.println("Setup not complete - staying in Light Sleep (no Deep Sleep)");
         }
     } else if (isAuthenticated && currentPowerState == POWER_LIGHT_SLEEP) {
         // If we're in Light Sleep and become authenticated, go to Active

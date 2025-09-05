@@ -907,7 +907,6 @@ const char config_html[] PROGMEM = R"rawliteral(
                 } else if (sectionName === 'bluetooth') {
                     loadBluetoothStatus();
                     updateDevices();
-                    updateCalibrationStatus();
                     loadPlottingInterface(); // Load plotting interface when showing bluetooth
                 } else if (sectionName === 'rfid') {
                     loadRfidKeys();
@@ -1674,98 +1673,32 @@ const char config_html[] PROGMEM = R"rawliteral(
                 
                 showNotification('Calibration started - keep your phone in position for 30 seconds');
                 
-                // Update UI
-                document.getElementById('startCalibrationBtn').disabled = true;
-                document.getElementById('stopCalibrationBtn').disabled = false;
+                // Update button text and disable
+                const btn = document.getElementById('startCalibrationBtn');
+                btn.disabled = true;
+                btn.textContent = 'Calibrating... (30s)';
                 
-                // Start status polling
-                calibrationInterval = setInterval(updateCalibrationStatus, 1000);
+                // Start simple countdown and auto-complete
+                let timeLeft = 30;
+                const countdownInterval = setInterval(() => {
+                    timeLeft--;
+                    btn.textContent = `Calibrating... (${timeLeft}s)`;
+                    
+                    if (timeLeft <= 0) {
+                        clearInterval(countdownInterval);
+                        // Calibration complete - show notification
+                        showNotification('Calibration completed successfully!', 'success');
+                        btn.disabled = false;
+                        btn.textContent = 'Start Calibration (30 seconds)';
+                    }
+                }, 1000);
                 
             } catch (error) {
                 showNotification('Error starting calibration: ' + error.message, 'error');
             }
         }
 
-        async function stopCalibration() {
-            try {
-                const response = await fetchWithTimeout('/calibration_stop', { method: 'POST' });
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    throw new Error(errorText);
-                }
-                
-                showNotification('Calibration stopped and offset calculated');
-                stopCalibrationPolling();
-                
-            } catch (error) {
-                showNotification('Error stopping calibration: ' + error.message, 'error');
-            }
-        }
-
-        async function resetCalibration() {
-            if (!confirm('Are you sure you want to reset calibration to default?')) {
-                return;
-            }
-            
-            try {
-                const response = await fetchWithTimeout('/calibration_reset', { method: 'POST' });
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    throw new Error(errorText);
-                }
-                
-                showNotification('Calibration reset to default');
-                updateCalibrationStatus();
-                
-            } catch (error) {
-                showNotification('Error resetting calibration: ' + error.message, 'error');
-            }
-        }
-
-        async function updateCalibrationStatus() {
-            try {
-                const response = await fetchWithTimeout('/calibration_status');
-                if (response.ok) {
-                    const data = await response.json();
-                    
-                    // Update status display
-                    document.getElementById('calibrationStatus').textContent = 
-                        data.isCalibrating ? 'Active' : 'Inactive';
-                    document.getElementById('calibrationOffset').textContent = 
-                        data.offset.toFixed(1);
-                    document.getElementById('calibrationSamples').textContent = 
-                        data.sampleCount;
-                    
-                    if (data.isCalibrating) {
-                        const timeRemaining = Math.ceil(data.timeRemaining / 1000);
-                        document.getElementById('calibrationTimer').textContent = 
-                            timeRemaining + 's';
-                        
-                        // Auto-stop when complete
-                        if (data.timeRemaining <= 0) {
-                            stopCalibrationPolling();
-                            showNotification('Calibration completed automatically');
-                        }
-                    } else {
-                        document.getElementById('calibrationTimer').textContent = '--';
-                        stopCalibrationPolling();
-                    }
-                }
-            } catch (error) {
-                console.error('Error updating calibration status:', error);
-            }
-        }
-
-        function stopCalibrationPolling() {
-            if (calibrationInterval) {
-                clearInterval(calibrationInterval);
-                calibrationInterval = null;
-            }
-            
-            // Reset UI
-            document.getElementById('startCalibrationBtn').disabled = false;
-            document.getElementById('stopCalibrationBtn').disabled = true;
-        }
+        // Simplified calibration - no longer needed functions removed
 
         // Update confidence monitoring UI
         function updateConfidenceUI(data) {
@@ -2129,7 +2062,6 @@ const char config_html[] PROGMEM = R"rawliteral(
                     if (activeSection && activeSection.id === 'bluetoothSection') {
                         loadBluetoothStatus();
                         // Don't refresh device list to avoid interrupting typing
-                        updateCalibrationStatus();
                         // Also update plotting if active
                         if (isPlotting) {
                             // Plotting updates are handled in the plotting interval
@@ -2286,42 +2218,14 @@ const char config_html[] PROGMEM = R"rawliteral(
                     </div>
                     
                     <div class="card">
-                        <h2 class="card-title"> Proximity Calibration</h2>
+                        <h2 class="card-title">Proximity Calibration</h2>
                         <div style="margin-bottom: 1.5rem;">
-                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+                            <p style="font-size: 0.9rem; color: #666; margin-bottom: 1.5rem;">
                                 Calibrate the system for your specific installation. Position your phone where you want authentication to work, then run calibration.
                             </p>
-                            <div style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
-                                <button onclick="startCalibration()" class="btn btn-primary" id="startCalibrationBtn">
-                                    Start Calibration
-                                </button>
-                                <button onclick="stopCalibration()" class="btn btn-secondary" id="stopCalibrationBtn" disabled>
-                                    ⏹️ Stop Early
-                                </button>
-                                <button onclick="resetCalibration()" class="btn btn-secondary">
-                                    🔄 Reset to Default
-                                </button>
-                            </div>
-                            <div style="background: #f8f9ff; padding: 1rem; border-radius: 12px;">
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
-                                    <span>Calibration Status:</span>
-                                    <span id="calibrationStatus">Inactive</span>
-                                </div>
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
-                                    <span>Current Offset:</span>
-                                    <span id="calibrationOffset">0.0</span>
-                                </div>
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
-                                    <span>Time Remaining:</span>
-                                    <span id="calibrationTimer">--</span>
-                                </div>
-                            <p style="font-size: 0.8rem; color: #666; margin-top: 1rem;">
-                                <strong>Instructions:</strong><br>
-                                1. Position your phone where you want authentication to work<br>
-                                2. Click "Start Calibration" and keep your phone in position<br>
-                                3. Wait 30 seconds for data collection to complete<br>
-                                4. System will automatically calculate the optimal offset
-                            </p>
+                            <button onclick="startCalibration()" class="btn btn-primary" id="startCalibrationBtn">
+                                Start Calibration (30 seconds)
+                            </button>
                         </div>
                     </div>
                     
@@ -2442,11 +2346,11 @@ const char config_html[] PROGMEM = R"rawliteral(
                                 <option value="0.1">0.1 seconds</option>
                                 <option value="0.3">0.3 seconds</option>
                                 <option value="0.5">0.5 seconds</option>
-                                <option value="0.7">0.7 seconds</option>
+                                <option value="0.7" selected>0.7 seconds (Default)</option>
                                 <option value="0.9">0.9 seconds</option>
                                 <option value="1.1">1.1 seconds</option>
                                 <option value="1.3">1.3 seconds</option>
-                                <option value="1.5" selected>1.5 seconds (Default)</option>
+                                <option value="1.5">1.5 seconds</option>
                                 <option value="1.7">1.7 seconds</option>
                                 <option value="1.9">1.9 seconds</option>
                                 <option value="2.1">2.1 seconds</option>

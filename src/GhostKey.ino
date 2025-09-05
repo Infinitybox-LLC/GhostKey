@@ -162,7 +162,7 @@ const char manifest_json[] PROGMEM = R"({
 // ========================================
 #define CONFIG_MODE_TIMEOUT 30000
 #define AUTO_LOCK_TIMEOUT 30000
-#define STARTER_PULSE_TIME 1500
+#define STARTER_PULSE_TIME 700
 #define DEBOUNCE_DELAY 50
 #define LONG_PRESS_TIME 30000
 #define BUTTON_LED_BLINK_RATE 500

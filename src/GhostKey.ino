@@ -3721,6 +3721,7 @@ void setupWebServer() {
         json += "\"autoLockTimeout\":" + String(autoLockTimeout);
         json += "}";
         
+        server.sendHeader("Connection", "close");
         server.send(200, "application/json", json);
     });
     
@@ -3730,10 +3731,12 @@ void setupWebServer() {
         if (!validateWebSessionOrSendError()) return;
         
         if (!bluetoothEnabled || !bluetoothInitialized) {
+            server.sendHeader("Connection", "close");
             server.send(200, "application/json", "[]");
             return;
         }
         const char* json = getDevicesJson();
+        server.sendHeader("Connection", "close");
         server.send(200, "application/json", json);
     });
     
@@ -3971,6 +3974,7 @@ void setupWebServer() {
         hasNewBluetoothDevice = false;
         hasRemovedDevice = false;
         
+        server.sendHeader("Connection", "close");
         server.send(200, "application/json", json);
     });
     

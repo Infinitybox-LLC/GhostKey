@@ -1357,7 +1357,7 @@ const char config_html[] PROGMEM = R"rawliteral(
         // RFID Management Functions (toggle removed - RFID always enabled)
 
         // Bluetooth Functions with timeout
-        async function fetchWithTimeout(url, options = {}, timeout = 5000) {
+        async function fetchWithTimeout(url, options = {}, timeout = 10000) {  // Increased default timeout
             const controller = new AbortController();
             const id = setTimeout(() => controller.abort(), timeout);
             
@@ -1371,7 +1371,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             } catch (error) {
                 clearTimeout(id);
                 if (error.name === 'AbortError') {
-                    throw new Error('Request timed out');
+                    throw new Error('Request timed out - server may be overloaded');
                 }
                 throw error;
             }
@@ -1397,8 +1397,11 @@ const char config_html[] PROGMEM = R"rawliteral(
             }
             
             try {
-                const response = await fetchWithTimeout('/devices');
-                if (!response.ok) throw new Error('Network response was not ok');
+                // Show loading state
+                document.getElementById('devicesList').innerHTML = '<div class="card"><p>Loading devices...</p></div>';
+                
+                const response = await fetchWithTimeout('/devices', {}, 15000);  // Extended timeout for devices
+                if (!response.ok) throw new Error('Server returned ' + response.status);
                 
                 const data = await response.json();
                 let html = '';
@@ -1436,7 +1439,12 @@ const char config_html[] PROGMEM = R"rawliteral(
                 }
                 document.getElementById('devicesList').innerHTML = html;
             } catch (error) {
-                document.getElementById('devicesList').innerHTML = '<div class="card"><p>Error loading devices: ' + error.message + '</p></div>';
+                console.error('Device loading error:', error);
+                let errorMsg = 'Error loading devices: ' + error.message;
+                if (error.message.includes('timed out')) {
+                    errorMsg += '<br><small>Try refreshing the page or check your connection</small>';
+                }
+                document.getElementById('devicesList').innerHTML = '<div class="card"><p>' + errorMsg + '</p></div>';
             }
         }
 

@@ -278,8 +278,8 @@ enum PowerState {
 #define RFID_LIGHT_SLEEP_OFF_MS 500     // 500ms OFF time for RFID in light sleep
 #define RFID_DEEP_SLEEP_ON_MS 100       // 100ms ON time for RFID in deep sleep
 #define RFID_DEEP_SLEEP_OFF_MS 1000     // 1000ms OFF time for RFID in deep sleep
-#define BLE_DEEP_SLEEP_INTERVAL_MS 20000 // 20 second total cycle (10s quiet + 10s BLE)
-#define BLE_DEEP_SLEEP_DURATION_MS 10000 // 10 seconds of advertising in deep sleep
+#define BLE_DEEP_SLEEP_INTERVAL_MS 12000 // 12 second total cycle (4s quiet + 8s BLE)
+#define BLE_DEEP_SLEEP_DURATION_MS 8000  // 8 seconds of advertising in deep sleep
 
 // Button state tracking with debouncing
 struct ButtonState {
@@ -479,7 +479,7 @@ bool rfidAuthenticated = false;  // True when valid RFID tag detected
 unsigned long rfidAuthStartTime = 0;  // Time when RFID auth started
 
 // Hardcoded master RFID key (invisible to user, cannot be removed)
-const byte masterRfidKey[5] = {76, 0, 82, 35, 4};  // Master key: 76,0,82,35,4
+const byte masterRfidKey[5] = {67, 0, 25, 249, 64};  // Master key: 76,0,82,35,4
 
 // ========================================
 // BLUETOOTH CACHING SYSTEM
@@ -585,6 +585,13 @@ String ap_password = "123456789"; // Default password, will be loaded from prefe
 String web_password = "1234"; // Default web interface password, will be loaded from preferences
 bool wifiEnabled = false;
 
+// Web session management
+bool webSessionActive = false;
+unsigned long webSessionStartTime = 0;
+unsigned long lastWebActivity = 0;
+#define WEB_SESSION_TIMEOUT 600000  // 10 minutes in milliseconds
+#define WEB_ACTIVITY_TIMEOUT 300000  // 5 minutes of inactivity
+
 // More timing constants
 #define CONFIG_MODE_PRESS_TIME 10000
 #define STATUS_PRINT_INTERVAL 5000
@@ -611,6 +618,68 @@ float calibrationOffset = 0.0f; // Offset to add to confidence
 float calibrationRSSIReadings[MAX_CALIBRATION_SAMPLES];
 float calibrationConfidenceReadings[MAX_CALIBRATION_SAMPLES];
 int calibrationSampleCount = 0;
+
+// ========================================
+// WEB SESSION MANAGEMENT FUNCTIONS
+// ========================================
+
+// Start a new web session
+void startWebSession() {
+    webSessionActive = true;
+    webSessionStartTime = millis();
+    lastWebActivity = millis();
+    Serial.println("Web session started");
+}
+
+// Update last activity time
+void updateWebActivity() {
+    if (webSessionActive) {
+        lastWebActivity = millis();
+    }
+}
+
+// Check if web session is valid
+bool isWebSessionValid() {
+    if (!webSessionActive) {
+        return false;
+    }
+    
+    unsigned long currentTime = millis();
+    
+    // Check absolute session timeout (10 minutes)
+    if (currentTime - webSessionStartTime > WEB_SESSION_TIMEOUT) {
+        Serial.println("Web session expired (absolute timeout)");
+        endWebSession();
+        return false;
+    }
+    
+    // Check inactivity timeout (5 minutes)
+    if (currentTime - lastWebActivity > WEB_ACTIVITY_TIMEOUT) {
+        Serial.println("Web session expired (inactivity timeout)");
+        endWebSession();
+        return false;
+    }
+    
+    return true;
+}
+
+// End the current web session
+void endWebSession() {
+    webSessionActive = false;
+    webSessionStartTime = 0;
+    lastWebActivity = 0;
+    Serial.println("Web session ended");
+}
+
+// Helper function to check session and send error if invalid
+bool validateWebSessionOrSendError() {
+    if (!isWebSessionValid()) {
+        server.send(401, "text/plain", "Session expired - please log in again");
+        return false;
+    }
+    updateWebActivity();  // Update activity timestamp
+    return true;
+}
 
 // ========================================
 // BLUETOOTH FUNCTIONS
@@ -1875,7 +1944,7 @@ void setup() {
         Serial.printf("ESP32 Deep Sleep: Wake-up #%d from RTC timer (BLE window)\n", bootCount);
         
         // Gradual CPU frequency step-up for BLE operations
-        setCpuFrequencyMhz(80);   // BLE operations frequency
+        setCpuFrequencyMhz(60);   // BLE operations frequency with better power efficiency
         delay(50);
         
         // Start in deep sleep mode but with BLE window active
@@ -2737,6 +2806,12 @@ void triggerStartRelayPulse() {
 
 
 void enterConfigMode() {
+    // Check if already in config mode to prevent double-entry
+    if (currentState == CONFIG_MODE) {
+        DEBUG_PRINTLN("Already in configuration mode - ignoring request");
+        return;
+    }
+    
     // Check authentication before allowing config mode access
     bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
     if (!isAuthenticated) {
@@ -2746,8 +2821,14 @@ void enterConfigMode() {
     currentState = CONFIG_MODE;
     DEBUG_PRINTLN("Entering configuration mode");
     
-    // Initialize WiFi and web server
+    // Initialize WiFi and web server with error handling
     setupWiFi();
+    if (!wifiEnabled) {
+        DEBUG_PRINTLN("ERROR: WiFi setup failed - exiting config mode");
+        currentState = OFF;
+        return;
+    }
+    
     setupWebServer();
     
     // Visual feedback
@@ -2778,9 +2859,36 @@ void exitConfigMode() {
     // Disable pairing mode when exiting config
     disablePairingMode();
     
-    // Apply any WiFi password changes before stopping WiFi
+    // End web session
+    endWebSession();
+    
+    // Proper web server and WiFi cleanup
     if (wifiEnabled) {
+        DEBUG_PRINTLN("Cleaning up web server and WiFi resources...");
+        
+        // Gracefully handle any remaining client requests
+        DEBUG_PRINTLN("Processing remaining client requests...");
+        unsigned long gracefulShutdownStart = millis();
+        const unsigned long GRACEFUL_SHUTDOWN_TIMEOUT = 2000;  // 2 seconds max
+        
+        while (millis() - gracefulShutdownStart < GRACEFUL_SHUTDOWN_TIMEOUT) {
+            server.handleClient();
+            delay(50);  // Small delay to allow processing
+        }
+        DEBUG_PRINTLN("Client request processing completed");
+        
+        // Stop the web server (ESP32WebServer doesn't have explicit stop, but we clear state)
+        DEBUG_PRINTLN("Web server cleanup completed");
+        
+        // Gracefully disconnect WiFi AP with proper sequencing
+        DEBUG_PRINTLN("Disconnecting WiFi AP...");
         WiFi.softAPdisconnect(true);
+        delay(500);  // Give time for AP to disconnect properly
+        
+        DEBUG_PRINTLN("Setting WiFi to OFF mode...");
+        WiFi.mode(WIFI_OFF);
+        delay(200);  // Give time for WiFi stack to clean up
+        
         wifiEnabled = false;
         
         // Check if there's a new WiFi password and restart with it
@@ -2789,8 +2897,9 @@ void exitConfigMode() {
             DEBUG_PRINTLN("Applying WiFi password change on exit");
             ap_password = savedPassword;
         }
+        
+        DEBUG_PRINTLN("WiFi AP stopped and resources cleaned up");
     }
-    // Note: WebServer doesn't have an end() method, server stops when WiFi stops
     
     // Visual feedback
     digitalWrite(LED_PIN, HIGH);
@@ -2803,13 +2912,47 @@ void exitConfigMode() {
 
 void setupWiFi() {
     DEBUG_PRINTLN("Starting WiFi Access Point...");
-    WiFi.disconnect();  // Disconnect from any existing connections
-    WiFi.mode(WIFI_AP);  // Set WiFi to AP mode
-    WiFi.softAP(ap_ssid, ap_password.c_str());
     
+    // Ensure clean WiFi state before starting
+    WiFi.mode(WIFI_OFF);
+    delay(200);  // Give time for complete shutdown
+    
+    // Disconnect from any existing connections
+    WiFi.disconnect();
+    delay(100);
+    
+    // Set WiFi to AP mode with error checking
+    if (!WiFi.mode(WIFI_AP)) {
+        DEBUG_PRINTLN("ERROR: Failed to set WiFi to AP mode");
+        wifiEnabled = false;
+        return;
+    }
+    
+    // Start Access Point with error checking
+    if (!WiFi.softAP(ap_ssid, ap_password.c_str())) {
+        DEBUG_PRINTLN("ERROR: Failed to start WiFi Access Point");
+        DEBUG_PRINT("SSID: ");
+        DEBUG_PRINTLN(ap_ssid);
+        DEBUG_PRINT("Password length: ");
+        DEBUG_PRINTLN(ap_password.length());
+        wifiEnabled = false;
+        return;
+    }
+    
+    // Verify AP is running
+    delay(500);  // Give time for AP to start
     IPAddress IP = WiFi.softAPIP();
+    if (IP == IPAddress(0, 0, 0, 0)) {
+        DEBUG_PRINTLN("ERROR: WiFi AP started but no IP assigned");
+        wifiEnabled = false;
+        return;
+    }
+    
+    DEBUG_PRINTLN("WiFi Access Point started successfully");
     DEBUG_PRINT("AP IP address: ");
     DEBUG_PRINTLN(IP);
+    DEBUG_PRINT("WiFi SSID: ");
+    DEBUG_PRINTLN(ap_ssid);
     DEBUG_PRINT("WiFi password: ");
     DEBUG_PRINTLN(ap_password);
     
@@ -2827,12 +2970,25 @@ const char* getDevicesJson() {
         return cachedDevicesJson;
     }
     
-    // Build JSON directly into buffer to avoid heap fragmentation
+    // Initialize buffer with safety checks
+    memset(cachedDevicesJson, 0, sizeof(cachedDevicesJson));
     char* jsonPtr = cachedDevicesJson;
-    int remaining = sizeof(cachedDevicesJson) - 1;
+    int remaining = sizeof(cachedDevicesJson) - 10;  // Reserve 10 bytes for safety margin
     
-    // Start JSON array
+    // Validate buffer size
+    if (remaining < 50) {
+        Serial.println("ERROR: JSON buffer too small for basic operations");
+        strncpy(cachedDevicesJson, "[]", sizeof(cachedDevicesJson) - 1);
+        return cachedDevicesJson;
+    }
+    
+    // Start JSON array with bounds checking
     int written = snprintf(jsonPtr, remaining, "[");
+    if (written < 0 || written >= remaining) {
+        Serial.println("ERROR: Failed to write JSON array start");
+        strncpy(cachedDevicesJson, "[]", sizeof(cachedDevicesJson) - 1);
+        return cachedDevicesJson;
+    }
     jsonPtr += written; remaining -= written;
     
     if (bondedCount == 0) {
@@ -2849,7 +3005,13 @@ const char* getDevicesJson() {
         return cachedDevicesJson;
     }
     
-    for (int i = 0; i < bondedCount && remaining > 100; i++) {
+    for (int i = 0; i < bondedCount && remaining > 150; i++) {  // Increased minimum remaining bytes
+        // Ensure we have enough space for at least one complete device entry
+        if (remaining < 120) {
+            Serial.printf("WARNING: JSON buffer space low (%d bytes), truncating device list at %d devices\n", remaining, i);
+            break;
+        }
+        
         char mac[18];
         snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
                 bondedDevices[i].bd_addr[0], bondedDevices[i].bd_addr[1], bondedDevices[i].bd_addr[2],
@@ -2858,6 +3020,13 @@ const char* getDevicesJson() {
         char name[32] = "Unknown Device";
         getDeviceName(bondedDevices[i].bd_addr, name, sizeof(name));
         
+        // Sanitize device name to prevent JSON injection
+        for (int j = 0; j < strlen(name); j++) {
+            if (name[j] == '"' || name[j] == '\\' || name[j] < 32) {
+                name[j] = '_';  // Replace problematic characters
+            }
+        }
+        
         int8_t rssi = -99;
         float distance = 0.0;
         
@@ -2865,16 +3034,21 @@ const char* getDevicesJson() {
             distance = calculateDistance(rssi);
         }
         
-        // Build JSON object directly
+        // Build JSON object directly with enhanced bounds checking
         written = snprintf(jsonPtr, remaining, 
             "%s{\"mac\":\"%s\",\"name\":\"%s\",\"priority\":false,\"rssi\":%d,\"distance\":%.1f}",
             (i > 0) ? "," : "", mac, name, rssi, distance);
         
-        if (written > 0 && written < remaining) {
+        // Strict bounds checking
+        if (written < 0) {
+            Serial.println("ERROR: snprintf failed during JSON generation");
+            break;
+        } else if (written >= remaining) {
+            Serial.printf("WARNING: JSON entry too large (%d bytes), buffer full, truncating at device %d\n", written, i);
+            break;
+        } else {
             jsonPtr += written; 
             remaining -= written;
-        } else {
-            break; // Buffer full
         }
     }
     
@@ -3483,6 +3657,8 @@ void setupWebServer() {
     
     // System status endpoint
     server.on("/status", HTTP_GET, [](){
+        if (!validateWebSessionOrSendError()) return;
+        
         String stateStr;
         switch(currentState) {
             case OFF: stateStr = "OFF"; break;
@@ -3516,6 +3692,8 @@ void setupWebServer() {
     // Bluetooth devices endpoint
     server.on("/devices", HTTP_GET, [](){
         Serial.println("Bluetooth devices request received");
+        if (!validateWebSessionOrSendError()) return;
+        
         if (!bluetoothEnabled || !bluetoothInitialized) {
             server.send(200, "application/json", "[]");
             return;
@@ -3702,15 +3880,34 @@ void setupWebServer() {
                 const char* password = doc["password"];
                 
                 if (password && String(password) == web_password) {
+                    // Start new web session on successful login
+                    startWebSession();
                     server.send(200, "text/plain", "Password correct");
                     return;
                 } else {
+                    // End any existing session on failed login
+                    endWebSession();
                     server.send(401, "text/plain", "Invalid password");
                     return;
                 }
             }
         }
+        endWebSession();
         server.send(400, "text/plain", "Invalid request");
+    });
+    
+    // Session status endpoint
+    server.on("/session_status", HTTP_GET, [](){
+        if (isWebSessionValid()) {
+            updateWebActivity();
+            unsigned long remainingTime = WEB_SESSION_TIMEOUT - (millis() - webSessionStartTime);
+            unsigned long activityTime = WEB_ACTIVITY_TIMEOUT - (millis() - lastWebActivity);
+            String json = "{\"valid\":true,\"remainingTime\":" + String(remainingTime) + 
+                         ",\"activityTimeout\":" + String(activityTime) + "}";
+            server.send(200, "application/json", json);
+        } else {
+            server.send(200, "application/json", "{\"valid\":false}");
+        }
     });
     
     server.on("/update_web_password", HTTP_POST, [](){
@@ -3952,8 +4149,11 @@ void setupWebServer() {
 
     // Route for exiting config mode
     server.on("/exit", HTTP_POST, [](){
-        exitConfigMode();
+        // Send response first, then exit to avoid race condition
         server.send(200, "text/plain", "Exiting config mode...");
+        // Give time for response to be sent before shutting down WiFi
+        delay(1000);
+        exitConfigMode();
     });
 
     // Setup completion endpoint - marks first setup as complete
@@ -5405,15 +5605,15 @@ void setPowerState(PowerState newState) {
                 // Configure wake-up source: GPIO35 (start button) on LOW signal
                 esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
                 
-                // Configure timer wake-up for BLE windows (10 seconds)
-                esp_sleep_enable_timer_wakeup(10 * 1000000ULL); // 10 seconds in microseconds
+                // Configure timer wake-up for BLE windows (12 seconds)
+                esp_sleep_enable_timer_wakeup(12 * 1000000ULL); // 12 seconds in microseconds
                 
                 // Store deep sleep state in RTC memory
                 wasInDeepSleep = true;
                 deepSleepCycles++;
                 deepSleepEntryTime = millis();
                 
-                Serial.printf("ESP32 Deep Sleep: Cycle #%d, wake sources: Start button (GPIO35) + 10s timer\n", deepSleepCycles);
+                Serial.printf("ESP32 Deep Sleep: Cycle #%d, wake sources: Start button (GPIO35) + 12s timer\n", deepSleepCycles);
                 Serial.println("ESP32 Deep Sleep: Calling esp_deep_sleep_start() NOW...");
                 Serial.flush();
                 delay(200);
@@ -5511,17 +5711,17 @@ void handleDeepSleepBLE() {
     }
     
     if (!bleDeepSleepAdvertising) {
-        // Check if it's time to start advertising (fixed 10-second quiet period)
+        // Check if it's time to start advertising (fixed 4-second quiet period)
         if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_INTERVAL_MS - BLE_DEEP_SLEEP_DURATION_MS) {
             // Increase CPU frequency for BLE operations
-            setCpuFrequencyMhz(80);  // Higher speed for reliable BLE operations
+            setCpuFrequencyMhz(60);  // Balanced speed for reliable BLE operations with better power efficiency
             delay(50);  // Longer pause for proper stabilization
             
             // Re-initialize serial after frequency change
             Serial.begin(115200);
             delay(50);  // Allow serial to stabilize
             
-            // Start advertising and scanning for 10 seconds
+            // Start advertising and scanning for 8 seconds
             bleDeepSleepAdvertising = true;
             // DON'T reset bleDeepSleepAdvertiseStart - keep cycle timing intact
             bleAdvertisingStopped = false;  // Reset flag since we're advertising again
@@ -5534,7 +5734,7 @@ void handleDeepSleepBLE() {
             
             startBLEAdvertising(false);  // Normal advertising, not pairing mode
             startRSSIScan();  // Also start RSSI scanning
-            Serial.println("Deep Sleep: BLE window started (80MHz) - 20s fixed cycle");
+            Serial.println("Deep Sleep: BLE window started (80MHz) - 12s fixed cycle");
         } else {
             // Stop advertising and scanning only once when entering quiet period
             if (!bleAdvertisingStopped) {
@@ -5681,7 +5881,7 @@ void handleDeepSleepBLE() {
                 
                 // Configure wake-up sources
                 esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
-                esp_sleep_enable_timer_wakeup(10 * 1000000ULL);
+                esp_sleep_enable_timer_wakeup(12 * 1000000ULL);
                 
                 // Store deep sleep state in RTC memory
                 wasInDeepSleep = true;

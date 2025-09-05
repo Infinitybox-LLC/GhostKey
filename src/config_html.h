@@ -1003,15 +1003,41 @@ const char config_html[] PROGMEM = R"rawliteral(
                     storedKeysElement.textContent = data.keys || '0';
                 }
                 
-                // Update form values - convert from milliseconds to seconds
+                // Update form values - convert from milliseconds to seconds and select closest option
                 const pulseTimeElement = document.getElementById('pulseTime');
                 if (pulseTimeElement && data.starterPulse) {
-                    pulseTimeElement.value = (data.starterPulse / 1000).toFixed(1);
+                    const pulseTimeSeconds = (data.starterPulse / 1000).toFixed(1);
+                    // Find closest option in dropdown
+                    const options = pulseTimeElement.options;
+                    let closestOption = options[0];
+                    let minDiff = Math.abs(parseFloat(options[0].value) - parseFloat(pulseTimeSeconds));
+                    
+                    for (let i = 1; i < options.length; i++) {
+                        const diff = Math.abs(parseFloat(options[i].value) - parseFloat(pulseTimeSeconds));
+                        if (diff < minDiff) {
+                            minDiff = diff;
+                            closestOption = options[i];
+                        }
+                    }
+                    pulseTimeElement.value = closestOption.value;
                 }
                 
                 const autoLockTimeElement = document.getElementById('autoLockTime');
                 if (autoLockTimeElement && data.autoLockTimeout) {
-                    autoLockTimeElement.value = Math.round(data.autoLockTimeout / 1000);
+                    const autoLockSeconds = Math.round(data.autoLockTimeout / 1000);
+                    // Find closest option in dropdown
+                    const options = autoLockTimeElement.options;
+                    let closestOption = options[0];
+                    let minDiff = Math.abs(parseInt(options[0].value) - autoLockSeconds);
+                    
+                    for (let i = 1; i < options.length; i++) {
+                        const diff = Math.abs(parseInt(options[i].value) - autoLockSeconds);
+                        if (diff < minDiff) {
+                            minDiff = diff;
+                            closestOption = options[i];
+                        }
+                    }
+                    autoLockTimeElement.value = closestOption.value;
                 }
                 
                 // Load system configuration status
@@ -2119,6 +2145,43 @@ const char config_html[] PROGMEM = R"rawliteral(
                     }
                 }
             }, 15000);
+            
+            // Notification polling for automatic list updates and notifications
+            setInterval(async () => {
+                if (isAuthenticated) {
+                    try {
+                        const response = await fetch('/notifications');
+                        if (response.ok) {
+                            const data = await response.json();
+                            
+                            // Show notification if there's a new one
+                            if (data.hasNotification && data.message) {
+                                showNotification(data.message, data.type);
+                            }
+                            
+                            // Auto-refresh lists when changes detected
+                            const activeSection = document.querySelector('.content-section.active');
+                            
+                            // Refresh RFID keys list if new key added or device removed
+                            if ((data.hasNewRfidKey || data.hasRemovedDevice) && 
+                                activeSection && activeSection.id === 'rfidSection') {
+                                console.log('Auto-refreshing RFID keys list');
+                                loadRfidKeys();
+                            }
+                            
+                            // Refresh Bluetooth devices list if new device added or device removed
+                            if ((data.hasNewBluetoothDevice || data.hasRemovedDevice) && 
+                                activeSection && activeSection.id === 'bluetoothSection') {
+                                console.log('Auto-refreshing Bluetooth devices list');
+                                updateDevices();
+                            }
+                        }
+                    } catch (error) {
+                        // Silently handle notification polling errors
+                        console.log('Notification polling error (non-critical):', error);
+                    }
+                }
+            }, 3000);  // Check for notifications every 3 seconds
         });
     </script>
 </head>
@@ -2367,7 +2430,24 @@ const char config_html[] PROGMEM = R"rawliteral(
                         <h2 class="card-title">Starter Configuration</h2>
                         <div class="form-group">
                             <label class="form-label" for="pulseTime">Starter Crank Time (seconds)</label>
-                            <input type="number" id="pulseTime" class="form-input" min="0.1" max="3.0" step="0.1" value="0.7">
+                            <select id="pulseTime" class="form-input">
+                                <option value="0.1">0.1 seconds</option>
+                                <option value="0.3">0.3 seconds</option>
+                                <option value="0.5">0.5 seconds</option>
+                                <option value="0.7">0.7 seconds</option>
+                                <option value="0.9">0.9 seconds</option>
+                                <option value="1.1">1.1 seconds</option>
+                                <option value="1.3">1.3 seconds</option>
+                                <option value="1.5" selected>1.5 seconds (Default)</option>
+                                <option value="1.7">1.7 seconds</option>
+                                <option value="1.9">1.9 seconds</option>
+                                <option value="2.1">2.1 seconds</option>
+                                <option value="2.3">2.3 seconds</option>
+                                <option value="2.5">2.5 seconds</option>
+                                <option value="2.7">2.7 seconds</option>
+                                <option value="2.9">2.9 seconds</option>
+                                <option value="3.0">3.0 seconds</option>
+                            </select>
                             <button onclick="updatePulseTime()" class="btn btn-primary" style="margin-left: 1rem;">Update</button>
                         </div>
                     </div>
@@ -2376,7 +2456,17 @@ const char config_html[] PROGMEM = R"rawliteral(
                         <h2 class="card-title">Security Configuration</h2>
                         <div class="form-group">
                             <label class="form-label" for="autoLockTime">Auto-Lock Timeout (seconds)</label>
-                            <input type="number" id="autoLockTime" class="form-input" min="5" max="120" step="1" value="30">
+                            <select id="autoLockTime" class="form-input">
+                                <option value="5">5 seconds</option>
+                                <option value="20">20 seconds</option>
+                                <option value="30" selected>30 seconds (Default)</option>
+                                <option value="45">45 seconds</option>
+                                <option value="60">60 seconds (1 minute)</option>
+                                <option value="75">75 seconds</option>
+                                <option value="90">90 seconds</option>
+                                <option value="105">105 seconds</option>
+                                <option value="120">120 seconds (2 minutes)</option>
+                            </select>
                             <button onclick="updateAutoLock()" class="btn btn-primary" style="margin-left: 1rem;">Update</button>
                         </div>
                     </div>

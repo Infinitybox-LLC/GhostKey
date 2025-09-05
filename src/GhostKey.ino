@@ -592,6 +592,19 @@ unsigned long lastWebActivity = 0;
 #define WEB_SESSION_TIMEOUT 600000  // 10 minutes in milliseconds
 #define WEB_ACTIVITY_TIMEOUT 300000  // 5 minutes of inactivity
 
+// Web notification system for device/key operations
+struct WebNotification {
+    String message;
+    String type;  // "success", "error", "info"
+    unsigned long timestamp;
+    bool consumed;
+};
+
+WebNotification pendingNotification = {"", "", 0, true};
+bool hasNewRfidKey = false;
+bool hasNewBluetoothDevice = false;
+bool hasRemovedDevice = false;
+
 // More timing constants
 #define CONFIG_MODE_PRESS_TIME 10000
 #define STATUS_PRINT_INTERVAL 5000
@@ -679,6 +692,17 @@ bool validateWebSessionOrSendError() {
     }
     updateWebActivity();  // Update activity timestamp
     return true;
+}
+
+// Helper function to send web notifications
+void sendWebNotification(const String& message, const String& type) {
+    if (currentState == CONFIG_MODE && webSessionActive) {
+        pendingNotification.message = message;
+        pendingNotification.type = type;
+        pendingNotification.timestamp = millis();
+        pendingNotification.consumed = false;
+        Serial.println("Web notification queued: " + message);
+    }
 }
 
 // ========================================
@@ -1009,8 +1033,8 @@ void initializeBluetooth() {
     
     // Initialize BLE
     Serial.println("BLE: Initializing BLE Device...");
-    BLEDevice::init("Ghost-Key Secure");
-    Serial.println("BLE: Device initialized with name: Ghost-Key Secure");
+    BLEDevice::init("Ghost Key");
+    Serial.println("BLE: Device initialized with name: Ghost Key");
     
     // Set BLE power to maximum for better range
     Serial.println("BLE: Setting power levels...");
@@ -1249,6 +1273,14 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
                     addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
                 
                 hasConnectedDevice = true;
+                
+                // Check if this is a new device pairing (in pairing mode)
+                if (isPairingMode) {
+                    sendWebNotification("Bluetooth device paired successfully!", "success");
+                    hasNewBluetoothDevice = true;
+                    // Disable pairing mode after successful pairing
+                    disablePairingMode();
+                }
                 
                 // Visual feedback for successful authentication
                 for(int i = 0; i < 3; i++) {
@@ -2249,9 +2281,12 @@ void loop() {
         if (rfidPairingMode) {
             if (addRfidKey(tagData)) {
                 Serial.println("RFID: Key paired successfully!");
+                sendWebNotification("RFID key paired successfully!", "success");
+                hasNewRfidKey = true;
                 rfidPairingMode = false;
             } else {
                 Serial.println("RFID: Failed to pair key (already exists or storage full)");
+                sendWebNotification("Failed to pair RFID key (already exists or storage full)", "error");
             }
         }
         // Handle RFID authentication
@@ -3792,8 +3827,11 @@ void setupWebServer() {
                         esp_err_t err = esp_ble_remove_bond_device(address);
                         if (err == ESP_OK) {
                             invalidateDeviceCache();
+                            sendWebNotification("Bluetooth device removed successfully", "success");
+                            hasRemovedDevice = true;
                             server.send(200, "text/plain", "Device removed");
                         } else {
+                            sendWebNotification("Failed to remove Bluetooth device", "error");
                             server.send(500, "text/plain", "Failed to remove device");
                         }
                         return;
@@ -3910,6 +3948,32 @@ void setupWebServer() {
         }
     });
     
+    // Notification polling endpoint
+    server.on("/notifications", HTTP_GET, [](){
+        if (!validateWebSessionOrSendError()) return;
+        
+        String json = "{";
+        json += "\"hasNotification\":" + String(!pendingNotification.consumed ? "true" : "false") + ",";
+        json += "\"message\":\"" + pendingNotification.message + "\",";
+        json += "\"type\":\"" + pendingNotification.type + "\",";
+        json += "\"hasNewRfidKey\":" + String(hasNewRfidKey ? "true" : "false") + ",";
+        json += "\"hasNewBluetoothDevice\":" + String(hasNewBluetoothDevice ? "true" : "false") + ",";
+        json += "\"hasRemovedDevice\":" + String(hasRemovedDevice ? "true" : "false");
+        json += "}";
+        
+        // Mark notification as consumed
+        if (!pendingNotification.consumed) {
+            pendingNotification.consumed = true;
+        }
+        
+        // Reset flags after they're read
+        hasNewRfidKey = false;
+        hasNewBluetoothDevice = false;
+        hasRemovedDevice = false;
+        
+        server.send(200, "application/json", json);
+    });
+    
     server.on("/update_web_password", HTTP_POST, [](){
         Serial.println("Web PIN update request received");
         if (server.hasArg("plain")) {
@@ -3989,6 +4053,8 @@ void setupWebServer() {
                 int index = doc["index"];
                 
                 if (removeRfidKey(index)) {
+                    sendWebNotification("RFID key removed successfully", "success");
+                    hasRemovedDevice = true;
                     server.send(200, "text/plain", "RFID key removed");
                 } else {
                     server.send(400, "text/plain", "Invalid key index");

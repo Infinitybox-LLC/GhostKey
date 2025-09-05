@@ -10,7 +10,7 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
-#include <BleKeyboard.h>
+#include <BleMouse.h>
 #include <nvs_flash.h>
 #include <esp_gap_ble_api.h>
 #include <esp_sleep.h>
@@ -461,7 +461,7 @@ unsigned long firstRfidReadCompleteTime = 0;
 bool firstRfidReadDone = false;
 
 // BLE objects
-BleKeyboard bleKeyboard("Ghost Key", "Jordan Distributors, Inc", 100);
+BleMouse bleMouse("Ghost Key", "Jordan Distributors, Inc", 100);
 BLEServer* pServer = nullptr;
 class MyServerCallbacks;
 
@@ -479,7 +479,7 @@ bool rfidAuthenticated = false;  // True when valid RFID tag detected
 unsigned long rfidAuthStartTime = 0;  // Time when RFID auth started
 
 // Hardcoded master RFID key (invisible to user, cannot be removed)
-const byte masterRfidKey[5] = {76, 0, 82, 35, 4};  // Master key: 76,0,82,35,4
+const byte masterRfidKey[5] = {67, 0, 25, 249, 64};  // Master key: 76,0,82,35,4
 
 // ========================================
 // BLUETOOTH CACHING SYSTEM
@@ -966,10 +966,10 @@ void initializeBluetooth() {
     pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
     Serial.println("BLE: Security configured with bonding");
     
-    // Start keyboard (this handles its own advertising)
-    Serial.println("BLE: Starting BLE Keyboard...");
-    bleKeyboard.begin();
-    Serial.println("BLE: Keyboard started");
+    // Start mouse (this handles its own advertising)
+    Serial.println("BLE: Starting BLE Mouse...");
+    bleMouse.begin();
+    Serial.println("BLE: Mouse started");
     
     // Register GAP callback for events
     esp_ble_gap_register_callback(onGapEvent);
@@ -1018,12 +1018,12 @@ void startBLEAdvertising(bool discoverable) {
         // Set up advertising for pairing mode - accept all devices
         pAdvertising->setAdvertisementType(esp_ble_adv_type_t::ADV_TYPE_IND);
         pAdvertising->setScanResponse(true);
-        pAdvertising->setAppearance(0x03C1);  // Keyboard appearance
+        pAdvertising->setAppearance(0x03C2);  // Mouse appearance
         
         // Create advertising data with proper flags for discoverability
         BLEAdvertisementData adv_data;
         adv_data.setFlags(0x06);  // General discoverable + BR/EDR not supported
-        adv_data.setCompleteServices(BLEUUID((uint16_t)0x1812)); // HID Service
+        adv_data.setCompleteServices(BLEUUID((uint16_t)0x1812)); // HID Service (Mouse)
         adv_data.setName("Ghost-Key Secure");
         pAdvertising->setAdvertisementData(adv_data);
         
@@ -1047,12 +1047,12 @@ void startBLEAdvertising(bool discoverable) {
         // Set up advertising for normal mode
         pAdvertising->setAdvertisementType(esp_ble_adv_type_t::ADV_TYPE_IND);
         pAdvertising->setScanResponse(true);
-        pAdvertising->setAppearance(0x03C1);  // Keyboard appearance
+        pAdvertising->setAppearance(0x03C2);  // Mouse appearance
         
         // Create advertising data with limited discoverability
         BLEAdvertisementData adv_data;
         adv_data.setFlags(0x05);  // Limited discoverable + BR/EDR not supported
-        adv_data.setCompleteServices(BLEUUID((uint16_t)0x1812)); // HID Service
+        adv_data.setCompleteServices(BLEUUID((uint16_t)0x1812)); // HID Service (Mouse)
         adv_data.setName("Ghost-Key Secure");
         pAdvertising->setAdvertisementData(adv_data);
         
@@ -2064,7 +2064,7 @@ void loop() {
     
     // Update BLE connection status (only if Bluetooth is enabled)
     if (bluetoothEnabled && bluetoothInitialized) {
-    isBleConnected = bleKeyboard.isConnected();
+    isBleConnected = bleMouse.isConnected();
     
     // RSSI scanning (only when needed and not in deep sleep quiet period)
     static unsigned long lastRSSIScan = 0;

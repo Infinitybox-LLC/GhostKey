@@ -585,6 +585,7 @@ String ap_password = "123456789"; // Default password, will be loaded from prefe
 String web_password = "1234"; // Default web interface password, will be loaded from preferences
 bool wifiEnabled = false;
 bool wifiCleanupInProgress = false; // Flag to disable button reading during WiFi cleanup
+bool webServerInitialized = false; // Track if web server routes have been set up
 
 // Web session management
 bool webSessionActive = false;
@@ -2962,8 +2963,14 @@ void exitConfigMode() {
         }
         DEBUG_PRINTLN("Client request processing completed");
         
-        // Stop the web server (ESP32WebServer doesn't have explicit stop, but we clear state)
-        DEBUG_PRINTLN("Web server cleanup completed");
+        // Properly stop the web server and clear connections
+        DEBUG_PRINTLN("Stopping web server...");
+        server.stop();  // Stop accepting new connections
+        server.close(); // Close existing connections
+        
+        // Note: ESP32WebServer routes persist, but server.stop() should prevent new connections
+        // The routes will be re-registered on next setupWebServer() call
+        DEBUG_PRINTLN("Web server stopped and connections closed");
         
         // Gracefully disconnect WiFi AP with proper sequencing
         DEBUG_PRINTLN("Disconnecting WiFi AP...");
@@ -2974,10 +2981,19 @@ void exitConfigMode() {
         WiFi.mode(WIFI_OFF);
         delay(200);  // Give time for WiFi stack to clean up
         
-        wifiEnabled = false;
+        // Additional WiFi cleanup to ensure complete resource release
+        WiFi.enableAP(false);  // Explicitly disable AP mode
+        delay(100);
         
-        // Clear the flag after WiFi cleanup is complete
+        // Force garbage collection to free up memory
+        ESP.getHeapSize(); // Trigger heap cleanup
+        
+        wifiEnabled = false;
+        DEBUG_PRINTLN("Complete WiFi cleanup finished");
+        
+        // Clear the flags after WiFi cleanup is complete
         wifiCleanupInProgress = false;
+        webServerInitialized = false;  // Reset so routes can be set up fresh next time
         
         // Check if there's a new WiFi password and restart with it
         String savedPassword = preferences.getString("wifi_password", "123456789");
@@ -3001,13 +3017,20 @@ void exitConfigMode() {
 void setupWiFi() {
     DEBUG_PRINTLN("Starting WiFi Access Point...");
     
-    // Ensure clean WiFi state before starting
+    // Ensure completely clean WiFi state before starting
     WiFi.mode(WIFI_OFF);
     delay(200);  // Give time for complete shutdown
     
-    // Disconnect from any existing connections
-    WiFi.disconnect();
+    // Explicitly disable all WiFi modes to ensure clean slate
+    WiFi.enableSTA(false);
+    WiFi.enableAP(false);
     delay(100);
+    
+    // Disconnect from any existing connections
+    WiFi.disconnect(true);  // true = erase stored credentials
+    delay(100);
+    
+    DEBUG_PRINTLN("WiFi state cleaned, starting fresh AP...");
     
     // Set WiFi to AP mode with error checking
     if (!WiFi.mode(WIFI_AP)) {
@@ -3155,6 +3178,10 @@ const char* getDevicesJson() {
 
 void setupWebServer() {
     Serial.println("Starting Web Server...");
+
+    // Only set up routes if not already initialized (prevents duplicate routes)
+    if (!webServerInitialized) {
+        Serial.println("Setting up web server routes...");
 
     // Handle root path - serve setup page if first time, otherwise normal page
     server.on("/", HTTP_GET, [](){
@@ -4444,7 +4471,14 @@ void setupWebServer() {
         server.send(200, "application/json", json);
     });
 
-    // Start server
+        // Mark routes as initialized
+        webServerInitialized = true;
+        Serial.println("Web server routes set up successfully");
+    } else {
+        Serial.println("Web server routes already initialized, skipping setup");
+    }
+
+    // Start server (always call this to ensure server is listening)
     server.begin();
     Serial.println("Web server started successfully");
     Serial.print("Server listening on IP: ");

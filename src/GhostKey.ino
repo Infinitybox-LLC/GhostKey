@@ -584,6 +584,7 @@ const char* ap_ssid = "Ghost Key Configuration";
 String ap_password = "123456789"; // Default password, will be loaded from preferences
 String web_password = "1234"; // Default web interface password, will be loaded from preferences
 bool wifiEnabled = false;
+bool wifiCleanupInProgress = false; // Flag to disable button reading during WiFi cleanup
 
 // Web session management
 bool webSessionActive = false;
@@ -2536,24 +2537,42 @@ void buzzerPulse(int duration_ms) {
 // Called from: main loop() when Ghost Key is disabled but Ghost Power is enabled
 // Links to: Allows config mode access without push-to-start functionality
 void handleConfigModeOnly() {
+    // Skip button reading during WiFi cleanup to prevent electrical interference
+    if (wifiCleanupInProgress) {
+        return;
+    }
+    
     bool buttonReading = digitalRead(BUTTON_PIN);
     bool brakeReading = digitalRead(BRAKE_PIN);
 
-    // Handle button press detection
-    if (buttonReading == LOW && !buttonPressed) {  // Button just pressed
-        buttonPressed = true;
-        buttonPressStartTime = millis();
-        isLongPressDetected = false;
-        DEBUG_BUTTON_PRINTLN("Button pressed (config mode only)");
-    } 
-    else if (buttonReading == HIGH && buttonPressed) {  // Button just released
-        buttonPressed = false;
-        DEBUG_BUTTON_PRINTLN("Button released (config mode only)");
-        
-        if (isLongPressDetected) {
+    // Handle button press detection with debouncing
+    static unsigned long buttonDebounceTime = 0;
+    static bool lastDebouncedButtonReading = HIGH;
+    
+    // Debounce the button reading
+    if (buttonReading != lastDebouncedButtonReading) {
+        buttonDebounceTime = millis();
+    }
+    
+    // Only process if the reading has been stable for the debounce period
+    if ((millis() - buttonDebounceTime) > DEBOUNCE_DELAY) {
+        if (buttonReading == LOW && !buttonPressed) {  // Button just pressed (debounced)
+            buttonPressed = true;
+            buttonPressStartTime = millis();
             isLongPressDetected = false;
+            DEBUG_BUTTON_PRINTLN("Button pressed (config mode only)");
+        } 
+        else if (buttonReading == HIGH && buttonPressed) {  // Button just released (debounced)
+            buttonPressed = false;
+            DEBUG_BUTTON_PRINTLN("Button released (config mode only)");
+            
+            if (isLongPressDetected) {
+                isLongPressDetected = false;
+            }
         }
     }
+    
+    lastDebouncedButtonReading = buttonReading;
 
     // Check for long press without brake - config mode can be accessed (authentication required)
     if (buttonPressed && !brakeHeld && !isLongPressDetected) {
@@ -2573,9 +2592,9 @@ void handleConfigModeOnly() {
     }
 
     // Check for start button press in config mode - always exit
-    if (currentState == CONFIG_MODE && 
-        buttonReading == LOW && lastButtonReading == HIGH && 
-        (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+    // Use proper state tracking instead of edge detection to prevent false triggers from electrical noise
+    if (currentState == CONFIG_MODE && buttonPressed && 
+        (millis() - lastButtonPress) > 2000) {
         DEBUG_BUTTON_PRINTLN("Start button pressed in config mode - Exiting config mode");
         exitConfigMode();
         lastButtonPress = millis();
@@ -2587,6 +2606,11 @@ void handleConfigModeOnly() {
 }
 
 void handleButtonPress() {
+    // Skip button reading during WiFi cleanup to prevent electrical interference
+    if (wifiCleanupInProgress) {
+        return;
+    }
+    
     bool buttonReading = digitalRead(BUTTON_PIN);
     bool brakeReading = digitalRead(BRAKE_PIN);
 
@@ -2601,24 +2625,37 @@ void handleButtonPress() {
         DEBUG_BUTTON_PRINTLN("Brake released");
     }
 
-    // Handle button press detection
-    if (buttonReading == LOW && !buttonPressed) {  // Button just pressed
-        buttonPressed = true;
-        buttonPressStartTime = millis();
-        isLongPressDetected = false;
-        brakeButtonActionProcessed = false;  // Reset flag for new button press
-        DEBUG_BUTTON_PRINTLN("Button pressed");
-    } 
-    else if (buttonReading == HIGH && buttonPressed) {  // Button just released
-        buttonPressed = false;
-        brakeButtonActionProcessed = false;  // Reset flag when button is released
-        DEBUG_BUTTON_PRINTLN("Button released");
-        
-        // If we were in a long press but didn't trigger config mode, reset
-        if (isLongPressDetected) {
+    // Handle button press detection with debouncing
+    static unsigned long buttonDebounceTime2 = 0;
+    static bool lastDebouncedButtonReading2 = HIGH;
+    
+    // Debounce the button reading
+    if (buttonReading != lastDebouncedButtonReading2) {
+        buttonDebounceTime2 = millis();
+    }
+    
+    // Only process if the reading has been stable for the debounce period
+    if ((millis() - buttonDebounceTime2) > DEBOUNCE_DELAY) {
+        if (buttonReading == LOW && !buttonPressed) {  // Button just pressed (debounced)
+            buttonPressed = true;
+            buttonPressStartTime = millis();
             isLongPressDetected = false;
+            brakeButtonActionProcessed = false;  // Reset flag for new button press
+            DEBUG_BUTTON_PRINTLN("Button pressed");
+        } 
+        else if (buttonReading == HIGH && buttonPressed) {  // Button just released (debounced)
+            buttonPressed = false;
+            brakeButtonActionProcessed = false;  // Reset flag when button is released
+            DEBUG_BUTTON_PRINTLN("Button released");
+            
+            // If we were in a long press but didn't trigger config mode, reset
+            if (isLongPressDetected) {
+                isLongPressDetected = false;
+            }
         }
     }
+    
+    lastDebouncedButtonReading2 = buttonReading;
 
     // Check for long press without brake - config mode can be accessed (authentication required)
     if (buttonPressed && !brakeHeld && !isLongPressDetected) {
@@ -2638,9 +2675,9 @@ void handleButtonPress() {
     }
 
     // Check for start button press in config mode - always exit
-    if (currentState == CONFIG_MODE && 
-        buttonReading == LOW && lastButtonReading == HIGH && 
-        (millis() - lastButtonPress) > 1000) {
+    // Use proper state tracking instead of edge detection to prevent false triggers from electrical noise
+    if (currentState == CONFIG_MODE && buttonPressed && 
+        (millis() - lastButtonPress) > 2000) {
         DEBUG_BUTTON_PRINTLN("Start button pressed in config mode - Exiting config mode");
         exitConfigMode();
         lastButtonPress = millis();
@@ -2856,6 +2893,11 @@ void enterConfigMode() {
     currentState = CONFIG_MODE;
     DEBUG_PRINTLN("Entering configuration mode");
     
+    // Reset button state to prevent immediate exit from lingering long press
+    buttonPressed = false;
+    isLongPressDetected = false;
+    lastButtonPress = millis();
+    
     // Initialize WiFi and web server with error handling
     setupWiFi();
     if (!wifiEnabled) {
@@ -2901,6 +2943,9 @@ void exitConfigMode() {
     if (wifiEnabled) {
         DEBUG_PRINTLN("Cleaning up web server and WiFi resources...");
         
+        // Set flag to disable button reading during WiFi cleanup to prevent electrical interference
+        wifiCleanupInProgress = true;
+        
         // Gracefully handle any remaining client requests
         DEBUG_PRINTLN("Processing remaining client requests...");
         unsigned long gracefulShutdownStart = millis();
@@ -2925,6 +2970,9 @@ void exitConfigMode() {
         delay(200);  // Give time for WiFi stack to clean up
         
         wifiEnabled = false;
+        
+        // Clear the flag after WiFi cleanup is complete
+        wifiCleanupInProgress = false;
         
         // Check if there's a new WiFi password and restart with it
         String savedPassword = preferences.getString("wifi_password", "123456789");

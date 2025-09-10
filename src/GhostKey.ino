@@ -2715,6 +2715,13 @@ void handleButtonPress() {
                 lastEngineShutdown = millis();  // Record time of engine shutdown
                 controlRelays();
             } else {
+                // Check cooldown period after engine shutdown to prevent immediate restart
+                unsigned long timeSinceShutdown = millis() - lastEngineShutdown;
+                if (timeSinceShutdown < 3000) {  // 3-second cooldown after shutdown
+                    DEBUG_PRINTLN("Engine shutdown cooldown active - ignoring start request");
+                    return;
+                }
+                
                 // Starting requires authentication
                 bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
                 if (isAuthenticated && !startRelayActive && !engineRunning) {

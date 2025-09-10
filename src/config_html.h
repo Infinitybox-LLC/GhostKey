@@ -216,7 +216,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             display: flex;
             max-width: 1200px;
             margin: 0 auto;
-            min-height: calc(100vh - 80px);
+            min-height:auto;
         }
         
         /* Sidebar Navigation */
@@ -662,12 +662,11 @@ const char config_html[] PROGMEM = R"rawliteral(
                 font-size: 1rem;
             }
             
-            /* Mobile Navigation Pills */
+            /* Mobile Navigation Pills - Static positioning */
             .sidebar {
                 width: 100%;
                 margin: 0;
-                position: sticky;
-                top: 60px;
+                position: static;  /* Changed from sticky to static */
                 display: flex;
                 flex-direction: row !important;
                 overflow-x: auto;
@@ -758,7 +757,7 @@ const char config_html[] PROGMEM = R"rawliteral(
                 max-width: 100%;
                 overflow-x: hidden;
                 box-sizing: border-box;
-                margin-top: 70px;
+                margin-top: 0px;  /* Reduced from 70px to 10px to eliminate gap */
                 position: relative;
                 z-index: 1;
             }
@@ -865,7 +864,7 @@ const char config_html[] PROGMEM = R"rawliteral(
     </style>
     <script>
         // Configuration
-        let isAuthenticated = false;
+        let isAuthenticated = false;  // Set to true for offline editing
         
         // Utility Functions
         function showNotification(message, type = 'success') {
@@ -1982,35 +1981,34 @@ const char config_html[] PROGMEM = R"rawliteral(
 
         // Mobile header collapse functionality with nav adjustment
         let lastScrollTop = 0;
-        function handleHeaderCollapse() {
-            if (window.innerWidth <= 768) {
-                const header = document.querySelector('.app-header');
-                const sidebar = document.querySelector('.sidebar');
-                const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-                
-                if (scrollTop > 30 && scrollTop > lastScrollTop) {
-                    // Scrolling down
-                    if (scrollTop > 100) {
-                        header.className = 'app-header minimal';
-                        if (sidebar) sidebar.style.top = '40px';
-                    } else {
-                        header.className = 'app-header collapsed';
-                        if (sidebar) sidebar.style.top = '45px';
-                    }
-                } else if (scrollTop < lastScrollTop - 20) {
-                    // Scrolling up
-                    if (scrollTop < 30) {
-                        header.className = 'app-header';
-                        if (sidebar) sidebar.style.top = '60px';
-                    } else {
-                        header.className = 'app-header collapsed';
-                        if (sidebar) sidebar.style.top = '45px';
-                    }
-                }
-                
-                lastScrollTop = scrollTop;
+
+function handleHeaderCollapse() {
+    if (window.innerWidth <= 768) {
+        const header = document.querySelector('.app-header');
+        const sidebar = document.querySelector('.sidebar');
+        const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+
+        if (scrollTop > 30 && scrollTop > lastScrollTop) {
+            // Scrolling down
+            if (scrollTop > 100) {
+                header.className = 'app-header minimal';
+            } else {
+                header.className = 'app-header collapsed';
             }
-                }
+        } else if (scrollTop < lastScrollTop - 20) {
+            // Scrolling up
+            if (scrollTop < 30) {
+                header.className = 'app-header';
+            } else {
+                header.className = 'app-header collapsed';
+            }
+        }
+
+        // Navigation is now static - no need to adjust position
+
+        lastScrollTop = scrollTop;
+    }
+}
 
         // Developer Tools Toggle
         function toggleDeveloperMode() {
@@ -2038,15 +2036,7 @@ const char config_html[] PROGMEM = R"rawliteral(
             // Add mobile header collapse listener
             window.addEventListener('scroll', handleHeaderCollapse);
             
-            // Add click to expand header
-            document.querySelector('.app-header')?.addEventListener('click', () => {
-                if (window.innerWidth <= 768) {
-                    const header = document.querySelector('.app-header');
-                    const sidebar = document.querySelector('.sidebar');
-                    header.className = 'app-header';
-                    if (sidebar) sidebar.style.top = '60px';
-                }
-            });
+            // Header click functionality removed - navigation is now static
             
             // Load system configuration on page load to set UI visibility
             setTimeout(() => {
@@ -2469,6 +2459,7 @@ const char config_html[] PROGMEM = R"rawliteral(
     <div id="notification" class="notification"></div>
 </body>
 </html>
+
 )rawliteral";
 
 #endif // CONFIG_HTML_H 

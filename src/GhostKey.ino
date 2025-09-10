@@ -587,6 +587,7 @@ bool wifiEnabled = false;
 bool wifiCleanupInProgress = false; // Flag to disable button reading during WiFi cleanup
 bool webServerInitialized = false; // Track if web server routes have been set up
 volatile int activeConnections = 0; // Track active web connections
+unsigned long lastSetupCompletionTime = 0; // Track when setup was last completed
 
 // Web session management
 bool webSessionActive = false;
@@ -3223,7 +3224,10 @@ void setupWebServer() {
             Serial.printf("Free heap after cleanup: %d bytes\n", ESP.getFreeHeap());
             
             // Use chunked sending for large content to prevent memory issues
-            if (ESP.getFreeHeap() < 40000) {  // If less than 40KB free, use chunked sending
+            // But skip chunked transmission right after setup completion to avoid reload issues
+            bool recentSetupCompletion = (millis() - lastSetupCompletionTime < 5000);  // Within 5 seconds of setup
+            
+            if (ESP.getFreeHeap() < 40000 && !recentSetupCompletion) {  // If less than 40KB free, use chunked sending
                 Serial.println("Using chunked transmission for large content");
                 server.sendHeader("Transfer-Encoding", "chunked");
                 server.send(200, "text/html", "");
@@ -4401,14 +4405,18 @@ void setupWebServer() {
     server.on("/exit", HTTP_POST, [](){
         // Send response first, then exit to avoid race condition
         server.send(200, "text/plain", "Exiting config mode...");
-        // Give time for response to be sent before shutting down WiFi
-        delay(1000);
+        // Give more time for response to be sent before shutting down WiFi
+        delay(5000);  // Increased from 1000ms to 5000ms
         exitConfigMode();
     });
 
     // Setup completion endpoint - marks first setup as complete
     server.on("/complete_setup", HTTP_POST, [](){
         Serial.println("Setup completion request received");
+        // Add connection management headers for setup completion
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
+        
         if (server.hasArg("plain")) {
             DynamicJsonDocument doc(1024);
             DeserializationError error = deserializeJson(doc, server.arg("plain"));
@@ -4475,8 +4483,13 @@ void setupWebServer() {
                 firstSetupComplete = true;
                 preferences.putBool("setup_done", true);
                 
+                // Record setup completion time to avoid chunked transmission during reload
+                lastSetupCompletionTime = millis();
+                Serial.println("Setup completion time recorded for smooth page transition");
+                
                 Serial.println("Setup completed successfully");
                 server.send(200, "text/plain", "Setup completed successfully");
+                delay(100);  // Ensure response is sent before any reload
                 return;
             }
         }

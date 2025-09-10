@@ -2629,16 +2629,30 @@ void handleButtonPress() {
     bool buttonReading = digitalRead(BUTTON_PIN);
     bool brakeReading = digitalRead(BRAKE_PIN);
 
-    // Update brake held state and LED
+    // Update brake held state
     if (brakeReading == LOW && !brakeHeld) {
         brakeHeld = true;
-        digitalWrite(BUTTON_LED_PIN, HIGH);
         DEBUG_BUTTON_PRINTLN("Brake held");
     } else if (brakeReading == HIGH && brakeHeld) {
         brakeHeld = false;
-        digitalWrite(BUTTON_LED_PIN, LOW);
         DEBUG_BUTTON_PRINTLN("Brake released");
     }
+    
+    // Update button LED based on authentication, engine state, and brake
+    // Only control LED when in normal operation (not config mode, not engine running)
+    if (currentState != CONFIG_MODE && !engineRunning) {
+        bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+        bool canStart = isAuthenticated && systemState == 0;
+        
+        if (brakeHeld && canStart) {
+            // Use PWM control for button LED
+            ledcWrite(LED_PWM_CHANNEL, 255);  // Full brightness when authenticated and can start
+        } else {
+            // Use PWM control for button LED
+            ledcWrite(LED_PWM_CHANNEL, 0);    // Off when not authenticated or brake not held
+        }
+    }
+    // Note: Config mode and engine running LED control handled in updateSystemState()
 
     // Handle button press detection with debouncing
     static unsigned long buttonDebounceTime2 = 0;
@@ -2743,8 +2757,9 @@ void handleButtonPress() {
             }
         }
 
-        // Check for button press without brake
-        if (buttonReading == HIGH && lastButtonReading == LOW && 
+        // Check for button release without brake (using proper debounced state)
+        static bool lastProcessedButtonState = false;
+        if (!buttonPressed && lastProcessedButtonState && 
             brakeReading == HIGH && (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
             // Only process button release if we're not in shutdown delay
             if (!isShuttingDown && !engineRunning && !startRelayActive) {
@@ -2759,6 +2774,7 @@ void handleButtonPress() {
             }
             lastButtonPress = millis();
         }
+        lastProcessedButtonState = buttonPressed;
     }
 
     // Update last states
@@ -2805,10 +2821,36 @@ void updateSystemState() {
         }
     }
 
-    // Handle LED pulsing in config mode
+    // Handle LED control for special states
     if (currentState == CONFIG_MODE) {
-        static unsigned long lastLedUpdate = 0;
-        if (millis() - lastLedUpdate > 20) {  // Update every 20ms for smooth fade
+        // Config mode: Simple on/off flash every 0.5 seconds
+        static unsigned long lastConfigLedUpdate = 0;
+        static bool configLedState = false;
+        static bool configModeFirstRun = true;
+        
+        // Initialize LED state when first entering config mode
+        if (configModeFirstRun) {
+            configLedState = false;
+            lastConfigLedUpdate = millis();
+            configModeFirstRun = false;
+            
+        }
+        
+        if (millis() - lastConfigLedUpdate > 500) {  // Update every 500ms (0.5 seconds)
+            configLedState = !configLedState;
+            
+            // Use PWM control for button LED (since it's attached to PWM channel)
+            ledcWrite(LED_PWM_CHANNEL, configLedState ? 255 : 0);
+            
+            lastConfigLedUpdate = millis();
+        }
+    } else if (engineRunning) {
+        // Reset config mode LED initialization when not in config mode
+        static bool configModeFirstRun = true;
+        configModeFirstRun = true;
+        // Engine running: Smooth PWM pulsing (unchanged)
+        static unsigned long lastEngineLedUpdate = 0;
+        if (millis() - lastEngineLedUpdate > 20) {  // Update every 20ms for smooth fade
             ledBrightness = ledBrightness + ledFadeAmount;
             
             // Reverse the direction of the fading at the ends of the fade
@@ -2817,15 +2859,11 @@ void updateSystemState() {
             }
             
             ledcWrite(LED_PWM_CHANNEL, ledBrightness);
-            lastLedUpdate = millis();
+            lastEngineLedUpdate = millis();
         }
     } else {
-        // Normal LED control when not in config mode
-        if (brakeHeld) {
-            ledcWrite(LED_PWM_CHANNEL, 255);  // Full brightness when brake is held
-        } else {
-            ledcWrite(LED_PWM_CHANNEL, 0);    // Off when brake is not held
-        }
+        // Normal LED control when not in config mode or engine running - handled in handleButtonPress()
+        // LED logic moved to handleButtonPress() for authentication-based control
     }
 }
 

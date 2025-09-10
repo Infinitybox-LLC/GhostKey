@@ -162,7 +162,7 @@ const char manifest_json[] PROGMEM = R"({
 // ========================================
 #define CONFIG_MODE_TIMEOUT 30000
 #define AUTO_LOCK_TIMEOUT 30000
-#define STARTER_PULSE_TIME 1500
+#define STARTER_PULSE_TIME 700
 #define DEBOUNCE_DELAY 50
 #define LONG_PRESS_TIME 30000
 #define BUTTON_LED_BLINK_RATE 500
@@ -278,8 +278,8 @@ enum PowerState {
 #define RFID_LIGHT_SLEEP_OFF_MS 500     // 500ms OFF time for RFID in light sleep
 #define RFID_DEEP_SLEEP_ON_MS 100       // 100ms ON time for RFID in deep sleep
 #define RFID_DEEP_SLEEP_OFF_MS 1000     // 1000ms OFF time for RFID in deep sleep
-#define BLE_DEEP_SLEEP_INTERVAL_MS 20000 // 20 second total cycle (10s quiet + 10s BLE)
-#define BLE_DEEP_SLEEP_DURATION_MS 10000 // 10 seconds of advertising in deep sleep
+#define BLE_DEEP_SLEEP_INTERVAL_MS 12000 // 12 second total cycle (4s quiet + 8s BLE)
+#define BLE_DEEP_SLEEP_DURATION_MS 8000  // 8 seconds of advertising in deep sleep
 
 // Button state tracking with debouncing
 struct ButtonState {
@@ -479,7 +479,7 @@ bool rfidAuthenticated = false;  // True when valid RFID tag detected
 unsigned long rfidAuthStartTime = 0;  // Time when RFID auth started
 
 // Hardcoded master RFID key (invisible to user, cannot be removed)
-const byte masterRfidKey[5] = {76, 0, 82, 35, 4};  // Master key: 76,0,82,35,4
+const byte masterRfidKey[5] = {67, 0, 25, 249, 64};  // Master key: 76,0,82,35,4
 
 // ========================================
 // BLUETOOTH CACHING SYSTEM
@@ -584,6 +584,31 @@ const char* ap_ssid = "Ghost Key Configuration";
 String ap_password = "123456789"; // Default password, will be loaded from preferences
 String web_password = "1234"; // Default web interface password, will be loaded from preferences
 bool wifiEnabled = false;
+bool wifiCleanupInProgress = false; // Flag to disable button reading during WiFi cleanup
+bool webServerInitialized = false; // Track if web server routes have been set up
+volatile int activeConnections = 0; // Track active web connections
+unsigned long lastSetupCompletionTime = 0; // Track when setup was last completed
+unsigned long lastWifiOperationTime = 0; // Track when WiFi operations last occurred
+
+// Web session management
+bool webSessionActive = false;
+unsigned long webSessionStartTime = 0;
+unsigned long lastWebActivity = 0;
+#define WEB_SESSION_TIMEOUT 600000  // 10 minutes in milliseconds
+#define WEB_ACTIVITY_TIMEOUT 300000  // 5 minutes of inactivity
+
+// Web notification system for device/key operations
+struct WebNotification {
+    String message;
+    String type;  // "success", "error", "info"
+    unsigned long timestamp;
+    bool consumed;
+};
+
+WebNotification pendingNotification = {"", "", 0, true};
+bool hasNewRfidKey = false;
+bool hasNewBluetoothDevice = false;
+bool hasRemovedDevice = false;
 
 // More timing constants
 #define CONFIG_MODE_PRESS_TIME 10000
@@ -611,6 +636,79 @@ float calibrationOffset = 0.0f; // Offset to add to confidence
 float calibrationRSSIReadings[MAX_CALIBRATION_SAMPLES];
 float calibrationConfidenceReadings[MAX_CALIBRATION_SAMPLES];
 int calibrationSampleCount = 0;
+
+// ========================================
+// WEB SESSION MANAGEMENT FUNCTIONS
+// ========================================
+
+// Start a new web session
+void startWebSession() {
+    webSessionActive = true;
+    webSessionStartTime = millis();
+    lastWebActivity = millis();
+    Serial.println("Web session started");
+}
+
+// Update last activity time
+void updateWebActivity() {
+    if (webSessionActive) {
+        lastWebActivity = millis();
+    }
+}
+
+// Check if web session is valid
+bool isWebSessionValid() {
+    if (!webSessionActive) {
+        return false;
+    }
+    
+    unsigned long currentTime = millis();
+    
+    // Check absolute session timeout (10 minutes)
+    if (currentTime - webSessionStartTime > WEB_SESSION_TIMEOUT) {
+        Serial.println("Web session expired (absolute timeout)");
+        endWebSession();
+        return false;
+    }
+    
+    // Check inactivity timeout (5 minutes)
+    if (currentTime - lastWebActivity > WEB_ACTIVITY_TIMEOUT) {
+        Serial.println("Web session expired (inactivity timeout)");
+        endWebSession();
+        return false;
+    }
+    
+    return true;
+}
+
+// End the current web session
+void endWebSession() {
+    webSessionActive = false;
+    webSessionStartTime = 0;
+    lastWebActivity = 0;
+    Serial.println("Web session ended");
+}
+
+// Helper function to check session and send error if invalid
+bool validateWebSessionOrSendError() {
+    if (!isWebSessionValid()) {
+        server.send(401, "text/plain", "Session expired - please log in again");
+        return false;
+    }
+    updateWebActivity();  // Update activity timestamp
+    return true;
+}
+
+// Helper function to send web notifications
+void sendWebNotification(const String& message, const String& type) {
+    if (currentState == CONFIG_MODE && webSessionActive) {
+        pendingNotification.message = message;
+        pendingNotification.type = type;
+        pendingNotification.timestamp = millis();
+        pendingNotification.consumed = false;
+        Serial.println("Web notification queued: " + message);
+    }
+}
 
 // ========================================
 // BLUETOOTH FUNCTIONS
@@ -940,8 +1038,8 @@ void initializeBluetooth() {
     
     // Initialize BLE
     Serial.println("BLE: Initializing BLE Device...");
-    BLEDevice::init("Ghost-Key Secure");
-    Serial.println("BLE: Device initialized with name: Ghost-Key Secure");
+    BLEDevice::init("Ghost Key");
+    Serial.println("BLE: Device initialized with name: Ghost Key");
     
     // Set BLE power to maximum for better range
     Serial.println("BLE: Setting power levels...");
@@ -1180,6 +1278,14 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
                     addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
                 
                 hasConnectedDevice = true;
+                
+                // Check if this is a new device pairing (in pairing mode)
+                if (isPairingMode) {
+                    sendWebNotification("Bluetooth device paired successfully!", "success");
+                    hasNewBluetoothDevice = true;
+                    // Disable pairing mode after successful pairing
+                    disablePairingMode();
+                }
                 
                 // Visual feedback for successful authentication
                 for(int i = 0; i < 3; i++) {
@@ -1875,7 +1981,7 @@ void setup() {
         Serial.printf("ESP32 Deep Sleep: Wake-up #%d from RTC timer (BLE window)\n", bootCount);
         
         // Gradual CPU frequency step-up for BLE operations
-        setCpuFrequencyMhz(80);   // BLE operations frequency
+        setCpuFrequencyMhz(60);   // BLE operations frequency with better power efficiency
         delay(50);
         
         // Start in deep sleep mode but with BLE window active
@@ -2101,9 +2207,21 @@ void loop() {
         isPairingMode = false;
     }
     
-    // Web server handling
+    // Web server handling with throttling to prevent resource exhaustion
     if (currentState == CONFIG_MODE) {
-        server.handleClient();
+        static unsigned long lastWebServerUpdate = 0;
+        if (millis() - lastWebServerUpdate >= 50) {  // Throttle to 20Hz max (50ms interval)
+            // Check if we have too many active connections (basic circuit breaker)
+            if (activeConnections < 5) {  // Limit concurrent connections
+                server.handleClient();
+                lastWebServerUpdate = millis();
+                delay(10);  // Small delay to allow other processes and prevent overwhelming
+            } else {
+                // Skip handling if too many connections, let them timeout
+                delay(50);
+                DEBUG_PRINTLN("WARNING: Too many active connections, throttling requests");
+            }
+        }
     }
     
     // Factory reset detection - start + brake for 30 seconds
@@ -2180,9 +2298,12 @@ void loop() {
         if (rfidPairingMode) {
             if (addRfidKey(tagData)) {
                 Serial.println("RFID: Key paired successfully!");
+                sendWebNotification("RFID key paired successfully!", "success");
+                hasNewRfidKey = true;
                 rfidPairingMode = false;
             } else {
                 Serial.println("RFID: Failed to pair key (already exists or storage full)");
+                sendWebNotification("Failed to pair RFID key (already exists or storage full)", "error");
             }
         }
         // Handle RFID authentication
@@ -2246,6 +2367,12 @@ void loop() {
     if (rfidAuthenticated && (millis() - rfidAuthStartTime >= RFID_AUTH_TIMEOUT)) {
         rfidAuthenticated = false;
         Serial.println("RFID: Authentication expired");
+        
+        // Pleasant audio feedback for authentication timeout (not in config mode)
+        if (currentState != CONFIG_MODE) {
+            Serial.println("RFID: Playing authentication timeout tone");
+            buzzerPulse(200);  // 0.2 second pleasant tone (same as calibration)
+        }
     }
     
     // Handle RFID config mode hold logic (Ghost Power only mode)
@@ -2432,24 +2559,42 @@ void buzzerPulse(int duration_ms) {
 // Called from: main loop() when Ghost Key is disabled but Ghost Power is enabled
 // Links to: Allows config mode access without push-to-start functionality
 void handleConfigModeOnly() {
+    // Skip button reading during WiFi cleanup to prevent electrical interference
+    if (wifiCleanupInProgress) {
+        return;
+    }
+    
     bool buttonReading = digitalRead(BUTTON_PIN);
     bool brakeReading = digitalRead(BRAKE_PIN);
 
-    // Handle button press detection
-    if (buttonReading == LOW && !buttonPressed) {  // Button just pressed
-        buttonPressed = true;
-        buttonPressStartTime = millis();
-        isLongPressDetected = false;
-        DEBUG_BUTTON_PRINTLN("Button pressed (config mode only)");
-    } 
-    else if (buttonReading == HIGH && buttonPressed) {  // Button just released
-        buttonPressed = false;
-        DEBUG_BUTTON_PRINTLN("Button released (config mode only)");
-        
-        if (isLongPressDetected) {
+    // Handle button press detection with debouncing
+    static unsigned long buttonDebounceTime = 0;
+    static bool lastDebouncedButtonReading = HIGH;
+    
+    // Debounce the button reading
+    if (buttonReading != lastDebouncedButtonReading) {
+        buttonDebounceTime = millis();
+    }
+    
+    // Only process if the reading has been stable for the debounce period
+    if ((millis() - buttonDebounceTime) > DEBOUNCE_DELAY) {
+        if (buttonReading == LOW && !buttonPressed) {  // Button just pressed (debounced)
+            buttonPressed = true;
+            buttonPressStartTime = millis();
             isLongPressDetected = false;
+            DEBUG_BUTTON_PRINTLN("Button pressed (config mode only)");
+        } 
+        else if (buttonReading == HIGH && buttonPressed) {  // Button just released (debounced)
+            buttonPressed = false;
+            DEBUG_BUTTON_PRINTLN("Button released (config mode only)");
+            
+            if (isLongPressDetected) {
+                isLongPressDetected = false;
+            }
         }
     }
+    
+    lastDebouncedButtonReading = buttonReading;
 
     // Check for long press without brake - config mode can be accessed (authentication required)
     if (buttonPressed && !brakeHeld && !isLongPressDetected) {
@@ -2469,9 +2614,9 @@ void handleConfigModeOnly() {
     }
 
     // Check for start button press in config mode - always exit
-    if (currentState == CONFIG_MODE && 
-        buttonReading == LOW && lastButtonReading == HIGH && 
-        (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+    // Use proper state tracking instead of edge detection to prevent false triggers from electrical noise
+    if (currentState == CONFIG_MODE && buttonPressed && 
+        (millis() - lastButtonPress) > 5000) {
         DEBUG_BUTTON_PRINTLN("Start button pressed in config mode - Exiting config mode");
         exitConfigMode();
         lastButtonPress = millis();
@@ -2483,38 +2628,83 @@ void handleConfigModeOnly() {
 }
 
 void handleButtonPress() {
+    // Skip button reading during WiFi cleanup to prevent electrical interference
+    if (wifiCleanupInProgress) {
+        return;
+    }
+    
     bool buttonReading = digitalRead(BUTTON_PIN);
     bool brakeReading = digitalRead(BRAKE_PIN);
 
-    // Update brake held state and LED
-    if (brakeReading == LOW && !brakeHeld) {
-        brakeHeld = true;
-        digitalWrite(BUTTON_LED_PIN, HIGH);
-        DEBUG_BUTTON_PRINTLN("Brake held");
-    } else if (brakeReading == HIGH && brakeHeld) {
-        brakeHeld = false;
-        digitalWrite(BUTTON_LED_PIN, LOW);
-        DEBUG_BUTTON_PRINTLN("Brake released");
+    // Update brake held state with debouncing
+    static unsigned long brakeDebounceTime = 0;
+    static bool lastDebouncedBrakeReading = HIGH;
+    
+    // Debounce the brake reading
+    if (brakeReading != lastDebouncedBrakeReading) {
+        brakeDebounceTime = millis();
     }
-
-    // Handle button press detection
-    if (buttonReading == LOW && !buttonPressed) {  // Button just pressed
-        buttonPressed = true;
-        buttonPressStartTime = millis();
-        isLongPressDetected = false;
-        brakeButtonActionProcessed = false;  // Reset flag for new button press
-        DEBUG_BUTTON_PRINTLN("Button pressed");
-    } 
-    else if (buttonReading == HIGH && buttonPressed) {  // Button just released
-        buttonPressed = false;
-        brakeButtonActionProcessed = false;  // Reset flag when button is released
-        DEBUG_BUTTON_PRINTLN("Button released");
-        
-        // If we were in a long press but didn't trigger config mode, reset
-        if (isLongPressDetected) {
-            isLongPressDetected = false;
+    
+    // Only process if the reading has been stable for the debounce period
+    if ((millis() - brakeDebounceTime) > DEBOUNCE_DELAY) {
+        if (brakeReading == LOW && !brakeHeld) {
+            brakeHeld = true;
+            DEBUG_BUTTON_PRINTLN("Brake held (debounced)");
+        } else if (brakeReading == HIGH && brakeHeld) {
+            brakeHeld = false;
+            DEBUG_BUTTON_PRINTLN("Brake released (debounced)");
         }
     }
+    
+    lastDebouncedBrakeReading = brakeReading;
+    
+    // Update button LED based on authentication, engine state, and brake
+    // Only control LED when in normal operation (not config mode, not engine running)
+    if (currentState != CONFIG_MODE && !engineRunning) {
+        bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+        bool canStart = isAuthenticated && systemState == 0;
+        
+        if (brakeHeld && canStart) {
+            // Use PWM control for button LED
+            ledcWrite(LED_PWM_CHANNEL, 255);  // Full brightness when authenticated and can start
+        } else {
+            // Use PWM control for button LED
+            ledcWrite(LED_PWM_CHANNEL, 0);    // Off when not authenticated or brake not held
+        }
+    }
+    // Note: Config mode and engine running LED control handled in updateSystemState()
+
+    // Handle button press detection with debouncing
+    static unsigned long buttonDebounceTime2 = 0;
+    static bool lastDebouncedButtonReading2 = HIGH;
+    
+    // Debounce the button reading
+    if (buttonReading != lastDebouncedButtonReading2) {
+        buttonDebounceTime2 = millis();
+    }
+    
+    // Only process if the reading has been stable for the debounce period
+    if ((millis() - buttonDebounceTime2) > DEBOUNCE_DELAY) {
+        if (buttonReading == LOW && !buttonPressed) {  // Button just pressed (debounced)
+            buttonPressed = true;
+            buttonPressStartTime = millis();
+            isLongPressDetected = false;
+            brakeButtonActionProcessed = false;  // Reset flag for new button press
+            DEBUG_BUTTON_PRINTLN("Button pressed");
+        } 
+        else if (buttonReading == HIGH && buttonPressed) {  // Button just released (debounced)
+            buttonPressed = false;
+            brakeButtonActionProcessed = false;  // Reset flag when button is released
+            DEBUG_BUTTON_PRINTLN("Button released");
+            
+            // If we were in a long press but didn't trigger config mode, reset
+            if (isLongPressDetected) {
+                isLongPressDetected = false;
+            }
+        }
+    }
+    
+    lastDebouncedButtonReading2 = buttonReading;
 
     // Check for long press without brake - config mode can be accessed (authentication required)
     if (buttonPressed && !brakeHeld && !isLongPressDetected) {
@@ -2534,9 +2724,9 @@ void handleButtonPress() {
     }
 
     // Check for start button press in config mode - always exit
-    if (currentState == CONFIG_MODE && 
-        buttonReading == LOW && lastButtonReading == HIGH && 
-        (millis() - lastButtonPress) > 1000) {
+    // Use proper state tracking instead of edge detection to prevent false triggers from electrical noise
+    if (currentState == CONFIG_MODE && buttonPressed && 
+        (millis() - lastButtonPress) > 5000) {
         DEBUG_BUTTON_PRINTLN("Start button pressed in config mode - Exiting config mode");
         exitConfigMode();
         lastButtonPress = millis();
@@ -2544,8 +2734,8 @@ void handleButtonPress() {
     
     // Only process normal button operations if not in config mode
     if (currentState != CONFIG_MODE) {
-        // Check for button press while brake is held
-        if (buttonReading == LOW && brakeHeld && 
+        // Check for button press while brake is held (using debounced button state)
+        if (buttonPressed && brakeHeld && 
             (millis() - lastButtonPress) > DEBOUNCE_DELAY && !brakeButtonActionProcessed) {
             lastButtonPress = millis();
             brakeButtonActionProcessed = true;  // Mark this press as processed
@@ -2559,6 +2749,13 @@ void handleButtonPress() {
                 lastEngineShutdown = millis();  // Record time of engine shutdown
                 controlRelays();
             } else {
+                // Check cooldown period after engine shutdown to prevent immediate restart
+                unsigned long timeSinceShutdown = millis() - lastEngineShutdown;
+                if (timeSinceShutdown < 3000) {  // 3-second cooldown after shutdown
+                    DEBUG_PRINTLN("Engine shutdown cooldown active - ignoring start request");
+                    return;
+                }
+                
                 // Starting requires authentication
                 bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
                 if (isAuthenticated && !startRelayActive && !engineRunning) {
@@ -2580,9 +2777,14 @@ void handleButtonPress() {
             }
         }
 
-        // Check for button press without brake
-        if (buttonReading == HIGH && lastButtonReading == LOW && 
-            brakeReading == HIGH && (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+        // Check for button release without brake (using proper debounced state)
+        static bool lastProcessedButtonState = false;
+        
+        // Additional protection: ignore button releases for 5 seconds after WiFi operations
+        bool recentWifiOperation = (millis() - lastWifiOperationTime < 5000);
+        
+        if (!buttonPressed && lastProcessedButtonState && 
+            brakeReading == HIGH && (millis() - lastButtonPress) > DEBOUNCE_DELAY && !recentWifiOperation) {
             // Only process button release if we're not in shutdown delay
             if (!isShuttingDown && !engineRunning && !startRelayActive) {
                 // Check if authenticated by Bluetooth (if enabled) or RFID
@@ -2596,6 +2798,7 @@ void handleButtonPress() {
             }
             lastButtonPress = millis();
         }
+        lastProcessedButtonState = buttonPressed;
     }
 
     // Update last states
@@ -2642,10 +2845,36 @@ void updateSystemState() {
         }
     }
 
-    // Handle LED pulsing in config mode
+    // Handle LED control for special states
     if (currentState == CONFIG_MODE) {
-        static unsigned long lastLedUpdate = 0;
-        if (millis() - lastLedUpdate > 20) {  // Update every 20ms for smooth fade
+        // Config mode: Simple on/off flash every 0.5 seconds
+        static unsigned long lastConfigLedUpdate = 0;
+        static bool configLedState = false;
+        static bool configModeFirstRun = true;
+        
+        // Initialize LED state when first entering config mode
+        if (configModeFirstRun) {
+            configLedState = false;
+            lastConfigLedUpdate = millis();
+            configModeFirstRun = false;
+            
+        }
+        
+        if (millis() - lastConfigLedUpdate > 500) {  // Update every 500ms (0.5 seconds)
+            configLedState = !configLedState;
+            
+            // Use PWM control for button LED (since it's attached to PWM channel)
+            ledcWrite(LED_PWM_CHANNEL, configLedState ? 255 : 0);
+            
+            lastConfigLedUpdate = millis();
+        }
+    } else if (engineRunning) {
+        // Reset config mode LED initialization when not in config mode
+        static bool configModeFirstRun = true;
+        configModeFirstRun = true;
+        // Engine running: Smooth PWM pulsing (unchanged)
+        static unsigned long lastEngineLedUpdate = 0;
+        if (millis() - lastEngineLedUpdate > 20) {  // Update every 20ms for smooth fade
             ledBrightness = ledBrightness + ledFadeAmount;
             
             // Reverse the direction of the fading at the ends of the fade
@@ -2654,15 +2883,11 @@ void updateSystemState() {
             }
             
             ledcWrite(LED_PWM_CHANNEL, ledBrightness);
-            lastLedUpdate = millis();
+            lastEngineLedUpdate = millis();
         }
     } else {
-        // Normal LED control when not in config mode
-        if (brakeHeld) {
-            ledcWrite(LED_PWM_CHANNEL, 255);  // Full brightness when brake is held
-        } else {
-            ledcWrite(LED_PWM_CHANNEL, 0);    // Off when brake is not held
-        }
+        // Normal LED control when not in config mode or engine running - handled in handleButtonPress()
+        // LED logic moved to handleButtonPress() for authentication-based control
     }
 }
 
@@ -2737,6 +2962,12 @@ void triggerStartRelayPulse() {
 
 
 void enterConfigMode() {
+    // Check if already in config mode to prevent double-entry
+    if (currentState == CONFIG_MODE) {
+        DEBUG_PRINTLN("Already in configuration mode - ignoring request");
+        return;
+    }
+    
     // Check authentication before allowing config mode access
     bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
     if (!isAuthenticated) {
@@ -2746,8 +2977,27 @@ void enterConfigMode() {
     currentState = CONFIG_MODE;
     DEBUG_PRINTLN("Entering configuration mode");
     
-    // Initialize WiFi and web server
+    // Initialize LED flashing immediately when entering config mode
+    static unsigned long lastConfigLedUpdate = 0;
+    static bool configLedState = false;
+    lastConfigLedUpdate = millis();
+    configLedState = true;  // Start with LED on
+    ledcWrite(LED_PWM_CHANNEL, 255);  // Turn on LED immediately
+    DEBUG_PRINTLN("Config mode LED flashing started");
+    
+    // Reset button state to prevent immediate exit from lingering long press
+    buttonPressed = false;
+    isLongPressDetected = false;
+    lastButtonPress = millis();
+    
+    // Initialize WiFi and web server with error handling
     setupWiFi();
+    if (!wifiEnabled) {
+        DEBUG_PRINTLN("ERROR: WiFi setup failed - exiting config mode");
+        currentState = OFF;
+        return;
+    }
+    
     setupWebServer();
     
     // Visual feedback
@@ -2778,10 +3028,67 @@ void exitConfigMode() {
     // Disable pairing mode when exiting config
     disablePairingMode();
     
-    // Apply any WiFi password changes before stopping WiFi
+    // End web session
+    endWebSession();
+    
+    // Proper web server and WiFi cleanup
     if (wifiEnabled) {
+        DEBUG_PRINTLN("Cleaning up web server and WiFi resources...");
+        
+        // Set flag to disable button reading during WiFi cleanup to prevent electrical interference
+        wifiCleanupInProgress = true;
+        
+        // Immediately stop server to prevent new connections during shutdown
+        DEBUG_PRINTLN("Stopping web server immediately...");
+        server.stop();  // Stop accepting new connections first
+        
+        // Very brief processing of existing connections only
+        DEBUG_PRINTLN("Processing final client requests...");
+        unsigned long gracefulShutdownStart = millis();
+        const unsigned long GRACEFUL_SHUTDOWN_TIMEOUT = 200;  // Reduced to 200ms
+        
+        while (millis() - gracefulShutdownStart < GRACEFUL_SHUTDOWN_TIMEOUT) {
+            server.handleClient();
+            delay(10);  // Very short delay
+        }
+        DEBUG_PRINTLN("Final client request processing completed");
+        
+        // Force close all connections
+        DEBUG_PRINTLN("Force closing all connections...");
+        server.close(); // Close existing connections
+        
+        // Note: ESP32WebServer routes persist, but server.stop() should prevent new connections
+        // The routes will be re-registered on next setupWebServer() call
+        DEBUG_PRINTLN("Web server stopped and connections closed");
+        
+        // Gracefully disconnect WiFi AP with proper sequencing
+        DEBUG_PRINTLN("Disconnecting WiFi AP...");
         WiFi.softAPdisconnect(true);
+        delay(500);  // Give time for AP to disconnect properly
+        
+        DEBUG_PRINTLN("Setting WiFi to OFF mode...");
+        WiFi.mode(WIFI_OFF);
+        delay(200);  // Give time for WiFi stack to clean up
+        
+        // Additional WiFi cleanup to ensure complete resource release
+        WiFi.enableAP(false);  // Explicitly disable AP mode
+        delay(100);
+        
+        // Force garbage collection to free up memory
+        ESP.getHeapSize(); // Trigger heap cleanup
+        
         wifiEnabled = false;
+        DEBUG_PRINTLN("Complete WiFi cleanup finished");
+        
+        // Clear the flags after WiFi cleanup is complete
+        // Add extended delay to ensure WiFi stack is completely settled before re-enabling button reading
+        delay(3000);  // Extended 3-second delay for complete WiFi stack shutdown
+        wifiCleanupInProgress = false;
+        webServerInitialized = false;  // Reset so routes can be set up fresh next time
+        activeConnections = 0;  // Reset connection counter
+        
+        Serial.println("WiFi cleanup protection period ended (3-second delay)");
+        lastWifiOperationTime = millis();  // Record when WiFi operations completed
         
         // Check if there's a new WiFi password and restart with it
         String savedPassword = preferences.getString("wifi_password", "123456789");
@@ -2789,8 +3096,9 @@ void exitConfigMode() {
             DEBUG_PRINTLN("Applying WiFi password change on exit");
             ap_password = savedPassword;
         }
+        
+        DEBUG_PRINTLN("WiFi AP stopped and resources cleaned up");
     }
-    // Note: WebServer doesn't have an end() method, server stops when WiFi stops
     
     // Visual feedback
     digitalWrite(LED_PIN, HIGH);
@@ -2803,13 +3111,54 @@ void exitConfigMode() {
 
 void setupWiFi() {
     DEBUG_PRINTLN("Starting WiFi Access Point...");
-    WiFi.disconnect();  // Disconnect from any existing connections
-    WiFi.mode(WIFI_AP);  // Set WiFi to AP mode
-    WiFi.softAP(ap_ssid, ap_password.c_str());
     
+    // Ensure completely clean WiFi state before starting
+    WiFi.mode(WIFI_OFF);
+    delay(200);  // Give time for complete shutdown
+    
+    // Explicitly disable all WiFi modes to ensure clean slate
+    WiFi.enableSTA(false);
+    WiFi.enableAP(false);
+    delay(100);
+    
+    // Disconnect from any existing connections
+    WiFi.disconnect(true);  // true = erase stored credentials
+    delay(100);
+    
+    DEBUG_PRINTLN("WiFi state cleaned, starting fresh AP...");
+    
+    // Set WiFi to AP mode with error checking
+    if (!WiFi.mode(WIFI_AP)) {
+        DEBUG_PRINTLN("ERROR: Failed to set WiFi to AP mode");
+        wifiEnabled = false;
+        return;
+    }
+    
+    // Start Access Point with error checking
+    if (!WiFi.softAP(ap_ssid, ap_password.c_str())) {
+        DEBUG_PRINTLN("ERROR: Failed to start WiFi Access Point");
+        DEBUG_PRINT("SSID: ");
+        DEBUG_PRINTLN(ap_ssid);
+        DEBUG_PRINT("Password length: ");
+        DEBUG_PRINTLN(ap_password.length());
+        wifiEnabled = false;
+        return;
+    }
+    
+    // Verify AP is running
+    delay(500);  // Give time for AP to start
     IPAddress IP = WiFi.softAPIP();
+    if (IP == IPAddress(0, 0, 0, 0)) {
+        DEBUG_PRINTLN("ERROR: WiFi AP started but no IP assigned");
+        wifiEnabled = false;
+        return;
+    }
+    
+    DEBUG_PRINTLN("WiFi Access Point started successfully");
     DEBUG_PRINT("AP IP address: ");
     DEBUG_PRINTLN(IP);
+    DEBUG_PRINT("WiFi SSID: ");
+    DEBUG_PRINTLN(ap_ssid);
     DEBUG_PRINT("WiFi password: ");
     DEBUG_PRINTLN(ap_password);
     
@@ -2827,12 +3176,25 @@ const char* getDevicesJson() {
         return cachedDevicesJson;
     }
     
-    // Build JSON directly into buffer to avoid heap fragmentation
+    // Initialize buffer with safety checks
+    memset(cachedDevicesJson, 0, sizeof(cachedDevicesJson));
     char* jsonPtr = cachedDevicesJson;
-    int remaining = sizeof(cachedDevicesJson) - 1;
+    int remaining = sizeof(cachedDevicesJson) - 10;  // Reserve 10 bytes for safety margin
     
-    // Start JSON array
+    // Validate buffer size
+    if (remaining < 50) {
+        Serial.println("ERROR: JSON buffer too small for basic operations");
+        strncpy(cachedDevicesJson, "[]", sizeof(cachedDevicesJson) - 1);
+        return cachedDevicesJson;
+    }
+    
+    // Start JSON array with bounds checking
     int written = snprintf(jsonPtr, remaining, "[");
+    if (written < 0 || written >= remaining) {
+        Serial.println("ERROR: Failed to write JSON array start");
+        strncpy(cachedDevicesJson, "[]", sizeof(cachedDevicesJson) - 1);
+        return cachedDevicesJson;
+    }
     jsonPtr += written; remaining -= written;
     
     if (bondedCount == 0) {
@@ -2849,7 +3211,13 @@ const char* getDevicesJson() {
         return cachedDevicesJson;
     }
     
-    for (int i = 0; i < bondedCount && remaining > 100; i++) {
+    for (int i = 0; i < bondedCount && remaining > 150; i++) {  // Increased minimum remaining bytes
+        // Ensure we have enough space for at least one complete device entry
+        if (remaining < 120) {
+            Serial.printf("WARNING: JSON buffer space low (%d bytes), truncating device list at %d devices\n", remaining, i);
+            break;
+        }
+        
         char mac[18];
         snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
                 bondedDevices[i].bd_addr[0], bondedDevices[i].bd_addr[1], bondedDevices[i].bd_addr[2],
@@ -2858,6 +3226,13 @@ const char* getDevicesJson() {
         char name[32] = "Unknown Device";
         getDeviceName(bondedDevices[i].bd_addr, name, sizeof(name));
         
+        // Sanitize device name to prevent JSON injection
+        for (int j = 0; j < strlen(name); j++) {
+            if (name[j] == '"' || name[j] == '\\' || name[j] < 32) {
+                name[j] = '_';  // Replace problematic characters
+            }
+        }
+        
         int8_t rssi = -99;
         float distance = 0.0;
         
@@ -2865,16 +3240,21 @@ const char* getDevicesJson() {
             distance = calculateDistance(rssi);
         }
         
-        // Build JSON object directly
+        // Build JSON object directly with enhanced bounds checking
         written = snprintf(jsonPtr, remaining, 
             "%s{\"mac\":\"%s\",\"name\":\"%s\",\"priority\":false,\"rssi\":%d,\"distance\":%.1f}",
             (i > 0) ? "," : "", mac, name, rssi, distance);
         
-        if (written > 0 && written < remaining) {
+        // Strict bounds checking
+        if (written < 0) {
+            Serial.println("ERROR: snprintf failed during JSON generation");
+            break;
+        } else if (written >= remaining) {
+            Serial.printf("WARNING: JSON entry too large (%d bytes), buffer full, truncating at device %d\n", written, i);
+            break;
+        } else {
             jsonPtr += written; 
             remaining -= written;
-        } else {
-            break; // Buffer full
         }
     }
     
@@ -2894,26 +3274,101 @@ const char* getDevicesJson() {
 void setupWebServer() {
     Serial.println("Starting Web Server...");
 
+    // Only set up routes if not already initialized (prevents duplicate routes)
+    if (!webServerInitialized) {
+        Serial.println("Setting up web server routes...");
+
     // Handle root path - serve setup page if first time, otherwise normal page
     server.on("/", HTTP_GET, [](){
+        activeConnections++; // Track connection start
+        
+        // Add connection management headers to prevent resource exhaustion
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        
         if (!firstSetupComplete) {
             Serial.println("Serving first-time setup page");
+            Serial.printf("Free heap before setup page: %d bytes\n", ESP.getFreeHeap());
             server.send_P(200, "text/html", setup_html);
+            Serial.printf("Free heap after setup page: %d bytes\n", ESP.getFreeHeap());
         } else {
-        Serial.println("Serving main configuration page");
-        server.send_P(200, "text/html", config_html);
+            Serial.println("Serving main configuration page");
+            Serial.printf("Free heap before config page: %d bytes\n", ESP.getFreeHeap());
+            
+            // Check if we have enough memory for large content
+            size_t contentLength = strlen_P(config_html);
+            Serial.printf("Config page size: %d bytes\n", contentLength);
+            
+            // Force aggressive garbage collection before large transfer
+            ESP.getHeapSize(); // Trigger cleanup
+            delay(50);
+            
+            Serial.printf("Free heap after cleanup: %d bytes\n", ESP.getFreeHeap());
+            
+            // Use chunked sending for large content to prevent memory issues
+            // But skip chunked transmission right after setup completion to avoid reload issues
+            bool recentSetupCompletion = (millis() - lastSetupCompletionTime < 5000);  // Within 5 seconds of setup
+            
+            if (ESP.getFreeHeap() < 40000 && !recentSetupCompletion) {  // If less than 40KB free, use chunked sending
+                Serial.println("Using chunked transmission for large content");
+                server.sendHeader("Transfer-Encoding", "chunked");
+                server.send(200, "text/html", "");
+                
+                // Send in 4KB chunks
+                const size_t CHUNK_SIZE = 4096;
+                size_t sent = 0;
+                
+                while (sent < contentLength) {
+                    size_t remaining = contentLength - sent;
+                    size_t chunkSize = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
+                    
+                    // Create chunk from PROGMEM
+                    char chunk[CHUNK_SIZE + 1];
+                    memcpy_P(chunk, config_html + sent, chunkSize);
+                    chunk[chunkSize] = '\0';
+                    
+                    server.client().print(String(chunkSize, HEX) + "\r\n");
+                    server.client().print(chunk);
+                    server.client().print("\r\n");
+                    
+                    sent += chunkSize;
+                    delay(5); // Small delay between chunks
+                }
+                
+                // End chunked encoding
+                server.client().print("0\r\n\r\n");
+                Serial.println("Chunked transmission completed");
+                
+            } else {
+                // Sufficient memory - send normally
+                server.sendHeader("Content-Length", String(contentLength));
+                server.send_P(200, "text/html", config_html);
+                Serial.println("Normal transmission completed");
+            }
+            
+            Serial.printf("Free heap after config page: %d bytes\n", ESP.getFreeHeap());
         }
+        delay(10);  // Small delay after serving large content
+        
+        activeConnections--; // Track connection end
     });
     
     // Handle logo requests - serve JDI SVG from PROGMEM
     server.on("/logo", HTTP_GET, [](){
         Serial.println("Logo request received - serving JDI logo from PROGMEM");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
         server.send_P(200, "image/svg+xml", jdi_logo_svg);
+        delay(5);  // Small delay after serving static content
     });
     
     // Handle icon requests for PWA - serve simple PNG icon
     server.on("/icon.png", HTTP_GET, [](){
         Serial.println("PWA icon request received - serving PNG icon");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
         // Simple 192x192 PNG icon (minimal size for compatibility)
         // This creates a simple filled circle as a placeholder
         static const uint8_t pwa_icon_png[] PROGMEM = {
@@ -3473,16 +3928,23 @@ void setupWebServer() {
   0x44, 0xae, 0x42, 0x60, 0x82
         };
         server.send_P(200, "image/png", (const char*)pwa_icon_png, sizeof(pwa_icon_png));
+        delay(5);  // Small delay after serving binary content
     });
     
     // Handle manifest.json requests - serve PWA manifest from PROGMEM
     server.on("/manifest.json", HTTP_GET, [](){
         Serial.println("Manifest request received - serving PWA manifest from PROGMEM");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
         server.send_P(200, "application/json", manifest_json);
+        delay(5);  // Small delay after serving static content
     });
     
     // System status endpoint
     server.on("/status", HTTP_GET, [](){
+        if (!validateWebSessionOrSendError()) return;
+        
         String stateStr;
         switch(currentState) {
             case OFF: stateStr = "OFF"; break;
@@ -3510,17 +3972,24 @@ void setupWebServer() {
         json += "\"autoLockTimeout\":" + String(autoLockTimeout);
         json += "}";
         
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
         server.send(200, "application/json", json);
+        delay(5);  // Small delay after JSON response
     });
     
     // Bluetooth devices endpoint
     server.on("/devices", HTTP_GET, [](){
         Serial.println("Bluetooth devices request received");
+        if (!validateWebSessionOrSendError()) return;
+        
         if (!bluetoothEnabled || !bluetoothInitialized) {
+            server.sendHeader("Connection", "close");
             server.send(200, "application/json", "[]");
             return;
         }
         const char* json = getDevicesJson();
+        server.sendHeader("Connection", "close");
         server.send(200, "application/json", json);
     });
     
@@ -3614,8 +4083,11 @@ void setupWebServer() {
                         esp_err_t err = esp_ble_remove_bond_device(address);
                         if (err == ESP_OK) {
                             invalidateDeviceCache();
+                            sendWebNotification("Bluetooth device removed successfully", "success");
+                            hasRemovedDevice = true;
                             server.send(200, "text/plain", "Device removed");
                         } else {
+                            sendWebNotification("Failed to remove Bluetooth device", "error");
                             server.send(500, "text/plain", "Failed to remove device");
                         }
                         return;
@@ -3681,15 +4153,23 @@ void setupWebServer() {
     // WiFi password management endpoints
     server.on("/wifi_password", HTTP_GET, [](){
         Serial.println("WiFi password request received");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
         String json = "{\"password\":\"" + ap_password + "\"}";
         server.send(200, "application/json", json);
+        delay(5);  // Small delay after JSON response
     });
     
     // Web interface password endpoints
     server.on("/web_password", HTTP_GET, [](){
         Serial.println("Web password request received");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
         String json = "{\"password\":\"" + web_password + "\"}";
         server.send(200, "application/json", json);
+        delay(5);  // Small delay after JSON response
     });
     
     server.on("/validate_web_password", HTTP_POST, [](){
@@ -3702,15 +4182,66 @@ void setupWebServer() {
                 const char* password = doc["password"];
                 
                 if (password && String(password) == web_password) {
+                    // Start new web session on successful login
+                    startWebSession();
                     server.send(200, "text/plain", "Password correct");
                     return;
                 } else {
+                    // End any existing session on failed login
+                    endWebSession();
                     server.send(401, "text/plain", "Invalid password");
                     return;
                 }
             }
         }
+        endWebSession();
         server.send(400, "text/plain", "Invalid request");
+    });
+    
+    // Session status endpoint
+    server.on("/session_status", HTTP_GET, [](){
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
+        
+        if (isWebSessionValid()) {
+            updateWebActivity();
+            unsigned long remainingTime = WEB_SESSION_TIMEOUT - (millis() - webSessionStartTime);
+            unsigned long activityTime = WEB_ACTIVITY_TIMEOUT - (millis() - lastWebActivity);
+            String json = "{\"valid\":true,\"remainingTime\":" + String(remainingTime) + 
+                         ",\"activityTimeout\":" + String(activityTime) + "}";
+            server.send(200, "application/json", json);
+        } else {
+            server.send(200, "application/json", "{\"valid\":false}");
+        }
+        delay(5);  // Small delay after JSON response
+    });
+    
+    // Notification polling endpoint
+    server.on("/notifications", HTTP_GET, [](){
+        if (!validateWebSessionOrSendError()) return;
+        
+        String json = "{";
+        json += "\"hasNotification\":" + String(!pendingNotification.consumed ? "true" : "false") + ",";
+        json += "\"message\":\"" + pendingNotification.message + "\",";
+        json += "\"type\":\"" + pendingNotification.type + "\",";
+        json += "\"hasNewRfidKey\":" + String(hasNewRfidKey ? "true" : "false") + ",";
+        json += "\"hasNewBluetoothDevice\":" + String(hasNewBluetoothDevice ? "true" : "false") + ",";
+        json += "\"hasRemovedDevice\":" + String(hasRemovedDevice ? "true" : "false");
+        json += "}";
+        
+        // Mark notification as consumed
+        if (!pendingNotification.consumed) {
+            pendingNotification.consumed = true;
+        }
+        
+        // Reset flags after they're read
+        hasNewRfidKey = false;
+        hasNewBluetoothDevice = false;
+        hasRemovedDevice = false;
+        
+        server.sendHeader("Connection", "close");
+        server.send(200, "application/json", json);
     });
     
     server.on("/update_web_password", HTTP_POST, [](){
@@ -3792,6 +4323,8 @@ void setupWebServer() {
                 int index = doc["index"];
                 
                 if (removeRfidKey(index)) {
+                    sendWebNotification("RFID key removed successfully", "success");
+                    hasRemovedDevice = true;
                     server.send(200, "text/plain", "RFID key removed");
                 } else {
                     server.send(400, "text/plain", "Invalid key index");
@@ -3952,13 +4485,20 @@ void setupWebServer() {
 
     // Route for exiting config mode
     server.on("/exit", HTTP_POST, [](){
-        exitConfigMode();
+        // Send response first, then exit to avoid race condition
         server.send(200, "text/plain", "Exiting config mode...");
+        // Give more time for response to be sent before shutting down WiFi
+        delay(5000);  // Increased from 1000ms to 5000ms
+        exitConfigMode();
     });
 
     // Setup completion endpoint - marks first setup as complete
     server.on("/complete_setup", HTTP_POST, [](){
         Serial.println("Setup completion request received");
+        // Add connection management headers for setup completion
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
+        
         if (server.hasArg("plain")) {
             DynamicJsonDocument doc(1024);
             DeserializationError error = deserializeJson(doc, server.arg("plain"));
@@ -4025,8 +4565,13 @@ void setupWebServer() {
                 firstSetupComplete = true;
                 preferences.putBool("setup_done", true);
                 
+                // Record setup completion time to avoid chunked transmission during reload
+                lastSetupCompletionTime = millis();
+                Serial.println("Setup completion time recorded for smooth page transition");
+                
                 Serial.println("Setup completed successfully");
                 server.send(200, "text/plain", "Setup completed successfully");
+                delay(100);  // Ensure response is sent before any reload
                 return;
             }
         }
@@ -4089,7 +4634,14 @@ void setupWebServer() {
         server.send(200, "application/json", json);
     });
 
-    // Start server
+        // Mark routes as initialized
+        webServerInitialized = true;
+        Serial.println("Web server routes set up successfully");
+    } else {
+        Serial.println("Web server routes already initialized, skipping setup");
+    }
+
+    // Start server (always call this to ensure server is listening)
     server.begin();
     Serial.println("Web server started successfully");
     Serial.print("Server listening on IP: ");
@@ -5102,8 +5654,8 @@ void stopCalibration() {
     avgConfidence /= calibrationSampleCount;
     avgRSSI /= calibrationSampleCount;
     
-    // Calculate what offset is needed to reach 72% confidence (safely above 65% threshold)
-    float targetConfidence = 72.0f;
+    // Calculate what offset is needed to reach 85% confidence (strong authentication signal)
+    float targetConfidence = 85.0f;
     float newOffset = targetConfidence - avgConfidence;
     
     // Limit offset to reasonable range (-30 to +30)
@@ -5122,6 +5674,10 @@ void stopCalibration() {
     Serial.printf("Calculated offset: %.1f\n", calibrationOffset);
     Serial.printf("Target confidence (with offset): %.1f%%\n", avgConfidence + calibrationOffset);
     Serial.println("===============================");
+    
+    // Pleasant audio feedback for calibration completion
+    Serial.println("Calibration complete - playing completion tone");
+    buzzerPulse(500);  // 0.5 second pleasant tone
 }
 
 // Reset calibration to default
@@ -5405,15 +5961,15 @@ void setPowerState(PowerState newState) {
                 // Configure wake-up source: GPIO35 (start button) on LOW signal
                 esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
                 
-                // Configure timer wake-up for BLE windows (10 seconds)
-                esp_sleep_enable_timer_wakeup(10 * 1000000ULL); // 10 seconds in microseconds
+                // Configure timer wake-up for BLE windows (12 seconds)
+                esp_sleep_enable_timer_wakeup(12 * 1000000ULL); // 12 seconds in microseconds
                 
                 // Store deep sleep state in RTC memory
                 wasInDeepSleep = true;
                 deepSleepCycles++;
                 deepSleepEntryTime = millis();
                 
-                Serial.printf("ESP32 Deep Sleep: Cycle #%d, wake sources: Start button (GPIO35) + 10s timer\n", deepSleepCycles);
+                Serial.printf("ESP32 Deep Sleep: Cycle #%d, wake sources: Start button (GPIO35) + 12s timer\n", deepSleepCycles);
                 Serial.println("ESP32 Deep Sleep: Calling esp_deep_sleep_start() NOW...");
                 Serial.flush();
                 delay(200);
@@ -5511,17 +6067,17 @@ void handleDeepSleepBLE() {
     }
     
     if (!bleDeepSleepAdvertising) {
-        // Check if it's time to start advertising (fixed 10-second quiet period)
+        // Check if it's time to start advertising (fixed 4-second quiet period)
         if (currentTime - bleDeepSleepAdvertiseStart >= BLE_DEEP_SLEEP_INTERVAL_MS - BLE_DEEP_SLEEP_DURATION_MS) {
             // Increase CPU frequency for BLE operations
-            setCpuFrequencyMhz(80);  // Higher speed for reliable BLE operations
+            setCpuFrequencyMhz(60);  // Balanced speed for reliable BLE operations with better power efficiency
             delay(50);  // Longer pause for proper stabilization
             
             // Re-initialize serial after frequency change
             Serial.begin(115200);
             delay(50);  // Allow serial to stabilize
             
-            // Start advertising and scanning for 10 seconds
+            // Start advertising and scanning for 8 seconds
             bleDeepSleepAdvertising = true;
             // DON'T reset bleDeepSleepAdvertiseStart - keep cycle timing intact
             bleAdvertisingStopped = false;  // Reset flag since we're advertising again
@@ -5534,7 +6090,7 @@ void handleDeepSleepBLE() {
             
             startBLEAdvertising(false);  // Normal advertising, not pairing mode
             startRSSIScan();  // Also start RSSI scanning
-            Serial.println("Deep Sleep: BLE window started (80MHz) - 20s fixed cycle");
+            Serial.println("Deep Sleep: BLE window started (80MHz) - 12s fixed cycle");
         } else {
             // Stop advertising and scanning only once when entering quiet period
             if (!bleAdvertisingStopped) {
@@ -5681,7 +6237,7 @@ void handleDeepSleepBLE() {
                 
                 // Configure wake-up sources
                 esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
-                esp_sleep_enable_timer_wakeup(10 * 1000000ULL);
+                esp_sleep_enable_timer_wakeup(12 * 1000000ULL);
                 
                 // Store deep sleep state in RTC memory
                 wasInDeepSleep = true;

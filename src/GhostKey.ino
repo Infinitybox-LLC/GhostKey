@@ -2606,10 +2606,6 @@ void handleConfigModeOnly() {
             bool isAuthenticated = rfidAuthenticated || (bluetoothAuthenticated);
             if (isAuthenticated) {
                 DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode (Ghost Power only)");
-                
-                // Start LED flashing immediately when entering config mode
-                currentState = CONFIG_MODE;  // Set state first to enable LED flashing
-                
                 enterConfigMode();
             } else {
                 DEBUG_BUTTON_PRINTLN("Long press detected but not authenticated - Access denied");
@@ -2720,10 +2716,6 @@ void handleButtonPress() {
             bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
             if (isAuthenticated) {
                 DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode (authenticated)");
-                
-                // Start LED flashing immediately when entering config mode
-                currentState = CONFIG_MODE;  // Set state first to enable LED flashing
-                
                 enterConfigMode();
             } else {
                 DEBUG_BUTTON_PRINTLN("Long press detected but not authenticated - Access denied");
@@ -2984,6 +2976,14 @@ void enterConfigMode() {
     }
     currentState = CONFIG_MODE;
     DEBUG_PRINTLN("Entering configuration mode");
+    
+    // Initialize LED flashing immediately when entering config mode
+    static unsigned long lastConfigLedUpdate = 0;
+    static bool configLedState = false;
+    lastConfigLedUpdate = millis();
+    configLedState = true;  // Start with LED on
+    ledcWrite(LED_PWM_CHANNEL, 255);  // Turn on LED immediately
+    DEBUG_PRINTLN("Config mode LED flashing started");
     
     // Reset button state to prevent immediate exit from lingering long press
     buttonPressed = false;

@@ -2629,14 +2629,27 @@ void handleButtonPress() {
     bool buttonReading = digitalRead(BUTTON_PIN);
     bool brakeReading = digitalRead(BRAKE_PIN);
 
-    // Update brake held state
-    if (brakeReading == LOW && !brakeHeld) {
-        brakeHeld = true;
-        DEBUG_BUTTON_PRINTLN("Brake held");
-    } else if (brakeReading == HIGH && brakeHeld) {
-        brakeHeld = false;
-        DEBUG_BUTTON_PRINTLN("Brake released");
+    // Update brake held state with debouncing
+    static unsigned long brakeDebounceTime = 0;
+    static bool lastDebouncedBrakeReading = HIGH;
+    
+    // Debounce the brake reading
+    if (brakeReading != lastDebouncedBrakeReading) {
+        brakeDebounceTime = millis();
     }
+    
+    // Only process if the reading has been stable for the debounce period
+    if ((millis() - brakeDebounceTime) > DEBOUNCE_DELAY) {
+        if (brakeReading == LOW && !brakeHeld) {
+            brakeHeld = true;
+            DEBUG_BUTTON_PRINTLN("Brake held (debounced)");
+        } else if (brakeReading == HIGH && brakeHeld) {
+            brakeHeld = false;
+            DEBUG_BUTTON_PRINTLN("Brake released (debounced)");
+        }
+    }
+    
+    lastDebouncedBrakeReading = brakeReading;
     
     // Update button LED based on authentication, engine state, and brake
     // Only control LED when in normal operation (not config mode, not engine running)
@@ -2714,8 +2727,8 @@ void handleButtonPress() {
     
     // Only process normal button operations if not in config mode
     if (currentState != CONFIG_MODE) {
-        // Check for button press while brake is held
-        if (buttonReading == LOW && brakeHeld && 
+        // Check for button press while brake is held (using debounced button state)
+        if (buttonPressed && brakeHeld && 
             (millis() - lastButtonPress) > DEBOUNCE_DELAY && !brakeButtonActionProcessed) {
             lastButtonPress = millis();
             brakeButtonActionProcessed = true;  // Mark this press as processed

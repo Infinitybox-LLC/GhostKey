@@ -2606,6 +2606,10 @@ void handleConfigModeOnly() {
             bool isAuthenticated = rfidAuthenticated || (bluetoothAuthenticated);
             if (isAuthenticated) {
                 DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode (Ghost Power only)");
+                
+                // Start LED flashing immediately when entering config mode
+                currentState = CONFIG_MODE;  // Set state first to enable LED flashing
+                
                 enterConfigMode();
             } else {
                 DEBUG_BUTTON_PRINTLN("Long press detected but not authenticated - Access denied");
@@ -2616,7 +2620,7 @@ void handleConfigModeOnly() {
     // Check for start button press in config mode - always exit
     // Use proper state tracking instead of edge detection to prevent false triggers from electrical noise
     if (currentState == CONFIG_MODE && buttonPressed && 
-        (millis() - lastButtonPress) > 2000) {
+        (millis() - lastButtonPress) > 5000) {
         DEBUG_BUTTON_PRINTLN("Start button pressed in config mode - Exiting config mode");
         exitConfigMode();
         lastButtonPress = millis();
@@ -2716,6 +2720,10 @@ void handleButtonPress() {
             bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
             if (isAuthenticated) {
                 DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode (authenticated)");
+                
+                // Start LED flashing immediately when entering config mode
+                currentState = CONFIG_MODE;  // Set state first to enable LED flashing
+                
                 enterConfigMode();
             } else {
                 DEBUG_BUTTON_PRINTLN("Long press detected but not authenticated - Access denied");
@@ -2726,7 +2734,7 @@ void handleButtonPress() {
     // Check for start button press in config mode - always exit
     // Use proper state tracking instead of edge detection to prevent false triggers from electrical noise
     if (currentState == CONFIG_MODE && buttonPressed && 
-        (millis() - lastButtonPress) > 2000) {
+        (millis() - lastButtonPress) > 5000) {
         DEBUG_BUTTON_PRINTLN("Start button pressed in config mode - Exiting config mode");
         exitConfigMode();
         lastButtonPress = millis();

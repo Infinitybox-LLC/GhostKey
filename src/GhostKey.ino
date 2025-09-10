@@ -586,6 +586,7 @@ String web_password = "1234"; // Default web interface password, will be loaded 
 bool wifiEnabled = false;
 bool wifiCleanupInProgress = false; // Flag to disable button reading during WiFi cleanup
 bool webServerInitialized = false; // Track if web server routes have been set up
+volatile int activeConnections = 0; // Track active web connections
 
 // Web session management
 bool webSessionActive = false;
@@ -2208,9 +2209,16 @@ void loop() {
     if (currentState == CONFIG_MODE) {
         static unsigned long lastWebServerUpdate = 0;
         if (millis() - lastWebServerUpdate >= 50) {  // Throttle to 20Hz max (50ms interval)
-            server.handleClient();
-            lastWebServerUpdate = millis();
-            delay(10);  // Small delay to allow other processes and prevent overwhelming
+            // Check if we have too many active connections (basic circuit breaker)
+            if (activeConnections < 5) {  // Limit concurrent connections
+                server.handleClient();
+                lastWebServerUpdate = millis();
+                delay(10);  // Small delay to allow other processes and prevent overwhelming
+            } else {
+                // Skip handling if too many connections, let them timeout
+                delay(50);
+                DEBUG_PRINTLN("WARNING: Too many active connections, throttling requests");
+            }
         }
     }
     
@@ -2952,20 +2960,23 @@ void exitConfigMode() {
         // Set flag to disable button reading during WiFi cleanup to prevent electrical interference
         wifiCleanupInProgress = true;
         
-        // Gracefully handle any remaining client requests
-        DEBUG_PRINTLN("Processing remaining client requests...");
+        // Immediately stop server to prevent new connections during shutdown
+        DEBUG_PRINTLN("Stopping web server immediately...");
+        server.stop();  // Stop accepting new connections first
+        
+        // Very brief processing of existing connections only
+        DEBUG_PRINTLN("Processing final client requests...");
         unsigned long gracefulShutdownStart = millis();
-        const unsigned long GRACEFUL_SHUTDOWN_TIMEOUT = 2000;  // 2 seconds max
+        const unsigned long GRACEFUL_SHUTDOWN_TIMEOUT = 200;  // Reduced to 200ms
         
         while (millis() - gracefulShutdownStart < GRACEFUL_SHUTDOWN_TIMEOUT) {
             server.handleClient();
-            delay(50);  // Small delay to allow processing
+            delay(10);  // Very short delay
         }
-        DEBUG_PRINTLN("Client request processing completed");
+        DEBUG_PRINTLN("Final client request processing completed");
         
-        // Properly stop the web server and clear connections
-        DEBUG_PRINTLN("Stopping web server...");
-        server.stop();  // Stop accepting new connections
+        // Force close all connections
+        DEBUG_PRINTLN("Force closing all connections...");
         server.close(); // Close existing connections
         
         // Note: ESP32WebServer routes persist, but server.stop() should prevent new connections
@@ -2994,6 +3005,7 @@ void exitConfigMode() {
         // Clear the flags after WiFi cleanup is complete
         wifiCleanupInProgress = false;
         webServerInitialized = false;  // Reset so routes can be set up fresh next time
+        activeConnections = 0;  // Reset connection counter
         
         // Check if there's a new WiFi password and restart with it
         String savedPassword = preferences.getString("wifi_password", "123456789");
@@ -3185,18 +3197,74 @@ void setupWebServer() {
 
     // Handle root path - serve setup page if first time, otherwise normal page
     server.on("/", HTTP_GET, [](){
+        activeConnections++; // Track connection start
+        
         // Add connection management headers to prevent resource exhaustion
         server.sendHeader("Connection", "close");
         server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
         
         if (!firstSetupComplete) {
             Serial.println("Serving first-time setup page");
+            Serial.printf("Free heap before setup page: %d bytes\n", ESP.getFreeHeap());
             server.send_P(200, "text/html", setup_html);
+            Serial.printf("Free heap after setup page: %d bytes\n", ESP.getFreeHeap());
         } else {
-        Serial.println("Serving main configuration page");
-        server.send_P(200, "text/html", config_html);
+            Serial.println("Serving main configuration page");
+            Serial.printf("Free heap before config page: %d bytes\n", ESP.getFreeHeap());
+            
+            // Check if we have enough memory for large content
+            size_t contentLength = strlen_P(config_html);
+            Serial.printf("Config page size: %d bytes\n", contentLength);
+            
+            // Force aggressive garbage collection before large transfer
+            ESP.getHeapSize(); // Trigger cleanup
+            delay(50);
+            
+            Serial.printf("Free heap after cleanup: %d bytes\n", ESP.getFreeHeap());
+            
+            // Use chunked sending for large content to prevent memory issues
+            if (ESP.getFreeHeap() < 40000) {  // If less than 40KB free, use chunked sending
+                Serial.println("Using chunked transmission for large content");
+                server.sendHeader("Transfer-Encoding", "chunked");
+                server.send(200, "text/html", "");
+                
+                // Send in 4KB chunks
+                const size_t CHUNK_SIZE = 4096;
+                size_t sent = 0;
+                
+                while (sent < contentLength) {
+                    size_t remaining = contentLength - sent;
+                    size_t chunkSize = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
+                    
+                    // Create chunk from PROGMEM
+                    char chunk[CHUNK_SIZE + 1];
+                    memcpy_P(chunk, config_html + sent, chunkSize);
+                    chunk[chunkSize] = '\0';
+                    
+                    server.client().print(String(chunkSize, HEX) + "\r\n");
+                    server.client().print(chunk);
+                    server.client().print("\r\n");
+                    
+                    sent += chunkSize;
+                    delay(5); // Small delay between chunks
+                }
+                
+                // End chunked encoding
+                server.client().print("0\r\n\r\n");
+                Serial.println("Chunked transmission completed");
+                
+            } else {
+                // Sufficient memory - send normally
+                server.sendHeader("Content-Length", String(contentLength));
+                server.send_P(200, "text/html", config_html);
+                Serial.println("Normal transmission completed");
+            }
+            
+            Serial.printf("Free heap after config page: %d bytes\n", ESP.getFreeHeap());
         }
         delay(10);  // Small delay after serving large content
+        
+        activeConnections--; // Track connection end
     });
     
     // Handle logo requests - serve JDI SVG from PROGMEM

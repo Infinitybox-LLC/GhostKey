@@ -1,7 +1,3 @@
-#ifndef CONFIG_HTML_H
-#define CONFIG_HTML_H
-
-const char config_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
@@ -1427,6 +1423,9 @@ const char config_html[] PROGMEM = R"rawliteral(
                         html += '</div>';
                         
                         html += '<div class="device-actions">';
+                        html += '<button onclick="togglePriority(\'' + device.mac + '\')" class="btn btn-secondary">';
+                        html += device.priority ? 'Remove Priority' : 'Set Priority';
+                        html += '</button>';
                         html += '<button onclick="removeDevice(\'' + device.mac + '\')" class="btn btn-danger">Remove</button>';
                         html += '</div>';
                         html += '</div>';
@@ -2208,7 +2207,7 @@ function handleHeaderCollapse() {
                         <h2 class="card-title">Proximity Calibration</h2>
                         <div style="margin-bottom: 1.5rem;">
                             <p style="font-size: 0.9rem; color: #666; margin-bottom: 1.5rem;">
-                                Calibrate the system for your specific installation. Position your phone where you want authentication to work, then run calibration. Device will beep when calibration is finished.
+                                Calibrate the system for your specific installation. Position your phone where you want authentication to work, then run calibration.
                             </p>
                             <button onclick="startCalibration()" class="btn btn-primary" id="startCalibrationBtn">
                                 Start Calibration (30 seconds)
@@ -2456,7 +2455,3 @@ function handleHeaderCollapse() {
     <div id="notification" class="notification"></div>
 </body>
 </html>
-
-)rawliteral";
-
-#endif // CONFIG_HTML_H 

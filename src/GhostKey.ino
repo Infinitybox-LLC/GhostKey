@@ -2203,9 +2203,14 @@ void loop() {
         isPairingMode = false;
     }
     
-    // Web server handling
+    // Web server handling with throttling to prevent resource exhaustion
     if (currentState == CONFIG_MODE) {
-        server.handleClient();
+        static unsigned long lastWebServerUpdate = 0;
+        if (millis() - lastWebServerUpdate >= 50) {  // Throttle to 20Hz max (50ms interval)
+            server.handleClient();
+            lastWebServerUpdate = millis();
+            delay(10);  // Small delay to allow other processes and prevent overwhelming
+        }
     }
     
     // Factory reset detection - start + brake for 30 seconds
@@ -3153,6 +3158,10 @@ void setupWebServer() {
 
     // Handle root path - serve setup page if first time, otherwise normal page
     server.on("/", HTTP_GET, [](){
+        // Add connection management headers to prevent resource exhaustion
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        
         if (!firstSetupComplete) {
             Serial.println("Serving first-time setup page");
             server.send_P(200, "text/html", setup_html);
@@ -3160,17 +3169,25 @@ void setupWebServer() {
         Serial.println("Serving main configuration page");
         server.send_P(200, "text/html", config_html);
         }
+        delay(10);  // Small delay after serving large content
     });
     
     // Handle logo requests - serve JDI SVG from PROGMEM
     server.on("/logo", HTTP_GET, [](){
         Serial.println("Logo request received - serving JDI logo from PROGMEM");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
         server.send_P(200, "image/svg+xml", jdi_logo_svg);
+        delay(5);  // Small delay after serving static content
     });
     
     // Handle icon requests for PWA - serve simple PNG icon
     server.on("/icon.png", HTTP_GET, [](){
         Serial.println("PWA icon request received - serving PNG icon");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
         // Simple 192x192 PNG icon (minimal size for compatibility)
         // This creates a simple filled circle as a placeholder
         static const uint8_t pwa_icon_png[] PROGMEM = {
@@ -3730,12 +3747,17 @@ void setupWebServer() {
   0x44, 0xae, 0x42, 0x60, 0x82
         };
         server.send_P(200, "image/png", (const char*)pwa_icon_png, sizeof(pwa_icon_png));
+        delay(5);  // Small delay after serving binary content
     });
     
     // Handle manifest.json requests - serve PWA manifest from PROGMEM
     server.on("/manifest.json", HTTP_GET, [](){
         Serial.println("Manifest request received - serving PWA manifest from PROGMEM");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
         server.send_P(200, "application/json", manifest_json);
+        delay(5);  // Small delay after serving static content
     });
     
     // System status endpoint
@@ -3770,7 +3792,9 @@ void setupWebServer() {
         json += "}";
         
         server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
         server.send(200, "application/json", json);
+        delay(5);  // Small delay after JSON response
     });
     
     // Bluetooth devices endpoint
@@ -3948,15 +3972,23 @@ void setupWebServer() {
     // WiFi password management endpoints
     server.on("/wifi_password", HTTP_GET, [](){
         Serial.println("WiFi password request received");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
         String json = "{\"password\":\"" + ap_password + "\"}";
         server.send(200, "application/json", json);
+        delay(5);  // Small delay after JSON response
     });
     
     // Web interface password endpoints
     server.on("/web_password", HTTP_GET, [](){
         Serial.println("Web password request received");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
         String json = "{\"password\":\"" + web_password + "\"}";
         server.send(200, "application/json", json);
+        delay(5);  // Small delay after JSON response
     });
     
     server.on("/validate_web_password", HTTP_POST, [](){
@@ -3987,6 +4019,10 @@ void setupWebServer() {
     
     // Session status endpoint
     server.on("/session_status", HTTP_GET, [](){
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
+        
         if (isWebSessionValid()) {
             updateWebActivity();
             unsigned long remainingTime = WEB_SESSION_TIMEOUT - (millis() - webSessionStartTime);
@@ -3997,6 +4033,7 @@ void setupWebServer() {
         } else {
             server.send(200, "application/json", "{\"valid\":false}");
         }
+        delay(5);  // Small delay after JSON response
     });
     
     // Notification polling endpoint

@@ -588,6 +588,7 @@ bool wifiCleanupInProgress = false; // Flag to disable button reading during WiF
 bool webServerInitialized = false; // Track if web server routes have been set up
 volatile int activeConnections = 0; // Track active web connections
 unsigned long lastSetupCompletionTime = 0; // Track when setup was last completed
+unsigned long lastWifiOperationTime = 0; // Track when WiFi operations last occurred
 
 // Web session management
 bool webSessionActive = false;
@@ -2366,6 +2367,12 @@ void loop() {
     if (rfidAuthenticated && (millis() - rfidAuthStartTime >= RFID_AUTH_TIMEOUT)) {
         rfidAuthenticated = false;
         Serial.println("RFID: Authentication expired");
+        
+        // Pleasant audio feedback for authentication timeout (not in config mode)
+        if (currentState != CONFIG_MODE) {
+            Serial.println("RFID: Playing authentication timeout tone");
+            buzzerPulse(200);  // 0.2 second pleasant tone (same as calibration)
+        }
     }
     
     // Handle RFID config mode hold logic (Ghost Power only mode)
@@ -2772,8 +2779,12 @@ void handleButtonPress() {
 
         // Check for button release without brake (using proper debounced state)
         static bool lastProcessedButtonState = false;
+        
+        // Additional protection: ignore button releases for 5 seconds after WiFi operations
+        bool recentWifiOperation = (millis() - lastWifiOperationTime < 5000);
+        
         if (!buttonPressed && lastProcessedButtonState && 
-            brakeReading == HIGH && (millis() - lastButtonPress) > DEBOUNCE_DELAY) {
+            brakeReading == HIGH && (millis() - lastButtonPress) > DEBOUNCE_DELAY && !recentWifiOperation) {
             // Only process button release if we're not in shutdown delay
             if (!isShuttingDown && !engineRunning && !startRelayActive) {
                 // Check if authenticated by Bluetooth (if enabled) or RFID
@@ -3062,9 +3073,14 @@ void exitConfigMode() {
         DEBUG_PRINTLN("Complete WiFi cleanup finished");
         
         // Clear the flags after WiFi cleanup is complete
+        // Add extended delay to ensure WiFi stack is completely settled before re-enabling button reading
+        delay(3000);  // Extended 3-second delay for complete WiFi stack shutdown
         wifiCleanupInProgress = false;
         webServerInitialized = false;  // Reset so routes can be set up fresh next time
         activeConnections = 0;  // Reset connection counter
+        
+        Serial.println("WiFi cleanup protection period ended (3-second delay)");
+        lastWifiOperationTime = millis();  // Record when WiFi operations completed
         
         // Check if there's a new WiFi password and restart with it
         String savedPassword = preferences.getString("wifi_password", "123456789");
@@ -5650,6 +5666,10 @@ void stopCalibration() {
     Serial.printf("Calculated offset: %.1f\n", calibrationOffset);
     Serial.printf("Target confidence (with offset): %.1f%%\n", avgConfidence + calibrationOffset);
     Serial.println("===============================");
+    
+    // Pleasant audio feedback for calibration completion
+    Serial.println("Calibration complete - playing completion tone");
+    buzzerPulse(500);  // 0.5 second pleasant tone
 }
 
 // Reset calibration to default

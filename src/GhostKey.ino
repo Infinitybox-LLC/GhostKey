@@ -5579,8 +5579,8 @@ void stopCalibration() {
     avgConfidence /= calibrationSampleCount;
     avgRSSI /= calibrationSampleCount;
     
-    // Calculate what offset is needed to reach 72% confidence (safely above 65% threshold)
-    float targetConfidence = 72.0f;
+    // Calculate what offset is needed to reach 85% confidence (strong authentication signal)
+    float targetConfidence = 85.0f;
     float newOffset = targetConfidence - avgConfidence;
     
     // Limit offset to reasonable range (-30 to +30)

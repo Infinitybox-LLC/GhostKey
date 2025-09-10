@@ -1427,9 +1427,6 @@ const char config_html[] PROGMEM = R"rawliteral(
                         html += '</div>';
                         
                         html += '<div class="device-actions">';
-                        html += '<button onclick="togglePriority(\'' + device.mac + '\')" class="btn btn-secondary">';
-                        html += device.priority ? 'Remove Priority' : 'Set Priority';
-                        html += '</button>';
                         html += '<button onclick="removeDevice(\'' + device.mac + '\')" class="btn btn-danger">Remove</button>';
                         html += '</div>';
                         html += '</div>';

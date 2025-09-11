@@ -3016,8 +3016,8 @@ void controlRelays() {
         // Engine running - all on except starter
         newAccessory = HIGH; newIgnition1 = HIGH; newIgnition2 = HIGH; newStart = LOW;
     } else if (startRelayActive) {
-        // Starting sequence - only IGN2 and START
-        newAccessory = LOW; newIgnition1 = LOW; newIgnition2 = HIGH; newStart = HIGH;
+        // Starting sequence - IGN1, IGN2 and START (only accessory off)
+        newAccessory = LOW; newIgnition1 = HIGH; newIgnition2 = HIGH; newStart = HIGH;
     } else {
         // Normal button sequence
         switch (systemState) {

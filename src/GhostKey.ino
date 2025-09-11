@@ -390,6 +390,14 @@ bool ghostKeyEnabled = true;    // RFID/Bluetooth/Push-to-start functionality
 bool ghostPowerEnabled = true;  // Security relay functionality
 bool accessoryInputAuth = false; // Authentication via brake + accessory input
 
+// Ghost Power Only Mode - ACCESSORY_INPUT_PIN tracking
+// NOTE: ACCESSORY_INPUT_PIN is active LOW (LOW = ignition ON, HIGH = ignition OFF)
+bool accessoryInputPinHigh = false;        // Current state of ACCESSORY_INPUT_PIN (HIGH = ignition OFF)
+bool lastAccessoryInputPinHigh = false;    // Previous state for edge detection
+unsigned long accessoryPinLowTime = 0;     // When ACCESSORY_INPUT_PIN went HIGH (ignition turned OFF)
+bool accessoryPinAutoLockActive = false;   // Whether autolock timer is running due to accessory pin
+bool accessoryPinFirstRead = true;         // Flag to prevent edge detection on first pin read
+
 // RFID authentication feedback
 bool wasRfidAuthenticated = false;  // Track previous RFID auth state for buzzer
 bool unauthorizedBeepPlayed = false;  // Prevent repeated unauthorized beeps
@@ -398,7 +406,9 @@ unsigned long lastUnauthorizedBeepTime = 0;  // Reset flag after 5 seconds
 // RFID config mode entry (Ghost Power only mode)
 bool rfidHeldForConfig = false;       // Track if RFID is being held for config
 unsigned long rfidConfigHoldStartTime = 0;  // When RFID hold started
+unsigned long lastRfidReadTime = 0;   // When RFID was last successfully read
 #define RFID_CONFIG_HOLD_TIME 10000   // 10 seconds to enter config mode
+#define RFID_CONTINUOUS_READ_TIMEOUT 2000  // 2 seconds max gap between reads
 
 // RFID config mode exit
 bool rfidHeldForConfigExit = false;   // Track if RFID is being held to exit config
@@ -1984,15 +1994,22 @@ void setup() {
         setCpuFrequencyMhz(60);   // BLE operations frequency with better power efficiency
         delay(50);
         
-        // Start in deep sleep mode but with BLE window active
+        // Start in deep sleep mode but with BLE window active (only if Ghost Key enabled)
         currentPowerState = POWER_DEEP_SLEEP;
-        bleDeepSleepAdvertising = true;
-        bleAdvertisingStopped = false;
-        quickConfidenceCompleted = false;
-        bluetoothInitialized = false;  // Need to reinitialize BLE stack
-        
-        // Set timer for BLE window duration (not full cycle)
-        bleDeepSleepAdvertiseStart = millis();
+        if (ghostKeyEnabled) {
+            bleDeepSleepAdvertising = true;
+            bleAdvertisingStopped = false;
+            quickConfidenceCompleted = false;
+            bluetoothInitialized = false;  // Need to reinitialize BLE stack
+            
+            // Set timer for BLE window duration (not full cycle)
+            bleDeepSleepAdvertiseStart = millis();
+        } else {
+            // Ghost Power Only Mode - no BLE operations
+            bleDeepSleepAdvertising = false;
+            bleAdvertisingStopped = true;
+            Serial.println("ESP32 Deep Sleep: Ghost Power Only Mode - BLE disabled");
+        }
         
         Serial.println("ESP32 Deep Sleep: Woke for BLE window, CPU at 80MHz");
     } else {
@@ -2073,8 +2090,9 @@ void setup() {
     // Initialize RSSI analysis system
     resetRSSIAnalysis();
     
-    // Initialize BLE only if enabled
-    if (bluetoothEnabled) {
+    // Initialize BLE only if enabled and not in Ghost Power Only Mode
+    // BLE is disabled in Ghost Power Only Mode to save power and simplify operation
+    if (bluetoothEnabled && ghostKeyEnabled) {
     bluetoothInitStartTime = millis();
     DEBUG_PRINT("Starting Bluetooth initialization at: ");
     DEBUG_PRINT(bluetoothInitStartTime);
@@ -2103,7 +2121,11 @@ void setup() {
     startRSSIScan();
     DEBUG_PRINTLN("RSSI scanning started");
     } else {
-        DEBUG_PRINTLN("Bluetooth disabled - skipping initialization");
+        if (!bluetoothEnabled) {
+            DEBUG_PRINTLN("Bluetooth disabled - skipping initialization");
+        } else if (!ghostKeyEnabled) {
+            DEBUG_PRINTLN("Ghost Power Only Mode - BLE disabled for power savings");
+        }
         bluetoothInitialized = false;
     }
     
@@ -2134,7 +2156,7 @@ void loop() {
     // Handle authentication based on enabled systems
     if (ghostKeyEnabled) {
         // Ghost Key enabled: RFID/Bluetooth authentication and push-to-start
-        if (bluetoothEnabled && bluetoothInitialized) {
+        if (bluetoothEnabled && bluetoothInitialized && ghostKeyEnabled) {
     updateBluetoothAuthentication();
         }
         // RFID scanning handled in main loop below
@@ -2144,10 +2166,41 @@ void loop() {
         bluetoothAuthenticated = false;
         
         if (ghostPowerEnabled) {
-            // Ghost Power only mode: RFID authentication (not accessory input)
+            // Ghost Power only mode: RFID authentication + ACCESSORY_INPUT_PIN tracking
             // RFID scanning handled in main loop below
             // Configuration mode access still available via button
             handleConfigModeOnly(); // Only handle config mode button press
+            
+            // Track ACCESSORY_INPUT_PIN state changes for new security logic
+            // NOTE: ACCESSORY_INPUT_PIN is active LOW (LOW = ignition ON, HIGH = ignition OFF)
+            lastAccessoryInputPinHigh = accessoryInputPinHigh;
+            accessoryInputPinHigh = (digitalRead(ACCESSORY_INPUT_PIN) == HIGH);
+            
+            // Skip edge detection on first read to prevent false triggers at boot
+            if (accessoryPinFirstRead) {
+                accessoryPinFirstRead = false;
+                Serial.print("ACCESSORY_INPUT_PIN: Initial state: ");
+                Serial.print(accessoryInputPinHigh ? "HIGH" : "LOW");
+                Serial.println(accessoryInputPinHigh ? " (ignition OFF)" : " (ignition ON)");
+            } else {
+                // Detect edge transitions (remember: LOW = active/ignition ON, HIGH = inactive/ignition OFF)
+                if (!accessoryInputPinHigh && lastAccessoryInputPinHigh) {
+                    // Pin went from HIGH to LOW (ignition turned ON)
+                    Serial.println("ACCESSORY_INPUT_PIN: HIGH -> LOW (ignition ON, security relays disabled)");
+                    accessoryPinAutoLockActive = false; // Cancel any autolock timer
+                } else if (accessoryInputPinHigh && !lastAccessoryInputPinHigh) {
+                    // Pin went from LOW to HIGH (ignition turned OFF)
+                    // Only start autolock timer if security was previously disabled due to ignition being on
+                    // or if there's active RFID authentication
+                    if (rfidAuthenticated || !securityEnabled) {
+                        Serial.println("ACCESSORY_INPUT_PIN: LOW -> HIGH (ignition OFF, autolock timer started)");
+                        accessoryPinLowTime = millis(); // Actually when pin went HIGH (ignition OFF)
+                        accessoryPinAutoLockActive = true;
+                    } else {
+                        Serial.println("ACCESSORY_INPUT_PIN: LOW -> HIGH (ignition OFF, no autolock needed - security already enabled)");
+                    }
+                }
+            }
         } else {
             // Both systems disabled - reset RFID too
             rfidAuthenticated = false;
@@ -2168,8 +2221,8 @@ void loop() {
         lastSecurityCheck = millis();
     }
     
-    // Update BLE connection status (only if Bluetooth is enabled)
-    if (bluetoothEnabled && bluetoothInitialized) {
+    // Update BLE connection status (only if Bluetooth is enabled and not in Ghost Power Only Mode)
+    if (bluetoothEnabled && bluetoothInitialized && ghostKeyEnabled) {
     isBleConnected = bleKeyboard.isConnected();
     
     // RSSI scanning (only when needed and not in deep sleep quiet period)
@@ -2308,6 +2361,9 @@ void loop() {
         }
         // Handle RFID authentication
         else if (checkRfidKey(tagData)) {
+            // Update last read time for continuous presence detection
+            lastRfidReadTime = millis();
+            
             // Check if this is the first time RFID auth is happening
             if (!wasRfidAuthenticated && !rfidAuthenticated && currentState != CONFIG_MODE) {
                 // First time RFID authentication - pulse buzzer once (not in config mode)
@@ -2319,21 +2375,27 @@ void loop() {
             rfidAuthStartTime = millis();
             Serial.println("RFID: Authenticated for 30 seconds");
             
-            // Start RFID config hold timer in Ghost Power only mode (for entry)
+            // Start/continue RFID config hold timer in Ghost Power only mode (for entry)
             if (!ghostKeyEnabled && ghostPowerEnabled && currentState != CONFIG_MODE) {
                 if (!rfidHeldForConfig) {
                     rfidHeldForConfig = true;
                     rfidConfigHoldStartTime = millis();
                     Serial.println("RFID: Config hold timer started (Ghost Power only mode)");
+                } else {
+                    // Tag is still being read - continue the timer (no action needed)
+                    // The timer will be reset if tag is not read for too long
                 }
             }
             
-            // Start RFID config exit hold timer in Ghost Power only mode (for exit)
+            // Start/continue RFID config exit hold timer in Ghost Power only mode (for exit)
             if (!ghostKeyEnabled && ghostPowerEnabled && currentState == CONFIG_MODE) {
                 if (!rfidHeldForConfigExit) {
                     rfidHeldForConfigExit = true;
                     rfidConfigExitHoldStartTime = millis();
                     Serial.println("RFID: Config exit hold timer started (Ghost Power only mode)");
+                } else {
+                    // Tag is still being read - continue the timer (no action needed)
+                    // The timer will be reset if tag is not read for too long
                 }
             }
         }
@@ -2377,18 +2439,24 @@ void loop() {
     
     // Handle RFID config mode hold logic (Ghost Power only mode)
     if (!ghostKeyEnabled && ghostPowerEnabled && currentState != CONFIG_MODE) {
-        // Reset hold timer if RFID is no longer authenticated
-        if (rfidHeldForConfig && !rfidAuthenticated) {
-            rfidHeldForConfig = false;
-            Serial.println("RFID: Config hold timer reset (tag removed)");
+        // Reset hold timer if tag hasn't been read recently (indicating it was removed)
+        if (rfidHeldForConfig) {
+            unsigned long timeSinceLastRead = millis() - lastRfidReadTime;
+            if (timeSinceLastRead > RFID_CONTINUOUS_READ_TIMEOUT) {
+                rfidHeldForConfig = false;
+                Serial.println("RFID: Config hold timer reset (tag removed - no recent reads)");
+            }
         }
         
-        // Check for 10-second hold to enter config mode
-        if (rfidHeldForConfig && rfidAuthenticated) {
+        // Check for 10-second continuous hold to enter config mode
+        if (rfidHeldForConfig) {
             unsigned long holdDuration = millis() - rfidConfigHoldStartTime;
-            if (holdDuration >= RFID_CONFIG_HOLD_TIME) {
+            unsigned long timeSinceLastRead = millis() - lastRfidReadTime;
+            
+            // Only proceed if tag is still being actively read
+            if (timeSinceLastRead <= RFID_CONTINUOUS_READ_TIMEOUT && holdDuration >= RFID_CONFIG_HOLD_TIME) {
                 rfidHeldForConfig = false; // Reset flag
-                Serial.println("RFID: 10-second hold detected - Entering config mode (Ghost Power only)");
+                Serial.println("RFID: 10-second continuous hold detected - Entering config mode (Ghost Power only)");
                 
                 // 2-second buzzer for config mode entry
                 buzzerOn();
@@ -2403,18 +2471,24 @@ void loop() {
     
     // Handle RFID config mode exit logic (Ghost Power only mode)
     if (!ghostKeyEnabled && ghostPowerEnabled && currentState == CONFIG_MODE) {
-        // Reset exit hold timer if RFID is no longer authenticated
-        if (rfidHeldForConfigExit && !rfidAuthenticated) {
-            rfidHeldForConfigExit = false;
-            Serial.println("RFID: Config exit hold timer reset (tag removed)");
+        // Reset exit hold timer if tag hasn't been read recently (indicating it was removed)
+        if (rfidHeldForConfigExit) {
+            unsigned long timeSinceLastRead = millis() - lastRfidReadTime;
+            if (timeSinceLastRead > RFID_CONTINUOUS_READ_TIMEOUT) {
+                rfidHeldForConfigExit = false;
+                Serial.println("RFID: Config exit hold timer reset (tag removed - no recent reads)");
+            }
         }
         
-        // Check for 10-second hold to exit config mode
-        if (rfidHeldForConfigExit && rfidAuthenticated) {
+        // Check for 10-second continuous hold to exit config mode
+        if (rfidHeldForConfigExit) {
             unsigned long exitHoldDuration = millis() - rfidConfigExitHoldStartTime;
-            if (exitHoldDuration >= RFID_CONFIG_EXIT_HOLD_TIME) {
+            unsigned long timeSinceLastRead = millis() - lastRfidReadTime;
+            
+            // Only proceed if tag is still being actively read
+            if (timeSinceLastRead <= RFID_CONTINUOUS_READ_TIMEOUT && exitHoldDuration >= RFID_CONFIG_EXIT_HOLD_TIME) {
                 rfidHeldForConfigExit = false; // Reset flag
-                Serial.println("RFID: 10-second hold detected - Exiting config mode (Ghost Power only)");
+                Serial.println("RFID: 10-second continuous hold detected - Exiting config mode (Ghost Power only)");
                 
                 // 1-second buzzer for config mode exit (different from entry)
                 buzzerOn();
@@ -2661,7 +2735,7 @@ void handleButtonPress() {
     // Update button LED based on authentication, engine state, and brake
     // Only control LED when in normal operation (not config mode, not engine running)
     if (currentState != CONFIG_MODE && !engineRunning) {
-        bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+        bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
         bool canStart = isAuthenticated && systemState == 0;
         
         if (brakeHeld && canStart) {
@@ -2713,7 +2787,7 @@ void handleButtonPress() {
             isLongPressDetected = true;
             
             // Check authentication before allowing config mode
-            bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+            bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
             if (isAuthenticated) {
                 DEBUG_BUTTON_PRINTLN("Long press detected - Entering config mode (authenticated)");
                 enterConfigMode();
@@ -2757,7 +2831,7 @@ void handleButtonPress() {
                 }
                 
                 // Starting requires authentication
-                bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+                bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
                 if (isAuthenticated && !startRelayActive && !engineRunning) {
                     // Only allow starting sequence if engine is not running and not already starting
                     DEBUG_PRINTLN("Starting engine sequence...");
@@ -2788,7 +2862,7 @@ void handleButtonPress() {
             // Only process button release if we're not in shutdown delay
             if (!isShuttingDown && !engineRunning && !startRelayActive) {
                 // Check if authenticated by Bluetooth (if enabled) or RFID
-                bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+                bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
                 if (isAuthenticated) {  // Only allow normal sequence if engine isn't running
                     systemState = (systemState + 1) % 3;
                     DEBUG_BUTTON_PRINT("Button released. New state: ");
@@ -2969,7 +3043,7 @@ void enterConfigMode() {
     }
     
     // Check authentication before allowing config mode access
-    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
     if (!isAuthenticated) {
         DEBUG_PRINTLN("Not authenticated - Access denied");
         return;
@@ -3966,7 +4040,7 @@ void setupWebServer() {
         String json = "{";
         json += "\"state\":\"" + stateStr + "\",";
         json += "\"powerState\":\"" + powerStateStr + "\",";
-        json += "\"bluetooth\":" + String((bluetoothEnabled && bluetoothAuthenticated) ? "true" : "false") + ",";
+        json += "\"bluetooth\":" + String((bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled) ? "true" : "false") + ",";
         json += "\"bluetoothEnabled\":" + String(bluetoothEnabled ? "true" : "false") + ",";
         json += "\"starterPulse\":" + String(starterPulseTime) + ",";
         json += "\"autoLockTimeout\":" + String(autoLockTimeout);
@@ -4748,11 +4822,53 @@ void updateSecurityState() {
         // Both systems enabled: RFID/Bluetooth authentication only (no brake+accessory needed)
         isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
     } else if (!ghostKeyEnabled && ghostPowerEnabled) {
-        // Ghost Power only mode: RFID authentication (same as Ghost Key but no push-to-start)
+        // Ghost Power only mode: NEW LOGIC
+        // 1. RFID authenticates for 30 seconds, disabling security relays
+        // 2. While ACCESSORY_INPUT_PIN is HIGH, security relays cannot be enabled
+        // 3. After ACCESSORY_INPUT_PIN goes LOW, autolock timer starts
+        // 4. If RFID authenticated again after pin goes LOW, re-authenticate
+        
         isAuthenticated = rfidAuthenticated;
+        
+        // Special logic for Ghost Power Only Mode
+        // NOTE: ACCESSORY_INPUT_PIN is active LOW (LOW = ignition ON, HIGH = ignition OFF)
+        if (!accessoryInputPinHigh) {
+            // While accessory pin is LOW (ignition ON), security relays CANNOT be enabled under any circumstance
+            securityEnabled = false;
+            accessoryPinAutoLockActive = false; // Reset autolock timer
+        } else {
+            // Accessory pin is HIGH (ignition OFF)
+            if (isAuthenticated) {
+                // RFID authenticated - disable security
+                securityEnabled = false;
+                accessoryPinAutoLockActive = false; // Reset autolock timer
+            } else {
+                // No RFID auth and accessory pin is HIGH (ignition OFF)
+                if (accessoryPinAutoLockActive) {
+                    // Autolock timer active - grace period after ignition turned off
+                    unsigned long timeSinceAccessoryLow = millis() - accessoryPinLowTime;
+                    if (timeSinceAccessoryLow >= autoLockTimeout) {
+                        securityEnabled = true; // Grace period expired - enable security
+                    } else {
+                        securityEnabled = false; // Still in grace period - keep security disabled
+                    }
+                } else {
+                    // No autolock timer active - default to secure state
+                    securityEnabled = true; // Default to enabled (secure)
+                }
+            }
+        }
+        
+        // Control security relays for Ghost Power Only Mode
+        if (securityEnabled) {
+            digitalWrite(RELAY_SECURITY, LOW);
+        } else {
+            digitalWrite(RELAY_SECURITY, HIGH);
+        }
+        return;
     }
     
-    // Security logic: enabled by default, disabled when authenticated or engine running
+    // Standard security logic for other modes
     if (engineRunning) {
         securityEnabled = false;
     } else if (isAuthenticated) {
@@ -4801,7 +4917,7 @@ void printSystemStatus() {
     unsigned long currentTime = millis();
     
     // Calculate current authentication state (like other functions do)
-    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
     
     switch(currentPowerState) {
         case POWER_ACTIVE:
@@ -4900,15 +5016,17 @@ void printSystemStatus() {
     Serial.print(digitalRead(RELAY_SECURITY) ? "HIGH \n" : "LOW \n");
     
     Serial.print("\nBluetooth State: ");
-    Serial.print(bluetoothEnabled ? "ENABLED" : "DISABLED");
-    if (bluetoothEnabled) {
+    if (bluetoothEnabled && ghostKeyEnabled) {
+        Serial.print("ENABLED");
         Serial.print(" (");
         Serial.print(bluetoothInitialized ? "Initialized" : "Not Initialized");
         Serial.print(", Auth: ");
         Serial.print(bluetoothAuthenticated ? "YES" : "NO");
         Serial.println(")");
+    } else if (bluetoothEnabled && !ghostKeyEnabled) {
+        Serial.println("DISABLED (Ghost Power Only Mode)");
     } else {
-        Serial.println();
+        Serial.println("DISABLED");
     }
     
     Serial.print("\nSystem Configuration:");
@@ -4920,7 +5038,28 @@ void printSystemStatus() {
     Serial.print(" (Security relays)");
     
     if (!ghostKeyEnabled && ghostPowerEnabled) {
-        Serial.print("\n  Accessory Input Auth: ");
+        Serial.print("\n  Ghost Power Only Mode Status:");
+        Serial.print("\n    ACCESSORY_INPUT_PIN: ");
+        Serial.print(accessoryInputPinHigh ? "HIGH" : "LOW");
+        Serial.print(" (Ignition ");
+        Serial.print(accessoryInputPinHigh ? "OFF" : "ON");
+        Serial.print(", Security relays ");
+        Serial.print(!accessoryInputPinHigh ? "DISABLED" : "can be enabled");
+        Serial.print(")");
+        Serial.print("\n    Autolock Timer: ");
+        if (accessoryPinAutoLockActive) {
+            unsigned long timeSinceAccessoryLow = millis() - accessoryPinLowTime;
+            unsigned long timeRemaining = (timeSinceAccessoryLow < autoLockTimeout) ? 
+                                         (autoLockTimeout - timeSinceAccessoryLow) : 0;
+            Serial.print("ACTIVE (");
+            Serial.print(timeRemaining / 1000);
+            Serial.print("s remaining)");
+        } else {
+            Serial.print("INACTIVE");
+        }
+        Serial.print("\n    Security Relays: ");
+        Serial.print(securityEnabled ? "ENABLED" : "DISABLED");
+        Serial.print("\n    Legacy Auth (Brake+Accessory): ");
         Serial.print(accessoryInputAuth ? "AUTHENTICATED" : "NOT AUTHENTICATED");
         Serial.print(" (Brake: ");
         Serial.print(digitalRead(BRAKE_PIN) == HIGH ? "HIGH" : "LOW");
@@ -5736,7 +5875,7 @@ void updatePowerManagement() {
     }
     
     // Get current authentication state
-    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated);
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
     
     // Track authentication state changes
     if (isAuthenticated != wasAuthenticated) {
@@ -5823,6 +5962,15 @@ void updatePowerManagement() {
             if (millis() - lastUnauthenticatedTime >= LIGHT_SLEEP_DELAY_MS) {
                 // Skip Light Sleep if timeout is 0 (direct Active → Deep Sleep)
                 if (lightSleepTimeout == 0 && firstSetupComplete) {
+                    // Check if autolock timer is active - if so, stay in active mode
+                    if (accessoryPinAutoLockActive) {
+                        unsigned long elapsed = millis() - accessoryPinLowTime;
+                        if (elapsed < autoLockTimeout) {
+                            unsigned long timeRemaining = autoLockTimeout - elapsed;
+                            Serial.printf("Autolock timer active (%lus remaining) - delaying Deep Sleep\n", timeRemaining / 1000);
+                            return; // Stay in current power state
+                        }
+                    }
                     Serial.println("Light Sleep timeout is 0ms, going directly to Deep Sleep");
                     setPowerState(POWER_DEEP_SLEEP);
                 } else {
@@ -5835,6 +5983,15 @@ void updatePowerManagement() {
         if (firstSetupComplete) {
             // Total time = LIGHT_SLEEP_DELAY_MS (Active time) + lightSleepTimeout (Light Sleep time)
             if (millis() - lastUnauthenticatedTime >= (LIGHT_SLEEP_DELAY_MS + lightSleepTimeout)) {
+                // Check if autolock timer is active - if so, stay in light sleep
+                if (accessoryPinAutoLockActive) {
+                    unsigned long elapsed = millis() - accessoryPinLowTime;
+                    if (elapsed < autoLockTimeout) {
+                        unsigned long timeRemaining = autoLockTimeout - elapsed;
+                        Serial.printf("Autolock timer active (%lus remaining) - staying in Light Sleep\n", timeRemaining / 1000);
+                        return; // Stay in current power state
+                    }
+                }
                 Serial.print("Light Sleep timeout reached (");
                 Serial.print(lightSleepTimeout);
                 Serial.println("ms), transitioning to Deep Sleep");
@@ -5866,7 +6023,7 @@ void updatePowerManagement() {
     // Handle Deep Sleep specific operations
     if (currentPowerState == POWER_DEEP_SLEEP) {
         handleDeepSleepRFID();
-        if (bluetoothEnabled) {
+        if (bluetoothEnabled && ghostKeyEnabled) {
             handleDeepSleepBLE();
         }
     }
@@ -5961,8 +6118,13 @@ void setPowerState(PowerState newState) {
                 // Configure wake-up source: GPIO35 (start button) on LOW signal
                 esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
                 
-                // Configure timer wake-up for BLE windows (12 seconds)
-                esp_sleep_enable_timer_wakeup(12 * 1000000ULL); // 12 seconds in microseconds
+                // Configure timer wake-up for BLE windows (12 seconds) - only if Ghost Key enabled
+                if (ghostKeyEnabled) {
+                    esp_sleep_enable_timer_wakeup(12 * 1000000ULL); // 12 seconds in microseconds
+                } else {
+                    // Ghost Power Only Mode - no BLE wake-ups, only button wake-up
+                    Serial.println("ESP32 Deep Sleep: Ghost Power Only Mode - no BLE timer wake-ups");
+                }
                 
                 // Store deep sleep state in RTC memory
                 wasInDeepSleep = true;
@@ -6237,7 +6399,9 @@ void handleDeepSleepBLE() {
                 
                 // Configure wake-up sources
                 esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
-                esp_sleep_enable_timer_wakeup(12 * 1000000ULL);
+                if (ghostKeyEnabled) {
+                    esp_sleep_enable_timer_wakeup(12 * 1000000ULL);
+                }
                 
                 // Store deep sleep state in RTC memory
                 wasInDeepSleep = true;

@@ -1924,6 +1924,8 @@ void updatePowerManagement();
 void setPowerState(PowerState newState);
 void handleDeepSleepRFID();
 void handleDeepSleepBLE();
+void handleBLEWindow();
+void handleRFIDCyclingWindow();
 // Deep sleep confidence checking uses standard RSSI analysis
 
 // Handle LED status blinking based on power state
@@ -1994,9 +1996,10 @@ void setup() {
         setCpuFrequencyMhz(60);   // BLE operations frequency with better power efficiency
         delay(50);
         
-        // Start in deep sleep mode but with BLE window active (only if Ghost Key enabled)
+        // Start in deep sleep mode with periodic scanning window
         currentPowerState = POWER_DEEP_SLEEP;
-        if (ghostKeyEnabled) {
+        if (bluetoothEnabled && ghostKeyEnabled) {
+            // BLE window active
             bleDeepSleepAdvertising = true;
             bleAdvertisingStopped = false;
             quickConfidenceCompleted = false;
@@ -2004,14 +2007,16 @@ void setup() {
             
             // Set timer for BLE window duration (not full cycle)
             bleDeepSleepAdvertiseStart = millis();
+            Serial.println("ESP32 Deep Sleep: Woke for BLE window, CPU at 80MHz");
         } else {
-            // Ghost Power Only Mode - no BLE operations
+            // BLE disabled - use window for RFID cycling instead
             bleDeepSleepAdvertising = false;
             bleAdvertisingStopped = true;
-            Serial.println("ESP32 Deep Sleep: Ghost Power Only Mode - BLE disabled");
+            
+            // Set timer for RFID cycling window duration
+            bleDeepSleepAdvertiseStart = millis();
+            Serial.println("ESP32 Deep Sleep: Woke for RFID cycling window (BLE disabled), CPU at 80MHz");
         }
-        
-        Serial.println("ESP32 Deep Sleep: Woke for BLE window, CPU at 80MHz");
     } else {
         // Normal boot (power-on, reset, or first boot)
         Serial.printf("ESP32: Normal boot #%d\n", bootCount);
@@ -5864,6 +5869,15 @@ void updatePowerManagement() {
         return;  // Don't do any other power management when engine is running
     }
     
+    // In Ghost Power Only Mode, if accessory pin is LOW (car running), stay in POWER_ACTIVE
+    if (!ghostKeyEnabled && ghostPowerEnabled && !accessoryInputPinHigh) {
+        if (currentPowerState != POWER_ACTIVE) {
+            Serial.println("Ghost Power Only: Accessory pin LOW (car running) - staying in POWER_ACTIVE");
+            setPowerState(POWER_ACTIVE);
+        }
+        return;  // Don't do any other power management when car is running
+    }
+    
     // If setup is not complete, limit to Light Sleep maximum for responsiveness
     if (!firstSetupComplete) {
         // Only allow Active or Light Sleep modes during setup
@@ -6023,9 +6037,8 @@ void updatePowerManagement() {
     // Handle Deep Sleep specific operations
     if (currentPowerState == POWER_DEEP_SLEEP) {
         handleDeepSleepRFID();
-        if (bluetoothEnabled && ghostKeyEnabled) {
-            handleDeepSleepBLE();
-        }
+        // Handle deep sleep scanning window (BLE when enabled, RFID cycling when BLE disabled)
+        handleDeepSleepBLE();
     }
 }
 
@@ -6118,12 +6131,13 @@ void setPowerState(PowerState newState) {
                 // Configure wake-up source: GPIO35 (start button) on LOW signal
                 esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
                 
-                // Configure timer wake-up for BLE windows (12 seconds) - only if Ghost Key enabled
-                if (ghostKeyEnabled) {
-                    esp_sleep_enable_timer_wakeup(12 * 1000000ULL); // 12 seconds in microseconds
+                // Configure timer wake-up for periodic scanning (12 seconds)
+                // BLE when enabled, RFID cycling when BLE disabled
+                esp_sleep_enable_timer_wakeup(12 * 1000000ULL); // 12 seconds in microseconds
+                if (bluetoothEnabled && ghostKeyEnabled) {
+                    Serial.println("ESP32 Deep Sleep: Timer wake-ups for BLE windows");
                 } else {
-                    // Ghost Power Only Mode - no BLE wake-ups, only button wake-up
-                    Serial.println("ESP32 Deep Sleep: Ghost Power Only Mode - no BLE timer wake-ups");
+                    Serial.println("ESP32 Deep Sleep: Timer wake-ups for RFID cycling (BLE disabled)");
                 }
                 
                 // Store deep sleep state in RTC memory
@@ -6208,13 +6222,24 @@ void handleDeepSleepRFID() {
     }
 }
 
-// Handle BLE advertising cycling in deep sleep
-// Note: With hardware deep sleep, this function mainly handles the BLE window after timer wake-up
+// Handle scanning window in deep sleep (BLE when enabled, RFID cycling when BLE disabled)
+// Note: With hardware deep sleep, this function handles the periodic scanning window after timer wake-up
 void handleDeepSleepBLE() {
-    // For hardware deep sleep, we only need to handle the BLE window and its completion
-    // Don't skip - we need to check for window completion even when not advertising
+    // Handle BLE window when Bluetooth is enabled
+    if (bluetoothEnabled && ghostKeyEnabled && bluetoothInitialized) {
+        handleBLEWindow();
+        return;
+    }
     
-    if (!bluetoothInitialized) return;
+    // Handle RFID cycling window when BLE is disabled
+    if (!bluetoothEnabled || !ghostKeyEnabled) {
+        handleRFIDCyclingWindow();
+        return;
+    }
+}
+
+// Handle BLE scanning window in deep sleep
+void handleBLEWindow() {
     
     // Static variables to track peak confidence across the BLE window
     static float peakConfidenceThisWindow = 0.0f;
@@ -6399,9 +6424,7 @@ void handleDeepSleepBLE() {
                 
                 // Configure wake-up sources
                 esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
-                if (ghostKeyEnabled) {
-                    esp_sleep_enable_timer_wakeup(12 * 1000000ULL);
-                }
+                esp_sleep_enable_timer_wakeup(12 * 1000000ULL);
                 
                 // Store deep sleep state in RTC memory
                 wasInDeepSleep = true;
@@ -6429,6 +6452,86 @@ void handleDeepSleepBLE() {
                 delay(50);  // Additional stabilization
                 Serial.end();  // Disable serial in deep sleep quiet period
             }
+        }
+    }
+}
+
+// Handle RFID cycling window in deep sleep when BLE is disabled
+void handleRFIDCyclingWindow() {
+    unsigned long currentTime = millis();
+    
+    // Safety check to prevent negative wraparound
+    if (bleDeepSleepAdvertiseStart > currentTime) {
+        bleDeepSleepAdvertiseStart = currentTime;
+    }
+    
+    // Static variables for RFID cycling (500ms on/500ms off)
+    static bool rfidCyclingOn = true;
+    static unsigned long lastRfidCycleTime = 0;
+    static unsigned long cyclingWindowStart = 0;
+    
+    // Initialize cycling window start time
+    if (cyclingWindowStart == 0) {
+        cyclingWindowStart = currentTime;
+        lastRfidCycleTime = currentTime;
+        rfidCyclingOn = true;
+        digitalWrite(RFID_SHD, LOW); // Start with RFID on
+        Serial.println("Deep Sleep: RFID cycling window started (500ms on/500ms off)");
+    }
+    
+    // Handle RFID cycling (500ms on/500ms off)
+    if (currentTime - lastRfidCycleTime >= 500) {
+        rfidCyclingOn = !rfidCyclingOn;
+        digitalWrite(RFID_SHD, rfidCyclingOn ? LOW : HIGH);
+        lastRfidCycleTime = currentTime;
+        
+        Serial.printf("Deep Sleep: RFID cycling - %s\n", rfidCyclingOn ? "ON" : "OFF");
+    }
+    
+    // Check if cycling window duration completed (8 seconds like BLE window)
+    unsigned long windowDuration = useHardwareDeepSleep ? BLE_DEEP_SLEEP_DURATION_MS : BLE_DEEP_SLEEP_INTERVAL_MS;
+    if (currentTime - bleDeepSleepAdvertiseStart >= windowDuration) {
+        // Window completed - turn off RFID and return to deep sleep
+        digitalWrite(RFID_SHD, HIGH); // Turn off RFID
+        Serial.println("Deep Sleep: RFID cycling window completed, returning to deep sleep");
+        
+        // Reset cycling variables
+        cyclingWindowStart = 0;
+        rfidCyclingOn = true;
+        
+        if (useHardwareDeepSleep) {
+            // Hardware deep sleep: enter new deep sleep cycle
+            Serial.println("ESP32 Deep Sleep: RFID cycling ended, entering hardware deep sleep");
+            Serial.flush();
+            delay(100);
+            
+            // Turn off RFID and LEDs
+            digitalWrite(RFID_SHD, HIGH);
+            digitalWrite(LED_PIN, LOW);
+            digitalWrite(BUTTON_LED_PIN, LOW);
+            
+            // Configure wake-up sources
+            esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
+            esp_sleep_enable_timer_wakeup(12 * 1000000ULL);
+            
+            // Store deep sleep state in RTC memory
+            wasInDeepSleep = true;
+            deepSleepCycles++;
+            
+            Serial.printf("ESP32 Deep Sleep: Calling esp_deep_sleep_start() NOW - Cycle #%d\n", deepSleepCycles);
+            Serial.flush();
+            delay(200);
+            
+            // Enter ESP32 hardware deep sleep
+            esp_deep_sleep_start();
+            
+            // Should never reach here
+            Serial.println("ERROR: esp_deep_sleep_start() failed!");
+            return;
+        } else {
+            // Software deep sleep: reset timer for next cycle
+            bleDeepSleepAdvertiseStart = millis();
+            Serial.println("Deep Sleep: Starting new RFID cycling cycle");
         }
     }
 }

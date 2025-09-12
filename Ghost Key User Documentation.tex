@@ -1,0 +1,401 @@
+\documentclass[11pt]{article}
+
+% ---------- Packages ----------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{microtype}
+\emergencystretch=1.5em
+
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{siunitx}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+\usepackage[most]{tcolorbox} % callout boxes
+\usepackage{float}            % [H] specifier to force inline placement
+\usepackage[section]{placeins}% prevent floats moving past section
+
+% ---------- Setup ----------
+\setlist{itemsep=0.2em, topsep=0.2em}
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+\setcounter{secnumdepth}{3}
+\setcounter{tocdepth}{2}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+% Safe arrows for headings/bookmarks
+\newcommand{\gkto}{\texorpdfstring{$\rightarrow$}{->}}
+\newcommand{\gkmenu}{(three dots menu)}
+
+% Product/version macros (no content changes—just reusing your values)
+\newcommand{\product}{Ghost Key}
+\newcommand{\softver}{Software v0.9.2}
+\newcommand{\revver}{Revision v0.4}
+\newcommand{\docdate}{September 2025}
+\newcommand{\docauthor}{Zayn Khan}
+
+% ---------- Callout styles ----------
+\newtcolorbox{gkimportant}{
+  breakable,
+  enhanced,
+  colback=orange!5!white,
+  colframe=orange!80!black,
+  title=Important,
+  fonttitle=\bfseries,
+  leftrule=1pt, rightrule=1pt, toprule=1pt, bottomrule=1pt,
+  arc=2mm, boxrule=0.5pt
+}
+\newtcolorbox{gknote}{
+  breakable,
+  enhanced,
+  colback=blue!4!white,
+  colframe=blue!70!black,
+  title=Note,
+  fonttitle=\bfseries,
+  leftrule=1pt, rightrule=1pt, toprule=1pt, bottomrule=1pt,
+  arc=2mm, boxrule=0.5pt
+}
+
+% ---------- Header / Footer ----------
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\product{} — Technical Documentation}
+\rhead{\softver{} \ (\revver)}
+\cfoot{\thepage}
+
+% ---------- Title ----------
+\title{\product: Technical Documentation}
+\date{\docdate}
+
+\begin{document}
+\maketitle
+
+% ----- Document control (standard manual front-matter) -----
+\section*{Document Control}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+\textbf{Document Title} & \product: Technical Documentation \\
+\textbf{Version}        & \softver{} \ (\revver) \\
+\textbf{Date}           & \docdate \\
+\textbf{Owner}          & \docauthor \\
+\textbf{Status}         & Draft for review \\
+\bottomrule
+\end{tabularx}
+
+% ----- TOC / LOF -----
+\tableofcontents
+\listoffigures
+\clearpage
+
+% =====================================================================
+%                      TECHNICAL DOCUMENTATION CONTENT
+% =====================================================================
+
+\textbf{\Large Ghost Key --- Technical Documentation}
+
+\emph{\revver{} --- for review}\\
+\emph{\product{} Software \softver}
+
+\medskip\hrule\medskip
+
+\section{At a glance}
+\begin{itemize}
+  \item \textbf{What it is:} ESP32-based vehicle access \& start system with RFID + Bluetooth authentication, push-to-start, and a web configuration portal.
+  \item \textbf{Core flows:} Authentication, accessory/ignition/start, immobilizer control.
+  \item \textbf{Interfaces:} Start button, brake input, system LED, button LED, buzzer, RFID reader, BLE, and web UI.
+\end{itemize}
+
+\section{Quick start}
+\begin{enumerate}
+  \item \textbf{Power on.} System LED blinks \(\sim\) once per second.
+  \item \textbf{Enter Config Mode.} Hold \textbf{Start} for \textbf{10s} (brake \textbf{not} pressed). The \textbf{button LED pulses smoothly}.
+  \item \textbf{Join Wi-Fi.} Connect to \textbf{Ghost Key Configuration} (default password \textbf{123456789}).
+  \item \textbf{Open the portal.} Browse to \url{http://192.168.4.1} in \textbf{Safari (iOS)} or \textbf{Chrome (Android)}.
+  \item \textbf{Set up.} Choose \textbf{Ghost Key}, \textbf{Ghost Power}, or \textbf{Both}. Change the \textbf{Wi-Fi password} and set an \textbf{Admin PIN} for the web portal.
+  \item Pair \textbf{Bluetooth} and enroll any additional \textbf{RFID} (up to 5).
+  \item \textbf{Calibrate Proximity Detection.} Run \textbf{Bluetooth Calibration} after installation for best proximity accuracy (see \emph{Authentication} \gkto{} \emph{Bluetooth}).
+  \item Set \textbf{Starter Pulse} and \textbf{Auto-lock}.
+  \item \textbf{Exit Config.} Press \textbf{Start} once. Test \textbf{lock/unlock} and \textbf{start/stop}.
+\end{enumerate}
+
+\begin{gkimportant}
+\textbf{Important:} Setup \emph{must} be completed even if settings are not changed. Device will drain the car battery until setup is completed.\\
+\textbf{Important:} If Ghost Key \emph{and} Bluetooth are enabled, a Bluetooth device \textbf{must} be paired; otherwise the device will not come out of deep sleep.
+\end{gkimportant}
+
+\section{Daily use}
+\subsection{Start \& stop}
+\begin{enumerate}
+  \item \textbf{Authenticate} via RFID or a paired phone (Bluetooth).
+  \item \textbf{Press and hold the brake.}
+  \item \textbf{Press Start} to crank; release after the engine starts.
+  \item \textbf{Press Start (with brake)} to stop the engine.
+\end{enumerate}
+
+\subsection{Accessory / ignition without starting}
+\begin{itemize}
+  \item \textbf{Press Start (no brake)} to cycle \textbf{OFF \gkto{} ACC \gkto{} IGN \gkto{} OFF}.
+\end{itemize}
+
+\subsection{Security \& auto-lock}
+\begin{itemize}
+  \item \textbf{Immobilizer/Security relay} engages when the engine is off and there is \textbf{no valid authentication}.
+  \item System \textbf{auto-locks} by default \textbf{30 s} after shutdown (configurable \textbf{5--120 s}).
+  \item Any valid authentication \textbf{unlocks/disarms}.
+\end{itemize}
+
+\section{Controls \& indicators}
+\subsection{Start button (actions)}
+\begin{itemize}
+  \item \textbf{Press (no brake):} Cycle \textbf{OFF \gkto{} ACC \gkto{} IGN \gkto{} OFF}
+  \item \textbf{Press with brake:} Start engine (if authenticated) or stop when running
+  \item \textbf{Press \& hold 10s (no brake):} Enter/exit \textbf{Config Mode} (button LED pulses smoothly)
+  \item \textbf{Press \& hold 30s (with brake):} \textbf{Factory reset} (settings only; RFID keys preserved)
+\end{itemize}
+
+\subsection{LEDs}
+\textbf{System LED} (status/heartbeat)
+
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+\textbf{Pattern} & \textbf{Meaning}\\
+\midrule
+Blink every \(\sim\)1s & Active power mode \\
+Blink every \(\sim\)2s & Light sleep \\
+Off & Deep sleep or powered off \\
+\textbf{3 quick flashes} & Entering \textbf{Config Mode} \\
+\textbf{Goes off} & Exiting \textbf{Config Mode} \\
+\textbf{Rapid \(\times\)10} & Factory reset in progress \\
+\textbf{3 quick 50 ms flashes} & (see Button LED) \\
+\bottomrule
+\end{tabularx}
+
+\medskip
+\textbf{Start Button LED} (illumination/feedback)
+
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+\textbf{State} & \textbf{Meaning}\\
+\midrule
+\textbf{Solid} & Brake pressed \textbf{and} authenticated \\
+\textbf{Off} & Not authenticated \textbf{or} brake not pressed \\
+\textbf{Smooth pulse} & \textbf{Config Mode} active \\
+\textbf{3 quick flashes} & Authentication error / access denied \\
+\bottomrule
+\end{tabularx}
+
+\subsection{Buzzer}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+\textbf{Sound} & \textbf{Meaning}\\
+\midrule
+\textbf{1 short beep} & RFID authenticated (successful read) \\
+\textbf{2 short beeps} & Unauthorized RFID tag \\
+\textbf{Continuous 2 s} & Entering \textbf{Config Mode} (Ghost Power only) \\
+\textbf{Continuous 1 s} & Exiting \textbf{Config Mode} (Ghost Power only) \\
+\bottomrule
+\end{tabularx}
+
+\section{Authentication}
+\subsection{RFID}
+\begin{itemize}
+  \item \textbf{Capacity:} Store up to \textbf{5} tags
+  \item \textbf{Validation:} Requires \textbf{one} good read
+  \item \textbf{Timeout:} Auth remains valid for \(\sim\)\textbf{30 s} after tag removal
+  \item \textbf{Range:} Close proximity (a few cm)
+\end{itemize}
+
+\subsection{Bluetooth (BLE)}
+\begin{itemize}
+  \item \textbf{Device name:} \textbf{Ghost Key}
+  \item \textbf{Max bonds:} \textbf{3} devices
+  \item \textbf{Method:} RSSI-based \textbf{confidence} with hysteresis
+  \begin{itemize}
+    \item \textbf{Wake thresholds (during BLE scan window):}
+    \begin{itemize}
+      \item \(\le\) \textbf{35\%} \gkto{} remain in \textbf{Deep sleep} (continue 10s off / 10s scan cycling)
+      \item \textbf{35--45\%} \gkto{} enter \textbf{Light sleep} at end of window (quicker response)
+      \item \(\ge\) \textbf{45\%} \gkto{} wake to \textbf{Active}
+    \end{itemize}
+    \item \textbf{Auth thresholds (permission to start):}
+    \begin{itemize}
+      \item \textbf{Grant} at \(\ge\) \textbf{65\%} confidence
+      \item \textbf{Revoke} at \(\le\) \textbf{50\%} confidence
+    \end{itemize}
+  \end{itemize}
+  \item \textbf{Range:} \(\sim\)3--10 ft depending on phone and environment
+  \item \textbf{Calibration (recommended):} Place your phone at the desired ``OK to start'' location (e.g., in your pocket in the \textbf{driver’s} seat) and run the \(\sim\)\textbf{30 s} calibration.
+\end{itemize}
+
+\begin{gknote}
+\textbf{Note:} In \textbf{Deep sleep}, RFID is \textbf{off}. Bluetooth is scanned during the 10s window to evaluate confidence and wake decisions. If Bluetooth is disabled the start button \emph{or} the brake pedal can be used as a wakeup to use RFID.
+\end{gknote}
+
+\section{Configuration portal}
+\subsection{Connect}
+\begin{enumerate}
+  \item Enter \textbf{Config Mode} (hold \textbf{Start} 10 s, no brake).
+  \item Join \textbf{Wi-Fi:} \texttt{Ghost Key Configuration}\\
+        (default password \textbf{123456789})
+  \item Browse to \url{http://192.168.4.1} and sign in with your \textbf{Interface PIN}.
+\end{enumerate}
+
+\begin{gkimportant}
+\textbf{Important:} On first setup, change the \textbf{Wi-Fi password} and the \textbf{Interface PIN}.
+\end{gkimportant}
+
+\subsection{Add to Home Screen (optional)}
+\begin{itemize}
+  \item \textbf{iOS / iPadOS (Safari only):} Share \gkto{} \textbf{Add to Home Screen} while on \textbf{192.168.4.1}.
+  \item \textbf{Android (Chrome recommended):} Menu \gkmenu{} \gkto{} \textbf{Add to Home Screen} while on \textbf{192.168.4.1}.
+\end{itemize}
+
+\subsection{Key settings}
+\begin{itemize}
+  \item \textbf{Modes:} Enable/disable \textbf{Ghost Key} or \textbf{Ghost Power}, or enable \textbf{Both}
+  \item \textbf{RFID keys:} Add, name, or remove (max \textbf{5})
+  \item \textbf{Bluetooth:} Pairing mode, device names, remove bonds (max \textbf{3})
+  \item \textbf{Starter pulse:} \SI{100}{\milli\second}--\SI{3000}{\milli\second} (default \SI{700}{\milli\second})
+  \item \textbf{Auto-lock delay:} \SI{5}{\second}--\SI{120}{\second} (default \SI{30}{\second})
+  \item \textbf{Calibration:} Bluetooth proximity calibration (\(\sim\)\textbf{30 s})
+  \item \textbf{Developer Diagnostics:} Live RSSI/confidence, status, logs
+\end{itemize}
+
+\section{Troubleshooting}
+\subsection{Quick checks}
+\begin{itemize}
+  \item \textbf{No LED:} Check power and fuses; unit may be in \textbf{Deep sleep} (press brake or Start).
+  \item \textbf{Rapid LED flashing:} Authentication failed; present a valid RFID or approach with a paired phone.
+  \item \textbf{LED stuck on:} Power-cycle; if it persists, reflash firmware or contact support.
+  \item \textbf{No buzzer on RFID:} Tag not enrolled or reader wiring/placement issue.
+\end{itemize}
+
+\subsection{Symptom \gkto{} fix}
+\begin{tabularx}{\linewidth}{@{}lYY@{}}
+\toprule
+\textbf{Symptom} & \textbf{Likely cause} & \textbf{Try this}\\
+\midrule
+Won’t start with button & Not authenticated & Present RFID or bring paired phone closer; check BLE is enabled \\
+Starts then stalls & Ignition outputs or immobilizer timing & Verify \textbf{IGN1/IGN2} wiring; increase \textbf{Starter Pulse} \\
+Can’t enter Config Mode & Brake is pressed or device is not authenticated & Release brake; authenticate with RFID or Bluetooth; hold \textbf{Start} for \textbf{10 s} \\
+BLE unreliable & Phone/environment variability & Re-run \textbf{Calibration}; relocate antenna \\
+RFID intermittent & Tag orientation or interference & Reposition tag/antenna; clean tag; ensure \textbf{two consecutive} reads \\
+\bottomrule
+\end{tabularx}
+
+\section{Reset \& recovery}
+\begin{itemize}
+  \item \textbf{Exit Config Mode:} Press \textbf{Start} once (or \textbf{hold an enrolled RFID for 10s} in \textbf{Ghost Power-only} systems).
+  \item \textbf{Factory reset:} Hold \textbf{Start + brake}. After 10s the system LED will start to toggle each second. Continue holding for \textbf{30s} to complete the reset.
+  \begin{itemize}
+    \item \textbf{Preserves:} RFID keys
+    \item \textbf{Resets:} All other settings and Bluetooth bonds
+    \item \textbf{Feedback:} System LED toggles each second; rapid flashes at completion
+  \end{itemize}
+\end{itemize}
+
+\section{Specifications (summary)}
+\begin{itemize}
+  \item \textbf{MCU:} ESP32 (240/160/80 MHz power scaling)
+  \item \textbf{Auth:} RFID (EM4095-style), BLE proximity with confidence model
+  \item \textbf{Outputs:} ACC, IGN1, IGN2, START, SECURITY (relay-driven)
+  \item \textbf{Inputs:} Start button, brake, accessory sense
+  \item \textbf{Indicators:} System LED, button LED, buzzer
+  \item \textbf{Wi-Fi:} AP configuration (captive portal style)
+\end{itemize}
+
+\clearpage
+\section*{Appendix A — Installer reference}
+\subsection*{GPIO map}
+\begin{tabularx}{\linewidth}{@{}l l@{}}
+\toprule
+\textbf{Function} & \textbf{GPIO}\\
+\midrule
+System LED           & 23 \\
+Button LED           & 26 \\
+Beeper               & 25 \\
+Start button (input) & 35 (active-low, ext pull-up) \\
+Brake input          & 18 (active-low) \\
+Accessory input      & 19 (active-low) \\
+RFID Demod Out       & 12 \\
+RFID SHD             & 13 \\
+RFID MOD             & 27 \\
+RFID RDY/CLK         & 14 \\
+ACC relay            & 15 \\
+IGN1 relay           & 5 \\
+IGN2 relay           & 4 \\
+START relay          & 16 \\
+SECURITY relay       & 17 \\
+\bottomrule
+\end{tabularx}
+
+\subsection*{Power \& sleep behavior (detailed)}
+\begin{itemize}
+  \item \textbf{Deep sleep cycle:} \textbf{4s radio-off / 8s BLE-scan} cycling; \textbf{RFID OFF}. During each BLE window: \(\le\) \textbf{35\%} confidence \gkto{} remain in \textbf{Deep sleep}; \textbf{35--45\%} \gkto{} transition to \textbf{Light sleep} at the end of the window; \(\ge\) \textbf{45\%} \gkto{} wake to \textbf{Active}.
+  \item \textbf{Light sleep:} Borderline-confidence mode (\textbf{35--45\%}) for quicker response; BLE remains active.
+  \item \textbf{Auth hysteresis:} \textbf{Grant} at \(\ge\) \textbf{65\%} confidence; \textbf{Revoke} at \(\le\) \textbf{50\%}.
+  \item \textbf{Wake stabilization:} \(\sim\)\textbf{2 s} after deep-sleep wake.
+  \item \textbf{User wake:} \textbf{Start} always wakes; device then authenticates via BLE or reads a paired RFID fob.
+  \item See Figure 1 below for an overview
+\end{itemize}
+
+\subsubsection*{Power State Diagram}
+\IfFileExists{Mermaid Chart Diagrams Aug 29 2025 (1).png}{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{Mermaid Chart Diagrams Aug 29 2025 (1).png}
+  \caption{Power State Diagram}
+\end{figure}
+}{%
+\begin{figure}[H]\centering
+\fbox{\parbox{\linewidth}{\centering [Power State Diagram image placeholder]}}
+\caption{Power State Diagram}
+\end{figure}
+}
+
+\subsection*{Authentication Logic Flow}
+\IfFileExists{Authentication Logic from Google Drive.png}{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{Authentication Logic from Google Drive.png}
+  \caption{Authentication Logic Flow}
+\end{figure}
+}{%
+\begin{figure}[H]\centering
+\fbox{\parbox{\linewidth}{\centering [Authentication Logic Flow image placeholder]}}
+\caption{Authentication Logic Flow}
+\end{figure}
+}
+
+\subsection*{State Diagram}
+\IfFileExists{Ghost Key State Machine.png}{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{Ghost Key State Machine.png}
+  \caption{State Diagram}
+\end{figure}
+}{%
+\begin{figure}[H]\centering
+\fbox{\parbox{\linewidth}{\centering [Authentication State Diagram image placeholder]}}
+\caption{Authentication State Diagram}
+\end{figure}
+}
+
+\section*{Change log}
+\begin{itemize}
+  \item v0.4: Added State Machine Diagram
+  \item v0.3.1: Slight edit to quick start to include note about completing setup
+  \item \textbf{v0.3}: Added Power State Diagram
+  \item \textbf{v0.2:} Reorganized sections; unified wake vs.\ auth thresholds; corrected IP/browser notes; standardized terms (Wi-Fi, Admin PIN); consolidated calibration guidance; clarified LED/buzzer behaviors; moved detailed sleep logic to Appendix.
+  \item \textbf{v0.1:} Initial structure + content from codebase analysis
+\end{itemize}
+
+\end{document}

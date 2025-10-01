@@ -407,13 +407,13 @@ unsigned long lastUnauthorizedBeepTime = 0;  // Reset flag after 5 seconds
 bool rfidHeldForConfig = false;       // Track if RFID is being held for config
 unsigned long rfidConfigHoldStartTime = 0;  // When RFID hold started
 unsigned long lastRfidReadTime = 0;   // When RFID was last successfully read
-#define RFID_CONFIG_HOLD_TIME 5000   // 10 seconds to enter config mode
+#define RFID_CONFIG_HOLD_TIME 5000   // 5 seconds to enter config mode
 #define RFID_CONTINUOUS_READ_TIMEOUT 2000  // 2 seconds max gap between reads
 
 // RFID config mode exit
 bool rfidHeldForConfigExit = false;   // Track if RFID is being held to exit config
 unsigned long rfidConfigExitHoldStartTime = 0;  // When RFID exit hold started
-#define RFID_CONFIG_EXIT_HOLD_TIME 5000  // 10 seconds to exit config mode
+#define RFID_CONFIG_EXIT_HOLD_TIME 5000  // 5 seconds to exit config mode
 
 // Power management state variables
 PowerState currentPowerState = POWER_ACTIVE;  // Always start in active mode
@@ -489,6 +489,14 @@ bool rfidAuthenticated = false;  // True when valid RFID tag detected
 unsigned long rfidAuthStartTime = 0;  // Time when RFID auth started
 byte lastAuthenticatedTag[5] = {0};  // Store the last tag that authenticated
 #define RFID_DEAUTH_TIMEOUT 2000  // 2 seconds minimum between auth and deauth
+
+// Function to reset RFID authentication timer on system interactions
+void resetRfidAuthTimer() {
+    if (rfidAuthenticated) {
+        rfidAuthStartTime = millis();
+        Serial.println("RFID: Authentication timer reset due to system interaction");
+    }
+}
 
 // Hardcoded master RFID key (invisible to user, cannot be removed)
 const byte masterRfidKey[5] = {67, 0, 25, 249, 64};  // Master key: 76,0,82,35,4
@@ -625,7 +633,7 @@ bool hasNewBluetoothDevice = false;
 bool hasRemovedDevice = false;
 
 // More timing constants
-#define CONFIG_MODE_PRESS_TIME 10000
+#define CONFIG_MODE_PRESS_TIME 5000
 #define STATUS_PRINT_INTERVAL 5000
 #define SECURITY_CHECK_INTERVAL 1000
 #define SHUTDOWN_DELAY 1000
@@ -2466,15 +2474,32 @@ void loop() {
         }
     }
     
-    // Check RFID authentication timeout
+    // Check RFID authentication timeout - only timeout if system is OFF and no recent interactions
     if (rfidAuthenticated && (millis() - rfidAuthStartTime >= RFID_AUTH_TIMEOUT)) {
-        rfidAuthenticated = false;
-        Serial.println("RFID: Authentication expired");
+        // Keep RFID authenticated if:
+        // 1. Engine is running
+        // 2. System is in accessory or ignition state (not OFF)
+        // 3. Currently starting (startRelayActive)
+        // 4. In config mode
+        bool shouldKeepAuthenticated = engineRunning || 
+                                     systemState > 0 || 
+                                     startRelayActive || 
+                                     currentState == CONFIG_MODE;
         
-        // Pleasant audio feedback for authentication timeout (not in config mode)
-        if (currentState != CONFIG_MODE) {
-            Serial.println("RFID: Playing authentication timeout tone");
-            buzzerPulse(200);  // 0.2 second pleasant tone (same as calibration)
+        if (shouldKeepAuthenticated) {
+            // Reset timer to keep authentication active
+            rfidAuthStartTime = millis();
+            Serial.println("RFID: Authentication timer reset - system active");
+        } else {
+            // System is OFF and timeout reached - deauthenticate
+            rfidAuthenticated = false;
+            Serial.println("RFID: Authentication expired (system OFF)");
+            
+            // Pleasant audio feedback for authentication timeout (not in config mode)
+            if (currentState != CONFIG_MODE) {
+                Serial.println("RFID: Playing authentication timeout tone");
+                buzzerPulse(200);  // 0.2 second pleasant tone (same as calibration)
+            }
         }
     }
     
@@ -2490,7 +2515,7 @@ void loop() {
             }
         }
         
-        // Check for 10-second continuous hold to enter config mode
+        // Check for 5-second continuous hold to enter config mode
         if (rfidHeldForConfig) {
             unsigned long holdDuration = millis() - rfidConfigHoldStartTime;
             unsigned long timeSinceLastRead = millis() - lastRfidReadTime;
@@ -2499,9 +2524,9 @@ void loop() {
             if (timeSinceLastRead <= RFID_CONTINUOUS_READ_TIMEOUT && holdDuration >= RFID_CONFIG_HOLD_TIME) {
                 rfidHeldForConfig = false; // Reset flag
                 if (!ghostKeyEnabled && ghostPowerEnabled) {
-                    Serial.println("RFID: 10-second continuous hold detected - Entering config mode (Ghost Power only)");
+                    Serial.println("RFID: 5-second continuous hold detected - Entering config mode (Ghost Power only)");
                 } else {
-                    Serial.println("RFID: 10-second continuous hold detected - Entering config mode (setup not complete)");
+                    Serial.println("RFID: 5-second continuous hold detected - Entering config mode (setup not complete)");
                 }
                 
                 // 2-second buzzer for config mode entry
@@ -2526,7 +2551,7 @@ void loop() {
             }
         }
         
-        // Check for 10-second continuous hold to exit config mode
+        // Check for 5-second continuous hold to exit config mode
         if (rfidHeldForConfigExit) {
             unsigned long exitHoldDuration = millis() - rfidConfigExitHoldStartTime;
             unsigned long timeSinceLastRead = millis() - lastRfidReadTime;
@@ -2534,7 +2559,7 @@ void loop() {
             // Only proceed if tag is still being actively read
             if (timeSinceLastRead <= RFID_CONTINUOUS_READ_TIMEOUT && exitHoldDuration >= RFID_CONFIG_EXIT_HOLD_TIME) {
                 rfidHeldForConfigExit = false; // Reset flag
-                Serial.println("RFID: 10-second continuous hold detected - Exiting config mode (Ghost Power only)");
+                Serial.println("RFID: 5-second continuous hold detected - Exiting config mode (Ghost Power only)");
                 
                 // 1-second buzzer for config mode exit (different from entry)
                 buzzerOn();
@@ -2867,6 +2892,7 @@ void handleButtonPress() {
                 systemState = 0;  // Set to OFF
                 startRelayActive = false;
                 lastEngineShutdown = millis();  // Record time of engine shutdown
+                resetRfidAuthTimer(); // Reset RFID timer on engine stop
                 controlRelays();
             } else {
                 // Check cooldown period after engine shutdown to prevent immediate restart
@@ -2883,6 +2909,7 @@ void handleButtonPress() {
                     DEBUG_PRINTLN("Starting engine sequence...");
                     startRelayActive = true;
                     startRelayTimer = millis();
+                    resetRfidAuthTimer(); // Reset RFID timer on engine start
                     controlRelays();
                 } else if (!isAuthenticated) {
                     DEBUG_BUTTON_PRINTLN("Not authenticated - Cannot start engine");
@@ -2913,6 +2940,7 @@ void handleButtonPress() {
                     systemState = (systemState + 1) % 3;
                     DEBUG_BUTTON_PRINT("Button released. New state: ");
                     DEBUG_BUTTON_PRINTLN(systemState);
+                    resetRfidAuthTimer(); // Reset RFID timer on system state change
                     controlRelays();
                 }
             }
@@ -3036,9 +3064,12 @@ void updateSystemState() {
             ledcWrite(LED_PWM_CHANNEL, ledBrightness);
             lastAccessoryLedUpdate = millis();
         }
+    } else if (systemState == 0) {
+        // OFF state - LED control handled in handleButtonPress() for authentication-based control
+        // (LED on when authenticated and brake held, off otherwise)
     } else {
-        // Normal LED control when not in config mode or engine running - handled in handleButtonPress()
-        // LED logic moved to handleButtonPress() for authentication-based control
+        // Fallback for any other states - LED off
+        ledcWrite(LED_PWM_CHANNEL, 0);
     }
 }
 

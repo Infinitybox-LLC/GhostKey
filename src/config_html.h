@@ -2448,7 +2448,7 @@ function handleHeaderCollapse() {
                     
                     <!-- Version Information -->
                     <div style="text-align: center; margin-top: 2rem; padding: 1rem;">
-                        <p style="font-size: 0.75rem; color: #999; margin: 0;">Ghost Key v0.10.2</p>
+                        <p style="font-size: 0.75rem; color: #999; margin: 0;">Ghost Key v0.10.3</p>
                     </div>
                 </section>
                 

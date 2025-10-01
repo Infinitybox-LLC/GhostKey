@@ -2393,9 +2393,9 @@ void loop() {
                 
                 // Audio feedback for deauthentication (not in config mode)
                 if (currentState != CONFIG_MODE) {
-                    buzzerPulse(50);  // Short pulse for deauth
+                    buzzerPulse(200);  // Longer pulse for deauth
                     delay(100);
-                    buzzerPulse(50);  // Double pulse to distinguish from auth
+                    buzzerPulse(200);  // Double pulse to distinguish from auth
                 }
             } else if (!rfidAuthenticated) {
                 // Not currently authenticated - authenticate
@@ -2795,9 +2795,11 @@ void handleButtonPress() {
         if (brakeReading == LOW && !brakeHeld) {
             brakeHeld = true;
             DEBUG_BUTTON_PRINTLN("Brake held (debounced)");
+            resetRfidAuthTimer(); // Reset RFID timer on brake press
         } else if (brakeReading == HIGH && brakeHeld) {
             brakeHeld = false;
             DEBUG_BUTTON_PRINTLN("Brake released (debounced)");
+            resetRfidAuthTimer(); // Reset RFID timer on brake release
         }
     }
     

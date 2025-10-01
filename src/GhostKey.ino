@@ -407,13 +407,13 @@ unsigned long lastUnauthorizedBeepTime = 0;  // Reset flag after 5 seconds
 bool rfidHeldForConfig = false;       // Track if RFID is being held for config
 unsigned long rfidConfigHoldStartTime = 0;  // When RFID hold started
 unsigned long lastRfidReadTime = 0;   // When RFID was last successfully read
-#define RFID_CONFIG_HOLD_TIME 10000   // 10 seconds to enter config mode
+#define RFID_CONFIG_HOLD_TIME 5000   // 10 seconds to enter config mode
 #define RFID_CONTINUOUS_READ_TIMEOUT 2000  // 2 seconds max gap between reads
 
 // RFID config mode exit
 bool rfidHeldForConfigExit = false;   // Track if RFID is being held to exit config
 unsigned long rfidConfigExitHoldStartTime = 0;  // When RFID exit hold started
-#define RFID_CONFIG_EXIT_HOLD_TIME 10000  // 10 seconds to exit config mode
+#define RFID_CONFIG_EXIT_HOLD_TIME 5000  // 10 seconds to exit config mode
 
 // Power management state variables
 PowerState currentPowerState = POWER_ACTIVE;  // Always start in active mode
@@ -487,6 +487,8 @@ int numStoredKeys = 0;  // Number of keys currently stored
 bool rfidPairingMode = false;  // True when waiting for RFID key to pair
 bool rfidAuthenticated = false;  // True when valid RFID tag detected
 unsigned long rfidAuthStartTime = 0;  // Time when RFID auth started
+byte lastAuthenticatedTag[5] = {0};  // Store the last tag that authenticated
+#define RFID_DEAUTH_TIMEOUT 2000  // 2 seconds minimum between auth and deauth
 
 // Hardcoded master RFID key (invisible to user, cannot be removed)
 const byte masterRfidKey[5] = {67, 0, 25, 249, 64};  // Master key: 76,0,82,35,4
@@ -563,6 +565,8 @@ bool lastBrakeReading = HIGH;
 bool brakeHeld = false;
 bool buttonPressed = false;
 unsigned long buttonPressStartTime = 0;
+bool extendedCrankingActive = false;  // True when extended cranking is active
+bool lastExtendedCrankState = false;  // Track previous extended crank state
 bool isLongPressDetected = false;
 bool brakeButtonActionProcessed = false;  // Prevent multiple brake+button actions per press
 
@@ -2369,16 +2373,43 @@ void loop() {
             // Update last read time for continuous presence detection
             lastRfidReadTime = millis();
             
-            // Check if this is the first time RFID auth is happening
-            if (!wasRfidAuthenticated && !rfidAuthenticated && currentState != CONFIG_MODE) {
-                // First time RFID authentication - pulse buzzer once (not in config mode)
-                buzzerPulse(100);  // 100ms PWM tone
-                Serial.println("RFID: Authentication buzzer pulse");
-            }
+            // Check if this is the same tag that's currently authenticated
+            bool isSameTag = (rfidAuthenticated && compareTagData(lastAuthenticatedTag, tagData));
             
-            rfidAuthenticated = true;
-            rfidAuthStartTime = millis();
-            Serial.println("RFID: Authenticated for 30 seconds");
+            if (isSameTag && (millis() - rfidAuthStartTime >= RFID_DEAUTH_TIMEOUT)) {
+                // Same tag scanned again after 2+ seconds - deauthenticate
+                rfidAuthenticated = false;
+                rfidAuthStartTime = 0;
+                memset(lastAuthenticatedTag, 0, sizeof(lastAuthenticatedTag));
+                Serial.println("RFID: Deauthenticated by scanning same tag again");
+                
+                // Audio feedback for deauthentication (not in config mode)
+                if (currentState != CONFIG_MODE) {
+                    buzzerPulse(50);  // Short pulse for deauth
+                    delay(100);
+                    buzzerPulse(50);  // Double pulse to distinguish from auth
+                }
+            } else if (!rfidAuthenticated) {
+                // Not currently authenticated - authenticate
+                
+                // Check if this is the first time RFID auth is happening
+                if (!wasRfidAuthenticated && currentState != CONFIG_MODE) {
+                    // First time RFID authentication - pulse buzzer once (not in config mode)
+                    buzzerPulse(100);  // 100ms PWM tone
+                    Serial.println("RFID: Authentication buzzer pulse");
+                }
+                
+                rfidAuthenticated = true;
+                rfidAuthStartTime = millis();
+                memcpy(lastAuthenticatedTag, tagData, sizeof(tagData));
+                Serial.println("RFID: Authenticated for 30 seconds");
+            } else if (!isSameTag) {
+                // Different tag scanned while authenticated - re-authenticate with new tag
+                rfidAuthStartTime = millis();
+                memcpy(lastAuthenticatedTag, tagData, sizeof(tagData));
+                Serial.println("RFID: Re-authenticated with different tag for 30 seconds");
+            }
+            // If same tag within 2 seconds, just update the read time but don't change auth state
             
             // Start/continue RFID config hold timer in Ghost Power only mode OR before setup complete (for entry)
             if ((!ghostKeyEnabled && ghostPowerEnabled && currentState != CONFIG_MODE) || 
@@ -2923,15 +2954,39 @@ void updateButtonState(ButtonState &state, int pin) {
 }
 
 void updateSystemState() {
+    // Check for extended cranking conditions (both start button and brake held while authenticated)
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
+    bool shouldExtendedCrank = (buttonPressed && brakeHeld && isAuthenticated && startRelayActive);
+    
     // Handle start sequence timing
     if (startRelayActive) {
-        if (millis() - startRelayTimer >= starterPulseTime) {
+        if (shouldExtendedCrank) {
+            // Extended cranking mode - continue cranking while both buttons held
+            if (!extendedCrankingActive) {
+                extendedCrankingActive = true;
+                DEBUG_PRINTLN("Extended cranking activated - will continue until button or brake released");
+            }
+            // Reset timer to prevent normal timeout while extended cranking
+            startRelayTimer = millis();
+        } else if (extendedCrankingActive) {
+            // Extended cranking was active but conditions no longer met - stop cranking
+            DEBUG_PRINTLN("Extended cranking stopped - button or brake released");
+            startRelayActive = false;
+            extendedCrankingActive = false;
+            engineRunning = true;
+            systemState = 2;  // Set to IGNITION state when engine is running
+            controlRelays();
+        } else if (millis() - startRelayTimer >= starterPulseTime) {
+            // Normal start sequence timeout
             DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
             startRelayActive = false;
             engineRunning = true;
             systemState = 2;  // Set to IGNITION state when engine is running
             controlRelays();
         }
+    } else {
+        // Reset extended cranking flag when not actively starting
+        extendedCrankingActive = false;
     }
 
     // Handle LED control for special states
@@ -2961,9 +3016,16 @@ void updateSystemState() {
         // Reset config mode LED initialization when not in config mode
         static bool configModeFirstRun = true;
         configModeFirstRun = true;
-        // Engine running: Smooth PWM pulsing (unchanged)
-        static unsigned long lastEngineLedUpdate = 0;
-        if (millis() - lastEngineLedUpdate > 20) {  // Update every 20ms for smooth fade
+        // Engine running: Solid LED at 50% brightness
+        static bool engineLedSet = false;
+        if (!engineLedSet) {
+            ledcWrite(LED_PWM_CHANNEL, 128);  // 50% brightness (128/255)
+            engineLedSet = true;
+        }
+    } else if (systemState >= 1 && !startRelayActive) {
+        // Accessory or Ignition mode (but not cranking): Smooth PWM pulsing
+        static unsigned long lastAccessoryLedUpdate = 0;
+        if (millis() - lastAccessoryLedUpdate > 20) {  // Update every 20ms for smooth fade
             ledBrightness = ledBrightness + ledFadeAmount;
             
             // Reverse the direction of the fading at the ends of the fade
@@ -2972,7 +3034,7 @@ void updateSystemState() {
             }
             
             ledcWrite(LED_PWM_CHANNEL, ledBrightness);
-            lastEngineLedUpdate = millis();
+            lastAccessoryLedUpdate = millis();
         }
     } else {
         // Normal LED control when not in config mode or engine running - handled in handleButtonPress()
@@ -2984,17 +3046,24 @@ void checkStartSequence() {
     if (startRelayActive) {
         unsigned long currentTime = millis();
         unsigned long elapsedTime = currentTime - startRelayTimer;
-        DEBUG_PRINT("Start sequence time: ");
-        DEBUG_PRINT(elapsedTime);
-        DEBUG_PRINT(" / ");
-        DEBUG_PRINTLN(starterPulseTime);
         
-        if (elapsedTime >= starterPulseTime) {
-            DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
-            startRelayActive = false;
-            engineRunning = true;
-            systemState = 2;  // Set to IGNITION state when engine is running
-            controlRelays();
+        if (extendedCrankingActive) {
+            DEBUG_PRINT("Extended cranking active - time: ");
+            DEBUG_PRINT(elapsedTime);
+            DEBUG_PRINTLN("ms (no timeout)");
+        } else {
+            DEBUG_PRINT("Start sequence time: ");
+            DEBUG_PRINT(elapsedTime);
+            DEBUG_PRINT(" / ");
+            DEBUG_PRINTLN(starterPulseTime);
+            
+            if (elapsedTime >= starterPulseTime) {
+                DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
+                startRelayActive = false;
+                engineRunning = true;
+                systemState = 2;  // Set to IGNITION state when engine is running
+                controlRelays();
+            }
         }
     }
 }
@@ -4913,7 +4982,11 @@ void printSystemStatus() {
     if (engineRunning) {
         Serial.println("RUNNING");
     } else if (startRelayActive) {
-        Serial.println("STARTING");
+        if (extendedCrankingActive) {
+            Serial.println("EXTENDED CRANKING");
+        } else {
+            Serial.println("STARTING");
+        }
     } else {
         switch (systemState) {
             case 0:

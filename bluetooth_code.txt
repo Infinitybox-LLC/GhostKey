@@ -1,0 +1,1965 @@
+GHOSTKEY ESP32 - BLUETOOTH CODE REFERENCE
+==========================================
+
+This document contains ALL code related to Bluetooth functionality
+in the GhostKey project. Compiled on: Monday, September 22, 2025
+
+=== TABLE OF CONTENTS ===
+1. INCLUDES AND DEPENDENCIES
+2. BLUETOOTH CONSTANTS AND CONFIGURATION
+3. BLUETOOTH DATA STRUCTURES
+4. GLOBAL BLUETOOTH VARIABLES
+5. BLUETOOTH INITIALIZATION AND SETUP
+6. BLUETOOTH ADVERTISING AND PAIRING
+7. BLUETOOTH DEVICE MANAGEMENT
+8. RSSI ANALYSIS AND PROXIMITY DETECTION
+9. CONFIDENCE-BASED AUTHENTICATION
+10. CALIBRATION SYSTEM
+11. BLUETOOTH EVENT HANDLERS
+12. BLUETOOTH SECURITY AND BONDING
+13. BLUETOOTH SHUTDOWN AND RESTART
+14. WEB INTERFACE INTEGRATION
+
+===============================================
+1. INCLUDES AND DEPENDENCIES
+===============================================
+
+From GhostKey.ino:
+```cpp
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BleKeyboard.h>
+#include <nvs_flash.h>
+#include <esp_gap_ble_api.h>
+#include <esp_bt.h>
+#include <esp_bt_main.h>
+```
+
+From platformio.ini:
+```ini
+lib_deps = 
+	t-vk/ESP32 BLE Keyboard@^0.3.2
+```
+
+===============================================
+2. BLUETOOTH CONSTANTS AND CONFIGURATION
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// Bluetooth configuration constants
+#define MAX_BONDS 8                    // Maximum number of bonded devices
+#define BOND_STORAGE_NAMESPACE "ble_bonds"
+#define DEVICE_NAME_KEY "dn_"
+#define DEVICE_PRIORITY_KEY "dp_"
+#define MAX_RSSI -30
+#define MIN_RSSI -100
+#define RSSI_UPDATE_INTERVAL 1000
+#define CONNECTION_TIMEOUT 30000
+#define MIN_CONN_INTERVAL 0x10
+#define MAX_CONN_INTERVAL 0x20
+#define SLAVE_LATENCY 0
+#define SUPERVISION_TIMEOUT 0x100
+
+// RSSI validation constants
+#define RSSI_MIN_VALID -100      // Minimum valid RSSI value for BLE
+#define RSSI_MAX_VALID -10       // Maximum valid RSSI value for BLE
+#define RSSI_INVALID_VALUE -99   // Value to use for invalid RSSI
+
+// Statistical RSSI Analysis constants (CONFIDENCE-BASED AUTHENTICATION)
+#define RSSI_SHORT_TERM_SIZE 30       // ~3 seconds of readings for quick confidence
+#define RSSI_MEDIUM_TERM_SIZE 50      // 5 seconds of readings  
+#define RSSI_LONG_TERM_SIZE 300       // 30 seconds of readings
+#define CONFIDENCE_AUTH_THRESHOLD 65.0f    // Minimum confidence % for authentication (easier to authenticate)
+#define CONFIDENCE_DEAUTH_THRESHOLD 50.0f  // Confidence % to lose authentication (faster to deauthenticate)
+#define STABILITY_WEIGHT 35.0f        // Max points for stability (35%)
+#define TREND_WEIGHT 25.0f           // Max points for trend analysis (25%)
+#define STRENGTH_WEIGHT 40.0f        // Max points for signal strength (40%)
+#define MIN_READINGS_FOR_ANALYSIS 3  // Minimum readings before analysis (faster startup)
+#define TREND_WINDOW_MS 8000         // 8 seconds for trend analysis (increased from 3s)
+#define STABILITY_THRESHOLD 12.0f    // Max std deviation for "stable" (increased tolerance)
+#define STRONG_SIGNAL_THRESHOLD -60  // RSSI above this = strong signal
+#define WEAK_SIGNAL_THRESHOLD -80    // RSSI below this = weak signal
+#define VERY_STRONG_SIGNAL_THRESHOLD -50  // RSSI above this = very strong signal
+#define PROXIMITY_BONUS_THRESHOLD -55     // RSSI above this gets proximity bonus
+
+// Enhanced confidence calculation constants
+#define STATIONARY_BONUS_POINTS 10.0f     // Bonus for stationary strong signal
+#define CONFIDENCE_MOMENTUM_RATE 0.25f    // 25% change rate for faster response
+#define CONFIDENCE_MOMENTUM_RATE_FAST 0.40f    // Fast momentum for rapid changes
+#define CONFIDENCE_CHANGE_THRESHOLD 20.0f      // Threshold for switching to fast momentum
+#define STATIONARY_MIN_SAMPLES 8          // Minimum samples for stationary detection
+#define STATIONARY_MAX_STDDEV 6.0f        // Max std dev for "stationary" signal
+
+// Outlier rejection and signal quality constants
+#define MAX_RSSI_JUMP 25              // Max allowed RSSI change between readings
+#define OUTLIER_REJECTION_THRESHOLD 2.5f  // Z-score threshold for outlier rejection
+#define SIGNAL_QUALITY_DECAY_RATE 0.95f   // Decay rate for poor quality samples
+#define MIN_SIGNAL_QUALITY 0.3f       // Minimum acceptable signal quality weight
+#define NO_SIGNAL_TIMEOUT_MS 5000     // Time before considering signal lost
+#define NO_SIGNAL_DECAY_RATE 0.92f    // Confidence decay when no signal
+#define SIGNAL_LOSS_FAST_DECAY_RATE 0.85f  // Faster decay for extended signal loss
+#define SLOPE_HISTORY_SIZE 5          // Number of slope readings to average
+
+// Pairing mode constants
+#define PAIRING_MODE_TIMEOUT 120000   // 2 minutes pairing mode timeout
+
+// Deep sleep confidence system
+#define QUICK_CONFIDENCE_LOW_THRESHOLD 35.0f      // Below this = stay in deep sleep
+#define QUICK_CONFIDENCE_HIGH_THRESHOLD 45.0f     // Above this = immediate response
+
+// Calibration system constants
+#define MAX_CALIBRATION_SAMPLES 300 // 30 seconds at ~100ms intervals
+```
+
+===============================================
+3. BLUETOOTH DATA STRUCTURES
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// Statistical RSSI Analysis structures
+struct RSSIStatistics {
+    float mean = 0.0f;
+    float standardDeviation = 0.0f;
+    float min = 0.0f;
+    float max = 0.0f;
+    int validSamples = 0;
+    float slope = 0.0f;  // Linear regression slope for trend analysis
+};
+
+struct RSSIReading {
+    int8_t rssi = -99;
+    unsigned long timestamp = 0;
+    bool valid = false;
+};
+
+struct RSSIAnalysis {
+    // Circular buffers for different time windows
+    RSSIReading shortTerm[RSSI_SHORT_TERM_SIZE];
+    RSSIReading mediumTerm[RSSI_MEDIUM_TERM_SIZE];
+    RSSIReading longTerm[RSSI_LONG_TERM_SIZE];
+    
+    // Buffer indices (circular)
+    int shortTermIndex = 0;
+    int mediumTermIndex = 0;
+    int longTermIndex = 0;
+    
+    // Calculated statistics for each window
+    RSSIStatistics shortTermStats;
+    RSSIStatistics mediumTermStats;
+    RSSIStatistics longTermStats;
+    
+    // Confidence scoring components
+    float stabilityScore = 0.0f;    // 0-35 points based on signal stability
+    float trendScore = 0.0f;        // 0-25 points based on approach/departure trend
+    float strengthScore = 0.0f;     // 0-40 points based on signal strength
+    float totalConfidence = 0.0f;   // Combined confidence score (0-100%)
+    
+    // Enhanced analysis flags
+    bool isApproaching = false;     // True if device is getting closer
+    bool isStable = false;         // True if signal is stable
+    bool hasDevice = false;        // True if tracking a specific device
+    esp_bd_addr_t deviceAddress;   // Address of device being tracked
+    
+    // Slope averaging for smoother trend detection
+    float slopeHistory[SLOPE_HISTORY_SIZE];
+    int slopeHistoryIndex = 0;
+    float averagedSlope = 0.0f;
+    
+    // Signal quality and outlier rejection
+    unsigned long lastSignalTime = 0;   // Time of last valid signal
+    bool signalLost = false;            // True if signal has been lost
+    float sampleQualityWeight = 1.0f;   // Weight based on sample quality
+    
+    // Adaptive calibration tracking
+    float historicalSuccessRate = 0.0f;  // Track authentication success rate
+    int authAttempts = 0;               // Total authentication attempts
+    int authSuccesses = 0;              // Successful authentications
+    bool needsCalibrationAdjustment = false;  // Flag for auto-calibration
+    
+    // Timing
+    unsigned long lastUpdate = 0;
+    unsigned long lastAnalysis = 0;
+};
+
+// Device caching structures for efficiency
+struct RSSICache {
+    esp_bd_addr_t address;
+    int8_t rssi;
+    unsigned long lastUpdate;
+    bool valid;
+};
+
+struct DeviceNameCache {
+    esp_bd_addr_t address;
+    char name[32];
+    bool hasCustomName;
+    bool nvsStored;
+    bool valid;
+};
+
+struct DevicePriorityCache {
+    esp_bd_addr_t address;
+    bool isPriority;
+    bool nvsStored;
+    bool valid;
+};
+```
+
+===============================================
+4. GLOBAL BLUETOOTH VARIABLES
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// BLE objects
+BleKeyboard bleKeyboard("Ghost Key", "Jordan Distributors, Inc", 100);
+BLEServer* pServer = nullptr;
+
+// Bluetooth state variables
+bool bluetoothEnabled = true;
+bool bluetoothInitialized = false;
+bool isBleConnected = false;
+bool hasConnectedDevice = false;
+bool bluetoothAuthenticated = false;
+esp_bd_addr_t connectedDeviceAddr = {0};
+
+// Pairing mode variables
+bool isPairingMode = false;
+unsigned long pairingModeStartTime = 0;
+
+// Device caching
+#define RSSI_CACHE_SIZE 10
+#define NAME_CACHE_SIZE 10
+#define PRIORITY_CACHE_SIZE 10
+RSSICache rssiCache[RSSI_CACHE_SIZE];
+DeviceNameCache nameCache[NAME_CACHE_SIZE];
+DevicePriorityCache priorityCache[PRIORITY_CACHE_SIZE];
+
+// Memory-efficient device management
+static esp_ble_bond_dev_t sharedBondedDevicesBuffer[MAX_BONDS];
+static bool sharedBufferInUse = false;
+static char cachedDevicesJson[2048] = "";
+static unsigned long lastJsonUpdate = 0;
+static int lastDeviceCount = -1;
+static bool jsonCacheValid = false;
+
+// Statistical RSSI Analysis global instance (confidence-based authentication)
+RSSIAnalysis rssiAnalysis;
+
+// Confidence momentum tracking for smoothing
+static float lastConfidence = 0.0f;
+
+// Calibration system variables
+bool isCalibrating = false;
+unsigned long calibrationStartTime = 0;
+unsigned long calibrationDuration = 30000; // 30 seconds
+float calibrationOffset = 0.0f; // Offset to add to confidence
+float calibrationRSSIReadings[MAX_CALIBRATION_SAMPLES];
+float calibrationConfidenceReadings[MAX_CALIBRATION_SAMPLES];
+int calibrationSampleCount = 0;
+
+// Bluetooth restart management
+bool restartPendingForBluetooth = false;         // Restart needed when exiting config mode
+
+// Bluetooth timing measurements
+unsigned long systemBootTime = 0;
+unsigned long bluetoothInitStartTime = 0;
+unsigned long bluetoothInitCompleteTime = 0;
+unsigned long firstRSSIScanStartTime = 0;
+unsigned long firstRSSIScanCompleteTime = 0;
+bool firstRSSIScanDone = false;
+```
+
+===============================================
+5. BLUETOOTH INITIALIZATION AND SETUP
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// Function to initialize Bluetooth
+void initializeBluetooth() {
+    Serial.println("=== INITIALIZING BLUETOOTH ===");
+    
+    // Initialize BLE
+    Serial.println("BLE: Initializing BLE Device...");
+    BLEDevice::init("Ghost Key");
+    Serial.println("BLE: Device initialized with name: Ghost Key");
+    
+    // Set BLE power to maximum for better range
+    Serial.println("BLE: Setting power levels...");
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P9);
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ESP_PWR_LVL_P9);
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9);
+    Serial.println("BLE: Power levels set to maximum");
+    
+    // Create BLE Server
+    Serial.println("BLE: Creating BLE Server...");
+    pServer = BLEDevice::createServer();
+    
+    // Set server callbacks
+    pServer->setCallbacks(new MyServerCallbacks());
+    Serial.println("BLE: Server callbacks set");
+    
+    // Set up security with bonding
+    Serial.println("BLE: Setting up security...");
+    BLESecurity* pSecurity = new BLESecurity();
+    pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);
+    pSecurity->setCapability(ESP_IO_CAP_NONE);
+    pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+    Serial.println("BLE: Security configured with bonding");
+    
+    // Start keyboard (this handles its own advertising)
+    Serial.println("BLE: Starting BLE Keyboard...");
+    bleKeyboard.begin();
+    Serial.println("BLE: Keyboard started");
+    
+    // Register GAP callback for events
+    esp_ble_gap_register_callback(onGapEvent);
+    Serial.println("BLE: GAP callback registered");
+    
+    // BLE advertising will be started separately
+    Serial.println("BLE: Ready to start advertising");
+    
+    // Print bonded devices count
+    int bondedCount = esp_ble_get_bond_device_num();
+    Serial.printf("BLE: Found %d bonded devices\n", bondedCount);
+    
+    // Start advertising in normal mode initially
+    startBLEAdvertising(false);
+    
+    Serial.println("=== BLUETOOTH INITIALIZATION COMPLETE ===");
+}
+
+// BLE Server Callback Class
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        Serial.println("BLE: Device attempting to connect...");
+        
+        // If not in pairing mode, check will be done in GAP event handler
+        if (!isPairingMode) {
+            Serial.println("BLE: Not in pairing mode - will verify during authentication");
+        } else {
+            Serial.println("BLE: In pairing mode - accepting connection from any device");
+        }
+        
+        // Accept connection initially, but don't set hasConnectedDevice until authentication
+        Serial.println("BLE: Device connected - waiting for authentication");
+        isBleConnected = true;
+        // hasConnectedDevice will be set in GAP event handler after successful authentication
+        
+        // Visual feedback
+        digitalWrite(LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(LED_PIN, LOW);
+    }
+    
+    void onDisconnect(BLEServer* pServer) {
+        Serial.println("BLE: Device disconnected");
+        
+        hasConnectedDevice = false;
+        isBleConnected = false;
+        bluetoothAuthenticated = false;
+        
+        // Clear connected device address
+        memset(connectedDeviceAddr, 0, sizeof(connectedDeviceAddr));
+        
+        invalidateDeviceCache();
+        
+        // Only restart advertising if NOT in deep sleep BLE window
+        // Deep sleep BLE window management controls advertising during deep sleep
+        if (currentPowerState != POWER_DEEP_SLEEP || !bleDeepSleepAdvertising) {
+        Serial.println("BLE: Restarting advertising after disconnect...");
+        startBLEAdvertising(isPairingMode);
+        } else {
+            Serial.println("BLE: In deep sleep BLE window - not restarting advertising (managed by deep sleep handler)");
+        }
+    }
+};
+```
+
+===============================================
+6. BLUETOOTH ADVERTISING AND PAIRING
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// Function to start BLE advertising with proper discoverability
+void startBLEAdvertising(bool discoverable) {
+    if(pServer == nullptr) {
+            Serial.println("BLE: ERROR - Server not initialized");
+        return;
+    }
+    
+    // Check if we can accept new bonds
+    int currentBonds = esp_ble_get_bond_device_num();
+    if (discoverable && currentBonds >= MAX_BONDS) {
+        Serial.println("BLE: Cannot enter pairing mode - maximum bonds reached!");
+        Serial.println("BLE: Please remove a device first.");
+        isPairingMode = false;
+        return;
+    }
+    
+    BLEAdvertising* pAdvertising = pServer->getAdvertising();
+    pAdvertising->stop();
+    delay(100); // Give time for stop to complete
+    
+    if(discoverable) {
+        Serial.println("BLE: Setting up advertising for PAIRING MODE:");
+        Serial.println("BLE: - Fast advertising for discovery");
+        Serial.println("BLE: - General discoverable mode");
+        Serial.println("BLE: - Interval: 20ms to 40ms");
+        Serial.println("BLE: - Allowing ALL devices to connect");
+        
+        // Set up advertising for pairing mode - accept all devices
+        pAdvertising->setAdvertisementType(esp_ble_adv_type_t::ADV_TYPE_IND);
+        pAdvertising->setScanResponse(true);
+        pAdvertising->setAppearance(0x03C1);  // Keyboard appearance
+        
+        // Create advertising data with proper flags for discoverability
+        BLEAdvertisementData adv_data;
+        adv_data.setFlags(0x06);  // General discoverable + BR/EDR not supported
+        adv_data.setCompleteServices(BLEUUID((uint16_t)0x1812)); // HID Service
+        adv_data.setName("Ghost-Key Secure");
+        pAdvertising->setAdvertisementData(adv_data);
+        
+        // Create scan response data
+        BLEAdvertisementData scan_data;
+        scan_data.setManufacturerData("Ghost-Key Inc.");
+        scan_data.setName("Ghost-Key Secure");
+        pAdvertising->setScanResponseData(scan_data);
+        
+        // Set advertising parameters for fast discovery
+        pAdvertising->setMinInterval(0x20);  // 20ms
+        pAdvertising->setMaxInterval(0x40);  // 40ms
+        
+    } else {
+        Serial.println("BLE: Setting up advertising for NORMAL MODE:");
+        Serial.println("BLE: - Slower advertising for battery efficiency");
+        Serial.println("BLE: - Limited discoverable mode");
+        Serial.println("BLE: - Interval: 100ms to 200ms");
+        Serial.println("BLE: - Only bonded devices allowed to connect");
+        
+        // Set up advertising for normal mode - bonded devices only
+        pAdvertising->setAdvertisementType(esp_ble_adv_type_t::ADV_TYPE_IND);
+        pAdvertising->setScanResponse(false);  // Disable scan response for efficiency
+        pAdvertising->setAppearance(0x03C1);  // Keyboard appearance
+        
+        // Create advertising data for bonded devices only
+        BLEAdvertisementData adv_data;
+        adv_data.setFlags(0x04);  // Limited discoverable + BR/EDR not supported
+        adv_data.setCompleteServices(BLEUUID((uint16_t)0x1812)); // HID Service
+        adv_data.setName("Ghost-Key");  // Shorter name for efficiency
+        pAdvertising->setAdvertisementData(adv_data);
+        
+        // Set advertising parameters for battery efficiency
+        pAdvertising->setMinInterval(0xA0);  // 100ms
+        pAdvertising->setMaxInterval(0x140); // 200ms
+    }
+    
+    // Start advertising
+    pAdvertising->start();
+    
+    if(discoverable) {
+        Serial.println("BLE: Advertising started in PAIRING MODE");
+        Serial.println("BLE: Device should now be visible to new devices");
+        Serial.println("BLE: Look for 'Ghost-Key Secure' in Bluetooth settings");
+    } else {
+        Serial.println("BLE: Advertising started in NORMAL MODE");
+        Serial.println("BLE: Only bonded devices can connect");
+    }
+}
+
+// Function to stop BLE advertising  
+void stopBLEAdvertising() {
+    Serial.println("BLE: Stopping advertising...");
+    
+    if(pServer == nullptr) return;
+    
+    BLEAdvertising *pAdvertising = pServer->getAdvertising();
+    pAdvertising->stop();
+    delay(100); // Give time for advertising to stop
+    
+    Serial.println("BLE: Advertising stopped");
+}
+
+// Function to toggle pairing mode with proper advertising control
+void toggleBluetoothPairingMode() {
+    isPairingMode = !isPairingMode;
+    
+    Serial.println("=== BLUETOOTH PAIRING MODE TOGGLE ===");
+    Serial.printf("Pairing mode is now: %s\n", isPairingMode ? "ACTIVE" : "INACTIVE");
+    
+    if (isPairingMode) {
+        pairingModeStartTime = millis();  // Record when pairing mode started
+        Serial.println("PAIRING: Entering pairing mode...");
+        Serial.println("PAIRING: Making device discoverable...");
+        Serial.printf("PAIRING: Auto-timeout in %d seconds\n", PAIRING_MODE_TIMEOUT / 1000);
+        
+        // Restart advertising to make device discoverable
+        stopBLEAdvertising();
+        delay(100);
+        startBLEAdvertising(true);
+        
+        Serial.println("PAIRING: *** DEVICE SHOULD NOW BE VISIBLE ON IPHONE ***");
+        Serial.println("PAIRING: Look for 'Ghost-Key Secure' in Bluetooth settings");
+        Serial.println("PAIRING: Device name: Ghost-Key Secure");
+        Serial.println("PAIRING: Manufacturer: Ghost-Key Inc.");
+        
+    } else {
+        pairingModeStartTime = 0;  // Clear the start time
+        Serial.println("PAIRING: Exiting pairing mode...");
+        Serial.println("PAIRING: Switching to bonded devices only mode");
+        
+        // Switch to normal advertising mode
+        stopBLEAdvertising();
+        delay(100);
+        startBLEAdvertising(false);
+    }
+    
+    Serial.println("=== PAIRING MODE TOGGLE COMPLETE ===");
+}
+
+// Function to disable pairing mode (for timeout and safety)
+void disablePairingMode() {
+    if (isPairingMode) {
+        Serial.println("PAIRING: Disabling pairing mode (timeout/safety)");
+        isPairingMode = false;
+        pairingModeStartTime = 0;
+        
+        // Switch to normal advertising mode
+        stopBLEAdvertising();
+        delay(100);
+        startBLEAdvertising(false);
+    }
+}
+```
+
+===============================================
+7. BLUETOOTH DEVICE MANAGEMENT
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// cleanupNVSStorage - Clears our custom device names/settings but keeps BLE bonds
+// Used when: resetting device names but keeping paired devices
+// Links to: saveDeviceName(), getDeviceName() functions
+void cleanupNVSStorage() {
+    Serial.println("=== STARTING CUSTOM NVS CLEANUP ===");
+    
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(BOND_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        nvs_erase_all(handle);
+        nvs_commit(handle);
+        nvs_close(handle);
+        Serial.println("Custom device settings cleared from NVS");
+    } else {
+        Serial.printf("Failed to open NVS for cleanup: %s\n", esp_err_to_name(err));
+    }
+    
+    // Clear memory caches
+    for (int i = 0; i < NAME_CACHE_SIZE; i++) {
+        nameCache[i].valid = false;
+    }
+    for (int i = 0; i < PRIORITY_CACHE_SIZE; i++) {
+        priorityCache[i].valid = false;
+    }
+    
+    Serial.println("=== CUSTOM NVS CLEANUP COMPLETE ===");
+    Serial.println("Note: BLE bonding data preserved");
+}
+
+// getBondedDevicesSafe - Gets list of paired devices, handles memory safely
+// Takes: int* count (returns number of devices found)
+// Returns: esp_ble_bond_dev_t* (array of bonded devices)
+// Links to: Used by getDevicesJson(), GAP event handler for whitelist checks
+esp_ble_bond_dev_t* getBondedDevicesSafe(int* count) {
+    if (sharedBufferInUse) {
+        int bondedCount = esp_ble_get_bond_device_num();
+        if (bondedCount == 0) {
+            *count = 0;
+            return nullptr;
+        }
+        
+        // Allocate temporary buffer if shared buffer is in use
+        esp_ble_bond_dev_t* tempBuffer = (esp_ble_bond_dev_t*)malloc(bondedCount * sizeof(esp_ble_bond_dev_t));
+        if (tempBuffer) {
+            esp_ble_get_bond_device_list(&bondedCount, tempBuffer);
+            *count = bondedCount;
+            return tempBuffer;
+        } else {
+            *count = 0;
+            return nullptr;
+        }
+    } else {
+        sharedBufferInUse = true;
+        int bondedCount = esp_ble_get_bond_device_num();
+        esp_ble_get_bond_device_list(&bondedCount, sharedBondedDevicesBuffer);
+        *count = bondedCount;
+        return sharedBondedDevicesBuffer;
+    }
+}
+
+// releaseBondedDevicesBuffer - Cleans up memory from getBondedDevicesSafe()
+// Takes: esp_ble_bond_dev_t* buffer (the buffer to release)
+// Links to: Must be called after every getBondedDevicesSafe() call
+void releaseBondedDevicesBuffer(esp_ble_bond_dev_t* buffer) {
+    if (buffer == sharedBondedDevicesBuffer) {
+        sharedBufferInUse = false;
+    } else if (buffer != nullptr) {
+        free(buffer);
+    }
+}
+
+// invalidateDeviceCache - Forces web interface to rebuild device list
+// Used when: device is added/removed, names changed
+// Links to: Called by web server endpoints, saveDeviceName()
+void invalidateDeviceCache() {
+    jsonCacheValid = false;
+    cachedDevicesJson[0] = '\0';
+}
+
+// Function to find or create cache entry for device name
+int findOrCreateNameCacheEntry(esp_bd_addr_t address) {
+    // First, try to find existing entry
+    for (int i = 0; i < NAME_CACHE_SIZE; i++) {
+        if (nameCache[i].valid && 
+            memcmp(nameCache[i].address, address, sizeof(esp_bd_addr_t)) == 0) {
+            return i;
+        }
+    }
+    
+    // If not found, find an empty slot or replace oldest
+    int targetIndex = 0;
+    bool foundEmpty = false;
+    
+    for (int i = 0; i < NAME_CACHE_SIZE; i++) {
+        if (!nameCache[i].valid) {
+            targetIndex = i;
+            foundEmpty = true;
+            break;
+        }
+    }
+    
+    // Initialize new entry
+    memcpy(nameCache[targetIndex].address, address, sizeof(esp_bd_addr_t));
+    nameCache[targetIndex].hasCustomName = false;
+    nameCache[targetIndex].nvsStored = false;
+    nameCache[0].valid = true;
+    return 0;
+}
+
+// Function to save device name to cache and conditionally to NVS
+void saveDeviceName(esp_bd_addr_t address, const char* name) {
+    int cacheIndex = findOrCreateNameCacheEntry(address);
+    
+    // Update cache
+    strncpy(nameCache[cacheIndex].name, name, sizeof(nameCache[cacheIndex].name) - 1);
+    nameCache[cacheIndex].name[sizeof(nameCache[cacheIndex].name) - 1] = '\0';
+    nameCache[cacheIndex].hasCustomName = true;
+    nameCache[cacheIndex].valid = true;
+    
+    // Save to NVS
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(BOND_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        char key[16];
+        snprintf(key, sizeof(key), "%s%02x%02x%02x%02x%02x%02x", 
+                DEVICE_NAME_KEY, address[0], address[1], address[2], address[3], address[4], address[5]);
+        
+        err = nvs_set_str(handle, key, name);
+        if (err == ESP_OK) {
+            nvs_commit(handle);
+            nameCache[cacheIndex].nvsStored = true;
+        }
+        nvs_close(handle);
+    }
+    
+    // Invalidate device JSON cache so web interface updates
+    invalidateDeviceCache();
+}
+
+// Function to get device name from cache or NVS, with fallback to default
+const char* getDeviceName(esp_bd_addr_t address) {
+    // Check cache first
+    for (int i = 0; i < NAME_CACHE_SIZE; i++) {
+        if (nameCache[i].valid && 
+            memcmp(nameCache[i].address, address, sizeof(esp_bd_addr_t)) == 0) {
+            if (nameCache[i].hasCustomName) {
+                return nameCache[i].name;
+            }
+            break;
+        }
+    }
+    
+    // Try to load from NVS
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(BOND_STORAGE_NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        char key[16];
+        snprintf(key, sizeof(key), "%s%02x%02x%02x%02x%02x%02x", 
+                DEVICE_NAME_KEY, address[0], address[1], address[2], address[3], address[4], address[5]);
+        
+        static char deviceName[32];
+        size_t required_size = sizeof(deviceName);
+        err = nvs_get_str(handle, key, deviceName, &required_size);
+        nvs_close(handle);
+        
+        if (err == ESP_OK) {
+            // Update cache
+            int cacheIndex = findOrCreateNameCacheEntry(address);
+            strncpy(nameCache[cacheIndex].name, deviceName, sizeof(nameCache[cacheIndex].name) - 1);
+            nameCache[cacheIndex].name[sizeof(nameCache[cacheIndex].name) - 1] = '\0';
+            nameCache[cacheIndex].hasCustomName = true;
+            nameCache[cacheIndex].nvsStored = true;
+            nameCache[cacheIndex].valid = true;
+            return nameCache[cacheIndex].name;
+        }
+    }
+    
+    // Return default name
+    static char defaultName[32];
+    snprintf(defaultName, sizeof(defaultName), "Device %02x:%02x", address[4], address[5]);
+    return defaultName;
+}
+
+// Function to validate RSSI value
+bool isRSSIValid(int8_t rssi) {
+    return (rssi >= RSSI_MIN_VALID && rssi <= RSSI_MAX_VALID && rssi != 0);
+}
+
+// Function to save device RSSI in memory cache only
+void saveDeviceRSSI(esp_bd_addr_t address, int8_t rssi) {
+    // Validate RSSI value before storing
+    if (!isRSSIValid(rssi)) {
+        // Don't store invalid RSSI values
+        return;
+    }
+    
+    int targetIndex = -1;
+    unsigned long oldestTime = ULONG_MAX;
+    
+    for (int i = 0; i < RSSI_CACHE_SIZE; i++) {
+        if (!rssiCache[i].valid) {
+            targetIndex = i;
+            break;
+        }
+        
+        if (memcmp(rssiCache[i].address, address, sizeof(esp_bd_addr_t)) == 0) {
+            targetIndex = i;
+            break;
+        }
+        
+        if (rssiCache[i].lastUpdate < oldestTime) {
+            oldestTime = rssiCache[i].lastUpdate;
+            targetIndex = i;
+        }
+    }
+    
+    if (targetIndex != -1) {
+        memcpy(rssiCache[targetIndex].address, address, sizeof(esp_bd_addr_t));
+        rssiCache[targetIndex].valid = true;
+        rssiCache[targetIndex].rssi = rssi;
+        rssiCache[targetIndex].lastUpdate = millis();
+    } else {
+        Serial.println("BLE: Warning - RSSI cache full, could not store RSSI value");
+    }
+}
+
+// Function to get device RSSI from memory cache
+bool getDeviceRSSI(esp_bd_addr_t address, int8_t* rssi) {
+    for (int i = 0; i < RSSI_CACHE_SIZE; i++) {
+        if (rssiCache[i].valid && 
+            memcmp(rssiCache[i].address, address, sizeof(esp_bd_addr_t)) == 0) {
+            
+            // Check if data is recent (within last 30 seconds)
+            if (millis() - rssiCache[i].lastUpdate < 30000) {
+                *rssi = rssiCache[i].rssi;
+                return true;
+            } else {
+                // Data is stale, mark as invalid
+                rssiCache[i].valid = false;
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
+// calculateDistance - Converts RSSI signal strength to approximate distance
+// Takes: int8_t rssi (signal strength in dBm)
+// Returns: float distance (meters, or -1.0 if invalid)
+// Links to: Used by getDevicesJson() for web interface display
+float calculateDistance(int8_t rssi) {
+    if (rssi == 0 || rssi >= -10) {
+        return -1.0;
+    }
+    
+    // Simple distance estimation (not highly accurate due to environmental factors)
+    // Formula: distance = 10^((Tx Power - RSSI) / (10 * n))
+    // Assuming Tx Power = -59 dBm at 1 meter, path loss exponent n = 2
+    float txPower = -59.0;
+    float pathLossExponent = 2.0;
+    
+    if (rssi < txPower) {
+        return pow(10.0, (txPower - rssi) / (10.0 * pathLossExponent));
+    }
+    
+    return 1.0; // Very close
+}
+```
+
+===============================================
+8. RSSI ANALYSIS AND PROXIMITY DETECTION
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// Function to start RSSI scanning
+void startRSSIScan() {
+    esp_ble_scan_params_t scan_params = {
+        .scan_type = BLE_SCAN_TYPE_ACTIVE,
+        .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
+        .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
+        .scan_interval = 0x50,  // Reduced interval for more frequent updates
+        .scan_window = 0x30,    // Increased window for better reception
+        .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE
+    };
+    esp_ble_gap_set_scan_params(&scan_params);
+    esp_ble_gap_start_scanning(0);
+    // Reduced logging - only log once at startup
+    static bool firstScan = true;
+    if (firstScan) {
+        Serial.println("BLE: RSSI scanning started");
+        firstScan = false;
+    }
+}
+
+// Function to stop RSSI scanning
+void stopRSSIScan() {
+    esp_ble_gap_stop_scanning();
+    // Reduced logging - comment out the stop message
+    // Serial.println("BLE: RSSI scanning stopped");
+}
+
+// Add RSSI reading to circular buffer with enhanced validation and quality scoring
+void addRSSIReading(int8_t rssi) {
+    unsigned long now = millis();
+    
+    // Enhanced RSSI validation
+    if (!isRSSIValid(rssi)) {
+        return; // Skip invalid readings entirely
+    }
+    
+    // Outlier detection for connected device
+    bool isOutlier = false;
+    if (rssiAnalysis.shortTermStats.validSamples > 3) {
+        float deviation = abs(rssi - rssiAnalysis.shortTermStats.mean);
+        float threshold = rssiAnalysis.shortTermStats.standardDeviation * OUTLIER_REJECTION_THRESHOLD;
+        
+        // Also check for sudden jumps
+        if (deviation > threshold || deviation > MAX_RSSI_JUMP) {
+            isOutlier = true;
+            // Reduce quality weight for outliers but don't completely reject
+            rssiAnalysis.sampleQualityWeight *= SIGNAL_QUALITY_DECAY_RATE;
+        }
+    }
+    
+    // Calculate sample quality weight
+    float sampleQuality = 1.0f;
+    if (isOutlier) {
+        sampleQuality *= 0.5f; // Reduce weight for outliers
+    }
+    
+    // Ensure minimum quality
+    if (rssiAnalysis.sampleQualityWeight < MIN_SIGNAL_QUALITY) {
+        rssiAnalysis.sampleQualityWeight = MIN_SIGNAL_QUALITY;
+    }
+    
+    // Add to short-term buffer
+    rssiAnalysis.shortTerm[rssiAnalysis.shortTermIndex].rssi = rssi;
+    rssiAnalysis.shortTerm[rssiAnalysis.shortTermIndex].timestamp = now;
+    rssiAnalysis.shortTerm[rssiAnalysis.shortTermIndex].valid = true;
+    rssiAnalysis.shortTermIndex = (rssiAnalysis.shortTermIndex + 1) % RSSI_SHORT_TERM_SIZE;
+    
+    // Add to medium-term buffer (every other reading for efficiency)
+    static int mediumTermCounter = 0;
+    if (++mediumTermCounter >= 2) {
+        mediumTermCounter = 0;
+        rssiAnalysis.mediumTerm[rssiAnalysis.mediumTermIndex].rssi = rssi;
+        rssiAnalysis.mediumTerm[rssiAnalysis.mediumTermIndex].timestamp = now;
+        rssiAnalysis.mediumTerm[rssiAnalysis.mediumTermIndex].valid = true;
+        rssiAnalysis.mediumTermIndex = (rssiAnalysis.mediumTermIndex + 1) % RSSI_MEDIUM_TERM_SIZE;
+    }
+    
+    // Add to long-term buffer (every 10th reading for efficiency)
+    static int longTermCounter = 0;
+    if (++longTermCounter >= 10) {
+        longTermCounter = 0;
+        rssiAnalysis.longTerm[rssiAnalysis.longTermIndex].rssi = rssi;
+        rssiAnalysis.longTerm[rssiAnalysis.longTermIndex].timestamp = now;
+        rssiAnalysis.longTerm[rssiAnalysis.longTermIndex].valid = true;
+        rssiAnalysis.longTermIndex = (rssiAnalysis.longTermIndex + 1) % RSSI_LONG_TERM_SIZE;
+    }
+    
+    // Update timing
+    rssiAnalysis.lastUpdate = now;
+    rssiAnalysis.lastSignalTime = now;
+    rssiAnalysis.signalLost = false;
+    
+    // Track device address if we have a connected device
+    if (hasConnectedDevice) {
+        if (!rssiAnalysis.hasDevice) {
+            memcpy(rssiAnalysis.deviceAddress, connectedDeviceAddr, sizeof(esp_bd_addr_t));
+            rssiAnalysis.hasDevice = true;
+        }
+    }
+}
+
+// Calculate statistics for a circular buffer with time-based filtering
+RSSIStatistics calculateBufferStatistics(RSSIReading* buffer, int bufferSize, unsigned long maxAge) {
+    RSSIStatistics stats;
+    unsigned long now = millis();
+    
+    // Collect valid, recent readings
+    float readings[bufferSize];
+    unsigned long timestamps[bufferSize];
+    int validCount = 0;
+    
+    for (int i = 0; i < bufferSize; i++) {
+        if (buffer[i].valid && (now - buffer[i].timestamp) <= maxAge) {
+            readings[validCount] = buffer[i].rssi;
+            timestamps[validCount] = buffer[i].timestamp;
+            validCount++;
+        }
+    }
+    
+    stats.validSamples = validCount;
+    
+    if (validCount == 0) {
+        return stats;
+    }
+    
+    // Calculate mean
+    float sum = 0;
+    for (int i = 0; i < validCount; i++) {
+        sum += readings[i];
+    }
+    stats.mean = sum / validCount;
+    
+    // Calculate standard deviation
+    float sumSquaredDiff = 0;
+    for (int i = 0; i < validCount; i++) {
+        float diff = readings[i] - stats.mean;
+        sumSquaredDiff += diff * diff;
+    }
+    stats.standardDeviation = (validCount > 1) ? sqrt(sumSquaredDiff / (validCount - 1)) : 0;
+    
+    // Find min/max
+    stats.min = readings[0];
+    stats.max = readings[0];
+    for (int i = 1; i < validCount; i++) {
+        if (readings[i] < stats.min) stats.min = readings[i];
+        if (readings[i] > stats.max) stats.max = readings[i];
+    }
+    
+    // Calculate slope using linear regression (if enough points)
+    if (validCount >= 3) {
+        float sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+        
+        for (int i = 0; i < validCount; i++) {
+            float x = timestamps[i];
+            float y = readings[i];
+            sumX += x;
+            sumY += y;
+            sumXY += x * y;
+            sumX2 += x * x;
+        }
+        
+        float denominator = validCount * sumX2 - sumX * sumX;
+        if (denominator != 0) {
+            stats.slope = (validCount * sumXY - sumX * sumY) / denominator;
+        }
+    }
+    
+    return stats;
+}
+
+// Calculate stability score (0-35 points)
+float calculateStabilityScore() {
+    if (rssiAnalysis.shortTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return 0.0f;
+    }
+    
+    // Get adaptive threshold based on signal strength
+    float adaptiveThreshold = getAdaptiveStabilityThreshold(rssiAnalysis.shortTermStats.mean);
+    float stdDev = rssiAnalysis.shortTermStats.standardDeviation;
+    
+    // Score based on how stable the signal is (lower std dev = higher score)
+    float stabilityScore;
+    if (stdDev <= adaptiveThreshold / 3.0f) {
+        // Very stable signal
+        stabilityScore = STABILITY_WEIGHT;
+    } else if (stdDev <= adaptiveThreshold) {
+        // Moderately stable
+        stabilityScore = STABILITY_WEIGHT * (1.0f - (stdDev / adaptiveThreshold));
+    } else {
+        // Unstable signal
+        stabilityScore = STABILITY_WEIGHT * 0.1f; // Minimum score for very unstable signals
+    }
+    
+    // Bonus for consistent signal over time
+    if (rssiAnalysis.mediumTermStats.validSamples >= 10) {
+        float mediumStdDev = rssiAnalysis.mediumTermStats.standardDeviation;
+        if (mediumStdDev <= adaptiveThreshold) {
+            stabilityScore += 5.0f; // Bonus for medium-term stability
+        }
+    }
+    
+    return fmin(stabilityScore, STABILITY_WEIGHT);
+}
+
+// Get adaptive stability threshold based on signal strength
+float getAdaptiveStabilityThreshold(float meanRSSI) {
+    if (meanRSSI >= -50) {
+        return 4.0f;  // Very strong signals should be very stable
+    } else if (meanRSSI >= -65) {
+        return 8.0f;  // Strong signals should be quite stable
+    } else if (meanRSSI >= -80) {
+        return 12.0f; // Medium signals - standard threshold
+    } else {
+        return 18.0f; // Weak signals can be less stable
+    }
+}
+
+// Calculate trend score (0-25 points)
+float calculateTrendScore() {
+    if (rssiAnalysis.shortTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return 0.0f;
+    }
+    
+    // Use averaged slope for smoother trend detection
+    float currentSlope = rssiAnalysis.shortTermStats.slope * 1000.0f; // Convert to dBm/second
+    
+    // Add to slope history for averaging
+    rssiAnalysis.slopeHistory[rssiAnalysis.slopeHistoryIndex] = currentSlope;
+    rssiAnalysis.slopeHistoryIndex = (rssiAnalysis.slopeHistoryIndex + 1) % SLOPE_HISTORY_SIZE;
+    
+    // Calculate averaged slope
+    float slopeSum = 0.0f;
+    int validSlopes = 0;
+    for (int i = 0; i < SLOPE_HISTORY_SIZE; i++) {
+        if (rssiAnalysis.slopeHistory[i] != 0.0f) { // Non-zero indicates valid slope
+            slopeSum += rssiAnalysis.slopeHistory[i];
+            validSlopes++;
+        }
+    }
+    
+    if (validSlopes > 0) {
+        rssiAnalysis.averagedSlope = slopeSum / validSlopes;
+    } else {
+        rssiAnalysis.averagedSlope = currentSlope;
+    }
+    
+    float slope = rssiAnalysis.averagedSlope;
+    
+    // Determine if approaching (positive slope = getting stronger)
+    rssiAnalysis.isApproaching = (slope > 0.5f); // More than 0.5 dBm/second improvement
+    
+    // Score based on trend
+    float trendScore = 0.0f;
+    
+    if (slope > 2.0f) {
+        // Strong approach - excellent
+        trendScore = TREND_WEIGHT;
+    } else if (slope > 0.5f) {
+        // Moderate approach - good
+        trendScore = TREND_WEIGHT * 0.8f;
+    } else if (slope >= -0.5f) {
+        // Stable/slight change - neutral but acceptable
+        trendScore = TREND_WEIGHT * 0.6f;
+    } else if (slope >= -2.0f) {
+        // Moderate departure - reduced score
+        trendScore = TREND_WEIGHT * 0.3f;
+    } else {
+        // Strong departure - very low score
+        trendScore = TREND_WEIGHT * 0.1f;
+    }
+    
+    return trendScore;
+}
+
+// Calculate strength score (0-40 points)
+float calculateStrengthScore() {
+    if (rssiAnalysis.shortTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return 0.0f;
+    }
+    
+    float meanRSSI = rssiAnalysis.shortTermStats.mean;
+    float strengthScore = 0.0f;
+    
+    // Base score based on signal strength
+    if (meanRSSI >= VERY_STRONG_SIGNAL_THRESHOLD) {
+        // Very strong signal (-50 dBm or better)
+        strengthScore = STRENGTH_WEIGHT;
+    } else if (meanRSSI >= STRONG_SIGNAL_THRESHOLD) {
+        // Strong signal (-60 to -50 dBm)
+        float range = STRONG_SIGNAL_THRESHOLD - VERY_STRONG_SIGNAL_THRESHOLD; // -10
+        float position = meanRSSI - VERY_STRONG_SIGNAL_THRESHOLD; // e.g., -55 - (-50) = -5
+        strengthScore = STRENGTH_WEIGHT * (0.8f + 0.2f * (position / range));
+    } else if (meanRSSI >= WEAK_SIGNAL_THRESHOLD) {
+        // Medium signal (-80 to -60 dBm)
+        float range = WEAK_SIGNAL_THRESHOLD - STRONG_SIGNAL_THRESHOLD; // -20
+        float position = meanRSSI - STRONG_SIGNAL_THRESHOLD; // e.g., -70 - (-60) = -10
+        strengthScore = STRENGTH_WEIGHT * (0.4f + 0.4f * (position / range));
+    } else {
+        // Weak signal (below -80 dBm)
+        strengthScore = STRENGTH_WEIGHT * 0.2f; // Minimum score for very weak signals
+    }
+    
+    // Proximity bonus for very close devices
+    if (meanRSSI >= PROXIMITY_BONUS_THRESHOLD) {
+        strengthScore += 5.0f; // Bonus for being very close
+    }
+    
+    return fmin(strengthScore, STRENGTH_WEIGHT);
+}
+
+// Check if signal indicates stationary device with strong signal
+bool isStationaryStrongSignal(RSSIStatistics stats) {
+    return (stats.validSamples >= STATIONARY_MIN_SAMPLES && 
+            stats.standardDeviation <= STATIONARY_MAX_STDDEV && 
+            stats.mean >= STRONG_SIGNAL_THRESHOLD);
+}
+
+// Get final confidence score with all enhancements
+float getFinalConfidenceScore() {
+    if (rssiAnalysis.shortTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return 0.0f;
+    }
+    
+    // Base confidence from components
+    float baseScore = rssiAnalysis.stabilityScore + 
+                     rssiAnalysis.trendScore + 
+                     rssiAnalysis.strengthScore;
+    
+    // Apply stationary bonus
+    if (isStationaryStrongSignal(rssiAnalysis.shortTermStats)) {
+        baseScore += STATIONARY_BONUS_POINTS;
+    }
+    
+    // Apply sample quality weighting
+    float qualityAdjustedScore = baseScore * rssiAnalysis.sampleQualityWeight;
+    
+    // Apply calibration offset
+    float finalScore = qualityAdjustedScore + calibrationOffset;
+    
+    // Ensure within bounds
+    if (finalScore < 0.0f) finalScore = 0.0f;
+    if (finalScore > 100.0f) finalScore = 100.0f;
+    
+    return finalScore;
+}
+
+// Perform complete RSSI analysis and confidence calculation
+void performRSSIAnalysis() {
+    unsigned long now = millis();
+    
+    // Check for signal loss and handle no-signal decay
+    if (now - rssiAnalysis.lastSignalTime > NO_SIGNAL_TIMEOUT_MS) {
+        if (!rssiAnalysis.signalLost) {
+            rssiAnalysis.signalLost = true;
+            Serial.println("BLE: Signal lost - applying decay");
+        }
+        
+        // Apply no-signal decay to confidence
+        float decayRate = (now - rssiAnalysis.lastSignalTime > NO_SIGNAL_TIMEOUT_MS * 2) ? 
+                         SIGNAL_LOSS_FAST_DECAY_RATE : NO_SIGNAL_DECAY_RATE;
+        
+        rssiAnalysis.totalConfidence *= decayRate;
+        
+        // Ensure confidence doesn't go below 0
+        if (rssiAnalysis.totalConfidence < 0.0f) {
+            rssiAnalysis.totalConfidence = 0.0f;
+        }
+        
+        // Skip normal analysis when signal is lost
+        return;
+    }
+    
+    // Calculate statistics for each time window
+    rssiAnalysis.shortTermStats = calculateBufferStatistics(
+        rssiAnalysis.shortTerm, RSSI_SHORT_TERM_SIZE, 2000); // 2 second max age
+    
+    rssiAnalysis.mediumTermStats = calculateBufferStatistics(
+        rssiAnalysis.mediumTerm, RSSI_MEDIUM_TERM_SIZE, 10000); // 10 second max age
+    
+    rssiAnalysis.longTermStats = calculateBufferStatistics(
+        rssiAnalysis.longTerm, RSSI_LONG_TERM_SIZE, 60000); // 60 second max age
+    
+    // Calculate confidence components
+    rssiAnalysis.stabilityScore = calculateStabilityScore();
+    rssiAnalysis.trendScore = calculateTrendScore();
+    rssiAnalysis.strengthScore = calculateStrengthScore();
+    
+    // Calculate base confidence
+    float baseConfidence = rssiAnalysis.stabilityScore + 
+                          rssiAnalysis.trendScore + 
+                          rssiAnalysis.strengthScore;
+    
+    // Apply stationary strong signal bonus
+    if (isStationaryStrongSignal(rssiAnalysis.shortTermStats)) {
+        baseConfidence += STATIONARY_BONUS_POINTS;
+    }
+    
+    // Apply calibration offset to base confidence (bias-corrected smoothing)
+    float adjustedBaseConfidence = baseConfidence + calibrationOffset;
+    
+    // Store confidence before smoothing for calibration sampling
+    float confidenceBeforeSmoothing = adjustedBaseConfidence;
+    
+    // Calculate adaptive momentum rate based on context
+    float confidenceDelta = adjustedBaseConfidence - lastConfidence;
+    float adaptiveMomentumRate;
+    
+    // Check if user is clearly moving away (weak signal + dropping confidence)
+    bool clearlyLeaving = (rssiAnalysis.shortTermStats.mean < -80 && confidenceDelta < -5.0f);
+    
+    // Check if user is stationary with good signal (stable for smoothness)
+    bool stationaryGoodSignal = (rssiAnalysis.isStable && rssiAnalysis.shortTermStats.mean > -75);
+    
+    if (clearlyLeaving) {
+        // Fast deauth when clearly moving away
+        adaptiveMomentumRate = CONFIDENCE_MOMENTUM_RATE_FAST;
+    } else if (stationaryGoodSignal) {
+        // Extra smooth when stationary with good signal
+        adaptiveMomentumRate = 0.12f; // Slower than normal for extra smoothness
+    } else if (abs(confidenceDelta) > CONFIDENCE_CHANGE_THRESHOLD) {
+        // Fast response for big changes
+        adaptiveMomentumRate = CONFIDENCE_MOMENTUM_RATE_FAST;
+    } else {
+        // Normal response
+        adaptiveMomentumRate = CONFIDENCE_MOMENTUM_RATE;
+    }
+    
+    // Apply adaptive momentum smoothing
+    rssiAnalysis.totalConfidence = lastConfidence + (confidenceDelta * adaptiveMomentumRate);
+    
+    // Extra smoothing for authenticated users sitting still (reduce peakiness)
+    if (bluetoothAuthenticated && stationaryGoodSignal && abs(confidenceDelta) < 5.0f) {
+        // Apply additional smoothing to reduce small fluctuations
+        float extraSmoothing = 0.8f; // Keep 80% of previous + 20% of new
+        rssiAnalysis.totalConfidence = (lastConfidence * extraSmoothing) + 
+                                     (rssiAnalysis.totalConfidence * (1.0f - extraSmoothing));
+    }
+    
+    lastConfidence = rssiAnalysis.totalConfidence;
+    
+    // Ensure confidence stays within bounds
+    if (rssiAnalysis.totalConfidence < 0.0f) rssiAnalysis.totalConfidence = 0.0f;
+    if (rssiAnalysis.totalConfidence > 100.0f) rssiAnalysis.totalConfidence = 100.0f;
+    
+    // Collect calibration sample if in calibration mode
+    if (isCalibrating) {
+        addCalibrationSample(rssiAnalysis.shortTermStats.mean, confidenceBeforeSmoothing);
+    }
+    
+    // Update stability flag using adaptive threshold
+    float adaptiveThreshold = getAdaptiveStabilityThreshold(rssiAnalysis.shortTermStats.mean);
+    rssiAnalysis.isStable = (rssiAnalysis.shortTermStats.standardDeviation <= adaptiveThreshold);
+    
+    // Debug logging (reduced frequency)
+    static unsigned long lastDebugLog = 0;
+    if (now - lastDebugLog >= 2000) { // Log every 2 seconds for faster feedback
+        
+        // Only log if we have valid data and are connected
+        if (rssiAnalysis.shortTermStats.validSamples >= MIN_READINGS_FOR_ANALYSIS && hasConnectedDevice) {
+            Serial.printf("RSSI: %.1f dBm | Confidence: %.1f%% (S:%.1f T:%.1f St:%.1f) | %s%s\n",
+                rssiAnalysis.shortTermStats.mean,
+                rssiAnalysis.totalConfidence,
+                rssiAnalysis.stabilityScore,
+                rssiAnalysis.trendScore,
+                rssiAnalysis.strengthScore,
+                rssiAnalysis.isApproaching ? "↑" : (rssiAnalysis.averagedSlope < -0.5f ? "↓" : "→"),
+                rssiAnalysis.isStable ? " STABLE" : ""
+            );
+        }
+        
+        lastDebugLog = now;
+    }
+}
+
+// Reset RSSI analysis (when device changes or system resets)
+void resetRSSIAnalysis() {
+    memset(&rssiAnalysis, 0, sizeof(rssiAnalysis));
+    
+    // Reset statistics
+    for (int i = 0; i < RSSI_SHORT_TERM_SIZE; i++) {
+        rssiAnalysis.shortTerm[i].valid = false;
+    }
+    for (int i = 0; i < RSSI_MEDIUM_TERM_SIZE; i++) {
+        rssiAnalysis.mediumTerm[i].valid = false;
+    }
+    for (int i = 0; i < RSSI_LONG_TERM_SIZE; i++) {
+        rssiAnalysis.longTerm[i].valid = false;
+    }
+    
+    // Initialize enhanced fields
+    rssiAnalysis.sampleQualityWeight = 1.0f;
+    rssiAnalysis.signalLost = false;
+    rssiAnalysis.lastSignalTime = millis();
+    for (int i = 0; i < SLOPE_HISTORY_SIZE; i++) {
+        rssiAnalysis.slopeHistory[i] = 0.0f;
+    }
+    rssiAnalysis.slopeHistoryIndex = 0;
+    rssiAnalysis.averagedSlope = 0.0f;
+    
+    // Reset global confidence tracking
+    lastConfidence = 0.0f;
+    
+    Serial.println("RSSI Analysis: Enhanced reset for new device or system restart");
+}
+
+// Get RSSI analysis status as JSON for web interface
+String getRSSIAnalysisJson() {
+    String json = "{";
+    json += "\"confidence\":" + String(rssiAnalysis.totalConfidence, 1) + ",";
+    json += "\"stabilityScore\":" + String(rssiAnalysis.stabilityScore, 1) + ",";
+    json += "\"trendScore\":" + String(rssiAnalysis.trendScore, 1) + ",";
+    json += "\"strengthScore\":" + String(rssiAnalysis.strengthScore, 1) + ",";
+    json += "\"isApproaching\":" + String(rssiAnalysis.isApproaching ? "true" : "false") + ",";
+    json += "\"isStable\":" + String(rssiAnalysis.isStable ? "true" : "false") + ",";
+    json += "\"mean\":" + String(rssiAnalysis.shortTermStats.mean, 1) + ",";
+    json += "\"stdDev\":" + String(rssiAnalysis.shortTermStats.standardDeviation, 1) + ",";
+    json += "\"samples\":" + String(rssiAnalysis.shortTermStats.validSamples) + ",";
+    json += "\"sampleQuality\":" + String(rssiAnalysis.sampleQualityWeight * 100.0f, 1) + ",";
+    json += "\"signalLost\":" + String(rssiAnalysis.signalLost ? "true" : "false") + ",";
+    json += "\"averagedSlope\":" + String(rssiAnalysis.averagedSlope, 4) + ",";
+    json += "\"authThreshold\":" + String(CONFIDENCE_AUTH_THRESHOLD, 1) + ",";
+    json += "\"deauthThreshold\":" + String(CONFIDENCE_DEAUTH_THRESHOLD, 1) + ",";
+    json += "\"calibrationOffset\":" + String(calibrationOffset, 1) + ",";
+    json += "\"isCalibrating\":" + String(isCalibrating ? "true" : "false");
+    json += "}";
+    return json;
+}
+```
+
+===============================================
+9. CONFIDENCE-BASED AUTHENTICATION
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// Check if device should be authenticated based on confidence
+bool authenticateByConfidence() {
+    // Need minimum data for analysis
+    if (rssiAnalysis.shortTermStats.validSamples < MIN_READINGS_FOR_ANALYSIS) {
+        return false;
+    }
+    
+    // Use hysteresis for authentication decisions
+    static bool wasAuthenticated = false;
+    float threshold = wasAuthenticated ? CONFIDENCE_DEAUTH_THRESHOLD : CONFIDENCE_AUTH_THRESHOLD;
+    
+    bool shouldAuthenticate = (rssiAnalysis.totalConfidence >= threshold);
+    
+    // Update state
+    wasAuthenticated = shouldAuthenticate;
+    
+    return shouldAuthenticate;
+}
+
+// updateBluetoothAuthentication - Check if connected device is close enough for auth
+// Called from: main loop() continuously
+// Links to: Uses RSSI thresholds, getDeviceRSSI(), sets bluetoothAuthenticated
+void updateBluetoothAuthentication() {
+    bool wasAuthenticated = bluetoothAuthenticated;
+    
+    // Need: connection + completed auth + valid address + close enough RSSI
+    bluetoothAuthenticated = false;
+    
+    if (isBleConnected && hasConnectedDevice) {
+        // Check for valid device address (cached for efficiency)
+        static bool hasValidAddress = false;
+        static esp_bd_addr_t lastCheckedAddr = {0};
+        
+        if (memcmp(connectedDeviceAddr, lastCheckedAddr, sizeof(esp_bd_addr_t)) != 0) {
+            hasValidAddress = false;
+            for (int i = 0; i < 6; i++) {
+                if (connectedDeviceAddr[i] != 0) {
+                    hasValidAddress = true;
+                    break;
+                }
+            }
+            memcpy(lastCheckedAddr, connectedDeviceAddr, sizeof(esp_bd_addr_t));
+        }
+        
+        if (hasValidAddress) {
+            // Use confidence-based authentication exclusively
+            bluetoothAuthenticated = authenticateByConfidence();
+        }
+    }
+    
+    // Log changes
+    if (wasAuthenticated != bluetoothAuthenticated) {
+        Serial.printf("Bluetooth authentication: %s\n", bluetoothAuthenticated ? "Authenticated" : "Not authenticated");
+        if (bluetoothAuthenticated) {
+            int8_t rssi = 0;
+            if (getDeviceRSSI(connectedDeviceAddr, &rssi)) {
+                Serial.printf("Authenticated device: %02x:%02x:%02x:%02x:%02x:%02x (RSSI: %d dBm)\n",
+                    connectedDeviceAddr[0], connectedDeviceAddr[1], connectedDeviceAddr[2],
+                    connectedDeviceAddr[3], connectedDeviceAddr[4], connectedDeviceAddr[5], rssi);
+            }
+        } else {
+            // Show which device we're currently tracking for analysis
+            if (rssiAnalysis.hasDevice) {
+                Serial.printf("Auth lost - Currently tracking: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                             rssiAnalysis.deviceAddress[0], rssiAnalysis.deviceAddress[1], rssiAnalysis.deviceAddress[2],
+                             rssiAnalysis.deviceAddress[3], rssiAnalysis.deviceAddress[4], rssiAnalysis.deviceAddress[5]);
+            }
+        }
+    }
+}
+```
+
+===============================================
+10. CALIBRATION SYSTEM
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// Start calibration mode
+void startCalibration() {
+    if (isCalibrating) return;
+    
+    isCalibrating = true;
+    calibrationStartTime = millis();
+    calibrationSampleCount = 0;
+    
+    Serial.println("=== STARTING CONFIDENCE CALIBRATION ===");
+    Serial.println("Position your phone where you want authentication to work");
+    Serial.println("Collecting data for 30 seconds...");
+}
+
+// Stop calibration mode and calculate offset
+void stopCalibration() {
+    if (!isCalibrating) return;
+    
+    isCalibrating = false;
+    
+    if (calibrationSampleCount < 10) {
+        Serial.println("Calibration failed: Not enough samples collected");
+        return;
+    }
+    
+    // Calculate average confidence during calibration period
+    float avgConfidence = 0.0f;
+    float avgRSSI = 0.0f;
+    
+    for (int i = 0; i < calibrationSampleCount; i++) {
+        avgConfidence += calibrationConfidenceReadings[i];
+        avgRSSI += calibrationRSSIReadings[i];
+    }
+    avgConfidence /= calibrationSampleCount;
+    avgRSSI /= calibrationSampleCount;
+    
+    // Calculate what offset is needed to reach 85% confidence (strong authentication signal)
+    float targetConfidence = 85.0f;
+    float newOffset = targetConfidence - avgConfidence;
+    
+    // Limit offset to reasonable range (-30 to +30)
+    if (newOffset > 30.0f) newOffset = 30.0f;
+    if (newOffset < -30.0f) newOffset = -30.0f;
+    
+    calibrationOffset = newOffset;
+    
+    // Save to preferences
+            preferences.putFloat("cal_offset", calibrationOffset);
+    
+    Serial.println("=== CALIBRATION COMPLETE ===");
+    Serial.printf("Samples collected: %d\n", calibrationSampleCount);
+    Serial.printf("Average RSSI: %.1f dBm\n", avgRSSI);
+    Serial.printf("Average confidence (before offset): %.1f%%\n", avgConfidence);
+    Serial.printf("Calculated offset: %.1f\n", calibrationOffset);
+    Serial.printf("Target confidence (with offset): %.1f%%\n", avgConfidence + calibrationOffset);
+    Serial.println("===============================");
+    
+    // Pleasant audio feedback for calibration completion
+    Serial.println("Calibration complete - playing completion tone");
+    buzzerPulse(500);  // 0.5 second pleasant tone
+}
+
+// Reset calibration to default
+void resetCalibration() {
+    calibrationOffset = 0.0f;
+            preferences.putFloat("cal_offset", calibrationOffset);
+    Serial.println("Calibration reset to default (no offset)");
+}
+
+// Add calibration sample during calibration mode
+void addCalibrationSample(float rssi, float confidence) {
+    if (!isCalibrating || calibrationSampleCount >= MAX_CALIBRATION_SAMPLES) {
+        return;
+    }
+    
+    calibrationRSSIReadings[calibrationSampleCount] = rssi;
+    calibrationConfidenceReadings[calibrationSampleCount] = confidence;
+    calibrationSampleCount++;
+    
+    // Auto-stop after duration
+    if (millis() - calibrationStartTime >= calibrationDuration) {
+        stopCalibration();
+    }
+}
+```
+
+===============================================
+11. BLUETOOTH EVENT HANDLERS
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// GAP Event Handler
+void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+    switch (event) {
+        case ESP_GAP_BLE_SCAN_RESULT_EVT:
+            if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT) {
+                // Validate RSSI before processing
+                if (!isRSSIValid(param->scan_rst.rssi)) {
+                    break; // Skip invalid RSSI readings
+                }
+                
+                // Update RSSI for bonded devices (silent update)
+                int bondedCount = esp_ble_get_bond_device_num();
+                if (bondedCount > 0) {
+                    esp_ble_bond_dev_t* bondedDevices = getBondedDevicesSafe(&bondedCount);
+                    if (bondedDevices) {
+                        for (int i = 0; i < bondedCount; i++) {
+                            if (memcmp(bondedDevices[i].bd_addr, param->scan_rst.bda, sizeof(esp_bd_addr_t)) == 0) {
+                                // Validate RSSI before processing
+                                if (isRSSIValid(param->scan_rst.rssi)) {
+                                    // Save RSSI for this bonded device
+                                    saveDeviceRSSI(param->scan_rst.bda, param->scan_rst.rssi);
+                                    
+                                    // If this is our connected device, add to RSSI analysis
+                                    if (hasConnectedDevice && 
+                                        memcmp(connectedDeviceAddr, param->scan_rst.bda, sizeof(esp_bd_addr_t)) == 0) {
+                                        addRSSIReading(param->scan_rst.rssi);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        releaseBondedDevicesBuffer(bondedDevices);
+                    }
+                }
+            }
+            break;
+
+        case ESP_GAP_BLE_AUTH_CMPL_EVT:
+            if (param->ble_security.auth_cmpl.success) {
+                Serial.println("BLE: Authentication successful!");
+                
+                // Get the authenticated device address
+                esp_bd_addr_t addr;
+                memcpy(addr, param->ble_security.auth_cmpl.bd_addr, sizeof(esp_bd_addr_t));
+                memcpy(connectedDeviceAddr, addr, sizeof(esp_bd_addr_t));
+                
+                Serial.printf("BLE: Authenticated device: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+                
+                hasConnectedDevice = true;
+                
+                // Check if this is a new device pairing (in pairing mode)
+                if (isPairingMode) {
+                    sendWebNotification("Bluetooth device paired successfully!", "success");
+                    hasNewBluetoothDevice = true;
+                    // Disable pairing mode after successful pairing
+                    disablePairingMode();
+                }
+                
+                // Visual feedback for successful authentication
+                for(int i = 0; i < 3; i++) {
+                    digitalWrite(LED_PIN, HIGH);
+                    delay(200);
+                    digitalWrite(LED_PIN, LOW);
+                    delay(200);
+                }
+                
+            } else {
+                Serial.printf("BLE: Authentication failed, error: %d\n", param->ble_security.auth_cmpl.fail_reason);
+                if (pServer != nullptr) {
+                    pServer->disconnect(pServer->getConnId());
+                }
+            }
+            break;
+            
+        case ESP_GAP_BLE_SEC_REQ_EVT:
+            
+                esp_bd_addr_t addr;
+                memcpy(addr, param->ble_security.ble_req.bd_addr, sizeof(esp_bd_addr_t));
+                
+                Serial.printf("BLE: Security request from: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+                
+                if (isPairingMode) {
+                    // In pairing mode - accept any device (up to bond limit)
+                    Serial.println("BLE: In pairing mode - accepting security request from any device");
+                    esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+                } else {
+                    // NOT in pairing mode - only allow whitelisted (bonded) devices
+                    bool isDeviceBonded = false;
+                    int bondedCount = esp_ble_get_bond_device_num();
+                    if (bondedCount > 0) {
+                        esp_ble_bond_dev_t* bondedDevices = getBondedDevicesSafe(&bondedCount);
+                        if (bondedDevices) {
+                            for (int i = 0; i < bondedCount; i++) {
+                                if (memcmp(bondedDevices[i].bd_addr, addr, sizeof(esp_bd_addr_t)) == 0) {
+                                    isDeviceBonded = true;
+                                    break;
+                                }
+                            }
+                            releaseBondedDevicesBuffer(bondedDevices);
+                        }
+                    }
+                    
+                    if (isDeviceBonded) {
+                        Serial.println("BLE: Device is whitelisted - accepting security request");
+                        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+                    } else {
+                        Serial.println("BLE: Device not whitelisted - rejecting security request");
+                        Serial.println("BLE: Use pairing mode to add new devices");
+                        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, false);
+                    }
+                }
+            break;
+            
+        default:
+            break;
+    }
+}
+```
+
+===============================================
+12. BLUETOOTH SECURITY AND BONDING
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// Security is configured during initialization:
+BLESecurity* pSecurity = new BLESecurity();
+pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);
+pSecurity->setCapability(ESP_IO_CAP_NONE);
+pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+
+// Maximum bonds configuration
+#define MAX_BONDS 8
+
+// Bonding is handled automatically by the ESP32 BLE stack
+// Devices are stored in NVS (Non-Volatile Storage) automatically
+// Custom device names and settings are stored separately in BOND_STORAGE_NAMESPACE
+
+// Device removal is handled via web interface:
+if (esp_ble_remove_bond_device(address) == ESP_OK) {
+    Serial.println("Bluetooth device removed successfully");
+    sendWebNotification("Bluetooth device removed successfully!", "success");
+    hasRemovedDevice = true;
+    server.send(200, "text/plain", "Bluetooth device removed successfully");
+    return;
+}
+```
+
+===============================================
+13. BLUETOOTH SHUTDOWN AND RESTART
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// Function to properly shutdown Bluetooth
+void shutdownBluetooth() {
+    if (!bluetoothInitialized) {
+        return;
+    }
+    
+    Serial.println("=== SHUTTING DOWN BLUETOOTH ===");
+    
+    // Stop any ongoing operations first
+    stopRSSIScan();
+    
+    // Reset state variables
+    isBleConnected = false;
+    bluetoothAuthenticated = false;
+    hasConnectedDevice = false;
+    isPairingMode = false;
+    pairingModeStartTime = 0;
+    
+    // Clear connected device address
+    memset(connectedDeviceAddr, 0, sizeof(connectedDeviceAddr));
+    
+    // Stop advertising safely
+    if (pServer != nullptr) {
+        stopBLEAdvertising();
+        delay(100); // Give time for advertising to stop
+    }
+    
+    // Mark as not initialized but don't deinitialize aggressively
+    bluetoothInitialized = false;
+    
+    // Reset RSSI analysis when Bluetooth is disabled
+    resetRSSIAnalysis();
+    
+    Serial.println("=== BLUETOOTH SHUTDOWN COMPLETE ===");
+}
+
+// Function to restart Bluetooth after shutdown
+void restartBluetooth() {
+    if (bluetoothInitialized) {
+        return;
+    }
+    
+    Serial.println("=== RESTARTING BLUETOOTH ===");
+    
+    // Small delay to ensure clean state
+    delay(200);
+    
+    // Reinitialize Bluetooth (this will handle BLE setup)
+    initializeBluetooth();
+    bluetoothInitialized = true;
+    
+    Serial.println("=== BLUETOOTH RESTART COMPLETE ===");
+}
+```
+
+===============================================
+14. WEB INTERFACE INTEGRATION
+===============================================
+
+From GhostKey.ino (Web Server Endpoints):
+
+```cpp
+// Bluetooth devices endpoint
+server.on("/devices", HTTP_GET, [](){
+    Serial.println("Bluetooth devices request received");
+    if (!validateWebSessionOrSendError()) return;
+    
+    if (!bluetoothEnabled || !bluetoothInitialized) {
+        server.sendHeader("Connection", "close");
+        server.send(200, "application/json", "[]");
+        return;
+    }
+    const char* json = getDevicesJson();
+    server.sendHeader("Connection", "close");
+    server.send(200, "application/json", json);
+});
+
+// Bluetooth pairing toggle endpoint
+server.on("/pairing", HTTP_GET, [](){
+    Serial.println("Bluetooth pairing toggle request received");
+    if (!bluetoothEnabled || !bluetoothInitialized) {
+        server.send(400, "text/plain", "Bluetooth is disabled");
+        return;
+    }
+    toggleBluetoothPairingMode();
+    String status = isPairingMode ? "Pairing mode active" : "Pairing mode inactive";
+    server.send(200, "text/plain", status);
+});
+
+// Bluetooth rename endpoint
+server.on("/bluetooth_rename", HTTP_POST, [](){
+    // [Implementation details in web server code section]
+    saveDeviceName(address, name);
+    server.send(200, "text/plain", "Bluetooth device renamed successfully");
+});
+
+// Remove device endpoint
+server.on("/remove", HTTP_POST, [](){
+    // [Implementation details in web server code section]
+    if (esp_ble_remove_bond_device(address) == ESP_OK) {
+        sendWebNotification("Bluetooth device removed successfully!", "success");
+        hasRemovedDevice = true;
+        server.send(200, "text/plain", "Bluetooth device removed successfully");
+    }
+});
+
+// Bluetooth enable/disable endpoints
+server.on("/bluetooth_status", HTTP_GET, [](){
+    String json = "{";
+    json += "\"enabled\":" + String(bluetoothEnabled ? "true" : "false") + ",";
+    json += "\"initialized\":" + String(bluetoothInitialized ? "true" : "false");
+    json += "}";
+    server.send(200, "application/json", json);
+});
+
+server.on("/bluetooth_toggle", HTTP_POST, [](){
+    // [Implementation for enabling/disabling Bluetooth]
+    if (newState && !bluetoothEnabled) {
+        // Enabling requires restart
+        restartPendingForBluetooth = true;
+    } else if (!newState && bluetoothEnabled) {
+        // Disabling immediately
+        shutdownBluetooth();
+    }
+});
+
+// RSSI analysis endpoint for confidence-based authentication monitoring
+server.on("/rssi_analysis", HTTP_GET, [](){
+    String json = getRSSIAnalysisJson();
+    server.send(200, "application/json", json);
+});
+
+// Calibration system endpoints
+server.on("/calibration_start", HTTP_POST, [](){
+    startCalibration();
+    server.send(200, "text/plain", "Calibration started - position your phone and wait 30 seconds");
+});
+
+server.on("/calibration_stop", HTTP_POST, [](){
+    stopCalibration();
+    server.send(200, "text/plain", "Calibration stopped and offset calculated");
+});
+
+server.on("/calibration_reset", HTTP_POST, [](){
+    resetCalibration();
+    server.send(200, "text/plain", "Calibration reset to default");
+});
+
+server.on("/calibration_status", HTTP_GET, [](){
+    String json = "{";
+    json += "\"isCalibrating\":" + String(isCalibrating ? "true" : "false") + ",";
+    json += "\"offset\":" + String(calibrationOffset, 1) + ",";
+    json += "\"sampleCount\":" + String(calibrationSampleCount) + ",";
+    if (isCalibrating) {
+        unsigned long elapsed = millis() - calibrationStartTime;
+        unsigned long remaining = (elapsed < calibrationDuration) ? (calibrationDuration - elapsed) : 0;
+        json += "\"timeRemaining\":" + String(remaining);
+    } else {
+        json += "\"timeRemaining\":0";
+    }
+    json += "}";
+    server.send(200, "application/json", json);
+});
+```
+
+Device JSON Generation:
+```cpp
+// Function to get device info as JSON with caching (optimized for memory)
+const char* getDevicesJson() {
+    int bondedCount = esp_ble_get_bond_device_num();
+    
+    // Check if we can use cached JSON
+    if (jsonCacheValid && 
+        lastDeviceCount == bondedCount && 
+        (millis() - lastJsonUpdate < 15000)) {  // Extended cache to 15 seconds
+        return cachedDevicesJson;
+    }
+    
+    // [JSON generation implementation with RSSI data, device names, etc.]
+    
+    esp_ble_bond_dev_t* bondedDevices = getBondedDevicesSafe(&bondedCount);
+    if (!bondedDevices) {
+        snprintf(jsonPtr, remaining, "]");
+        return cachedDevicesJson;
+    }
+    
+    for (int i = 0; i < bondedCount; i++) {
+        const char* deviceName = getDeviceName(bondedDevices[i].bd_addr);
+        
+        int8_t rssi = -99;
+        float distance = 0.0;
+        
+        if (getDeviceRSSI(bondedDevices[i].bd_addr, &rssi)) {
+            distance = calculateDistance(rssi);
+        }
+        
+        // Build JSON object with device information
+        // [JSON formatting code]
+    }
+    
+    releaseBondedDevicesBuffer(bondedDevices);
+    return cachedDevicesJson;
+}
+```
+
+===============================================
+MAIN LOOP INTEGRATION
+===============================================
+
+From GhostKey.ino main loop:
+
+```cpp
+// Bluetooth initialization check
+if (bluetoothEnabled && !bluetoothInitialized) {
+    bluetoothInitStartTime = millis();
+    initializeBluetooth();
+    bluetoothInitCompleteTime = millis();
+    bluetoothInitialized = true;
+    
+    if (!firstRSSIScanDone) {
+        firstRSSIScanStartTime = millis();
+        startRSSIScan();
+        firstRSSIScanCompleteTime = millis();
+        firstRSSIScanDone = true;
+    }
+}
+
+// Bluetooth authentication update
+if (ghostKeyEnabled) {
+    if (bluetoothEnabled && bluetoothInitialized && ghostKeyEnabled) {
+        updateBluetoothAuthentication();
+    }
+}
+
+// RSSI analysis update
+if (bluetoothEnabled && bluetoothInitialized) {
+    static unsigned long lastRSSIAnalysis = 0;
+    if (millis() - lastRSSIAnalysis >= 100) {  // 10Hz update rate
+        performRSSIAnalysis();
+        lastRSSIAnalysis = millis();
+    }
+}
+
+// Pairing mode timeout check
+if (isPairingMode && (millis() - pairingModeStartTime > PAIRING_MODE_TIMEOUT)) {
+    Serial.println("PAIRING: Timeout reached - disabling pairing mode");
+    disablePairingMode();
+}
+```
+
+===============================================
+END OF DOCUMENT
+===============================================
+
+This document contains all Bluetooth-related code from the GhostKey project.
+The system provides a comprehensive ESP32-based Bluetooth Low Energy (BLE) implementation with:
+
+- **Advanced Proximity Detection**: Confidence-based authentication using statistical RSSI analysis
+- **Secure Pairing**: Bonding with up to 8 devices, whitelist-based security
+- **Adaptive Authentication**: Hysteresis thresholds, momentum-based smoothing, calibration system
+- **Device Management**: Naming, removal, priority settings via web interface
+- **Power Optimization**: Deep sleep compatibility, advertising control
+- **Real-time Monitoring**: Web-based RSSI analysis, calibration tools
+- **Robust Error Handling**: Outlier rejection, signal quality weighting, timeout management
+
+The system uses a sophisticated confidence scoring algorithm that combines:
+- Signal stability (35% weight)
+- Trend analysis (25% weight) 
+- Signal strength (40% weight)
+- Calibration offset for personalization
+- Adaptive momentum for smooth transitions
+
+For implementation details, refer to the specific code sections above.

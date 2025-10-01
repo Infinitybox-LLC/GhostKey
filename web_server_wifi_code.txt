@@ -1,0 +1,1314 @@
+GHOSTKEY ESP32 - WEB SERVER AND WIFI CODE REFERENCE
+=====================================================
+
+This document contains ALL code related to web servers and WiFi functionality
+in the GhostKey project. Compiled on: Monday, September 22, 2025
+
+=== TABLE OF CONTENTS ===
+1. INCLUDES AND DEPENDENCIES
+2. GLOBAL VARIABLES AND CONFIGURATION
+3. WEB SESSION MANAGEMENT
+4. WIFI SETUP AND MANAGEMENT
+5. WEB SERVER SETUP AND ROUTES
+6. HTML FILES (EMBEDDED)
+7. PWA MANIFEST AND ASSETS
+8. PLATFORMIO CONFIGURATION
+
+===============================================
+1. INCLUDES AND DEPENDENCIES
+===============================================
+
+From GhostKey.ino:
+```cpp
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <ArduinoJson.h>
+#include "config_html.h"
+#include "setup_html.h"
+```
+
+From platformio.ini:
+```ini
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+board_build.partitions = huge_app.csv
+lib_deps = 
+	bblanchon/ArduinoJson @ ^6.21.3
+	t-vk/ESP32 BLE Keyboard@^0.3.2
+	https://github.com/Nickjgniklu/EM4095
+build_flags = 
+	-DCORE_DEBUG_LEVEL=2
+	-DCONFIG_ARDUHAL_LOG_COLORS=1
+```
+
+===============================================
+2. GLOBAL VARIABLES AND CONFIGURATION
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// PWA MANIFEST JSON - STORED IN PROGMEM
+const char manifest_json[] PROGMEM = R"({
+  "name": "Ghost Key Configuration",
+  "short_name": "Ghost Key",
+  "description": "Ghost Key ESP32 Configuration Interface",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#667eea",
+  "theme_color": "#667eea",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/logo",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+})";
+
+// WebServer instance
+WebServer server(80);
+Preferences preferences;
+
+// WiFi configuration
+const char* ap_ssid = "Ghost Key Configuration";
+String ap_password = "123456789"; // Default password, will be loaded from preferences
+String web_password = "1234"; // Default web interface password, will be loaded from preferences
+bool wifiEnabled = false;
+bool wifiCleanupInProgress = false; // Flag to disable button reading during WiFi cleanup
+bool webServerInitialized = false; // Track if web server routes have been set up
+volatile int activeConnections = 0; // Track active web connections
+unsigned long lastSetupCompletionTime = 0; // Track when setup was last completed
+unsigned long lastWifiOperationTime = 0; // Track when WiFi operations last occurred
+
+// Web session management
+bool webSessionActive = false;
+unsigned long webSessionStartTime = 0;
+unsigned long lastWebActivity = 0;
+#define WEB_SESSION_TIMEOUT 600000  // 10 minutes in milliseconds
+#define WEB_ACTIVITY_TIMEOUT 300000  // 5 minutes of inactivity
+
+// Web notification system for device/key operations
+struct WebNotification {
+    String message;
+    String type;  // "success", "error", "info"
+    unsigned long timestamp;
+    bool consumed;
+};
+
+WebNotification pendingNotification = {"", "", 0, true};
+bool hasNewRfidKey = false;
+bool hasNewBluetoothDevice = false;
+bool hasRemovedDevice = false;
+```
+
+===============================================
+3. WEB SESSION MANAGEMENT
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+// Start a new web session
+void startWebSession() {
+    webSessionActive = true;
+    webSessionStartTime = millis();
+    lastWebActivity = millis();
+    Serial.println("Web session started");
+}
+
+// Update last activity time
+void updateWebActivity() {
+    if (webSessionActive) {
+        lastWebActivity = millis();
+    }
+}
+
+// Check if web session is valid
+bool isWebSessionValid() {
+    if (!webSessionActive) {
+        return false;
+    }
+    
+    unsigned long currentTime = millis();
+    
+    // Check absolute session timeout (10 minutes)
+    if (currentTime - webSessionStartTime > WEB_SESSION_TIMEOUT) {
+        Serial.println("Web session expired (absolute timeout)");
+        endWebSession();
+        return false;
+    }
+    
+    // Check inactivity timeout (5 minutes)
+    if (currentTime - lastWebActivity > WEB_ACTIVITY_TIMEOUT) {
+        Serial.println("Web session expired (inactivity timeout)");
+        endWebSession();
+        return false;
+    }
+    
+    return true;
+}
+
+// End the current web session
+void endWebSession() {
+    webSessionActive = false;
+    webSessionStartTime = 0;
+    lastWebActivity = 0;
+    Serial.println("Web session ended");
+}
+
+// Helper function to check session and send error if invalid
+bool validateWebSessionOrSendError() {
+    if (!isWebSessionValid()) {
+        server.send(401, "text/plain", "Session expired - please log in again");
+        return false;
+    }
+    updateWebActivity();  // Update activity timestamp
+    return true;
+}
+
+// Helper function to send web notifications
+void sendWebNotification(const String& message, const String& type) {
+    if (currentState == CONFIG_MODE && webSessionActive) {
+        pendingNotification.message = message;
+        pendingNotification.type = type;
+        pendingNotification.timestamp = millis();
+        pendingNotification.consumed = false;
+    }
+}
+```
+
+===============================================
+4. WIFI SETUP AND MANAGEMENT
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+void setupWiFi() {
+    DEBUG_PRINTLN("Starting WiFi Access Point...");
+    
+    // Ensure completely clean WiFi state before starting
+    WiFi.mode(WIFI_OFF);
+    delay(200);  // Give time for complete shutdown
+    
+    // Explicitly disable all WiFi modes to ensure clean slate
+    WiFi.enableSTA(false);
+    WiFi.enableAP(false);
+    delay(100);
+    
+    // Disconnect from any existing connections
+    WiFi.disconnect(true);  // true = erase stored credentials
+    delay(100);
+    
+    DEBUG_PRINTLN("WiFi state cleaned, starting fresh AP...");
+    
+    // Set WiFi to AP mode with error checking
+    if (!WiFi.mode(WIFI_AP)) {
+        DEBUG_PRINTLN("ERROR: Failed to set WiFi to AP mode");
+        wifiEnabled = false;
+        return;
+    }
+    
+    // Start Access Point with error checking
+    if (!WiFi.softAP(ap_ssid, ap_password.c_str())) {
+        DEBUG_PRINTLN("ERROR: Failed to start WiFi Access Point");
+        DEBUG_PRINT("SSID: ");
+        DEBUG_PRINTLN(ap_ssid);
+        DEBUG_PRINT("Password length: ");
+        DEBUG_PRINTLN(ap_password.length());
+        wifiEnabled = false;
+        return;
+    }
+    
+    // Verify AP is running
+    delay(500);  // Give time for AP to start
+    IPAddress IP = WiFi.softAPIP();
+    if (IP == IPAddress(0, 0, 0, 0)) {
+        DEBUG_PRINTLN("ERROR: WiFi AP started but no IP assigned");
+        wifiEnabled = false;
+        return;
+    }
+    
+    DEBUG_PRINTLN("WiFi Access Point started successfully");
+    DEBUG_PRINT("AP IP address: ");
+    DEBUG_PRINTLN(IP);
+    DEBUG_PRINT("WiFi SSID: ");
+    DEBUG_PRINTLN(ap_ssid);
+    DEBUG_PRINT("WiFi password: ");
+    DEBUG_PRINTLN(ap_password);
+    
+    wifiEnabled = true;
+}
+
+// WiFi cleanup function (called from exitConfigMode)
+void exitConfigMode() {
+    currentState = OFF;
+    DEBUG_PRINTLN("Exiting configuration mode");
+    
+    // Check if restart is needed for Bluetooth enable
+    if (restartPendingForBluetooth) {
+        DEBUG_PRINTLN("Restarting to enable Bluetooth...");
+        delay(100); // Brief delay to ensure message is sent
+        ESP.restart();
+        return; // Never reached
+    }
+    
+    // Disable pairing mode when exiting config
+    disablePairingMode();
+    
+    // End web session
+    endWebSession();
+    
+    // Proper web server and WiFi cleanup
+    if (wifiEnabled) {
+        DEBUG_PRINTLN("Cleaning up web server and WiFi resources...");
+        
+        // Set flag to disable button reading during WiFi cleanup to prevent electrical interference
+        wifiCleanupInProgress = true;
+        
+        // Immediately stop server to prevent new connections during shutdown
+        DEBUG_PRINTLN("Stopping web server immediately...");
+        server.stop();  // Stop accepting new connections first
+        
+        // Very brief processing of existing connections only
+        DEBUG_PRINTLN("Processing final client requests...");
+        unsigned long gracefulShutdownStart = millis();
+        const unsigned long GRACEFUL_SHUTDOWN_TIMEOUT = 200;  // Reduced to 200ms
+        
+        while (millis() - gracefulShutdownStart < GRACEFUL_SHUTDOWN_TIMEOUT) {
+            server.handleClient();
+            delay(10);  // Very short delay
+        }
+        DEBUG_PRINTLN("Final client request processing completed");
+        
+        // Force close all connections
+        DEBUG_PRINTLN("Force closing all connections...");
+        server.close(); // Close existing connections
+        
+        // Note: ESP32WebServer routes persist, but server.stop() should prevent new connections
+        // The routes will be re-registered on next setupWebServer() call
+        DEBUG_PRINTLN("Web server stopped and connections closed");
+        
+        // Gracefully disconnect WiFi AP with proper sequencing
+        DEBUG_PRINTLN("Disconnecting WiFi AP...");
+        WiFi.softAPdisconnect(true);
+        delay(500);  // Give time for AP to disconnect properly
+        
+        DEBUG_PRINTLN("Setting WiFi to OFF mode...");
+        WiFi.mode(WIFI_OFF);
+        delay(200);  // Give time for WiFi stack to clean up
+        
+        // Additional WiFi cleanup to ensure complete resource release
+        WiFi.enableAP(false);  // Explicitly disable AP mode
+        delay(100);
+        
+        // Force garbage collection to free up memory
+        ESP.getHeapSize(); // Trigger heap cleanup
+        
+        wifiEnabled = false;
+        DEBUG_PRINTLN("Complete WiFi cleanup finished");
+        
+        // Clear the flags after WiFi cleanup is complete
+        // Add extended delay to ensure WiFi stack is completely settled before re-enabling button reading
+        delay(3000);  // Extended 3-second delay for complete WiFi stack shutdown
+        wifiCleanupInProgress = false;
+        webServerInitialized = false;  // Reset so routes can be set up fresh next time
+        activeConnections = 0;  // Reset connection counter
+        
+        Serial.println("WiFi cleanup protection period ended (3-second delay)");
+        lastWifiOperationTime = millis();  // Record when WiFi operations completed
+        
+        // Check if there's a new WiFi password and restart with it
+        String savedPassword = preferences.getString("wifi_password", "123456789");
+        if (savedPassword != ap_password) {
+            DEBUG_PRINTLN("Applying WiFi password change on exit");
+            ap_password = savedPassword;
+        }
+        
+        DEBUG_PRINTLN("WiFi AP stopped and resources cleaned up");
+    }
+    
+    // Visual feedback
+    digitalWrite(LED_PIN, HIGH);
+    delay(500);
+    digitalWrite(LED_PIN, LOW);
+    
+    // Turn off LED
+    ledcWrite(LED_PWM_CHANNEL, 0);
+}
+```
+
+===============================================
+5. WEB SERVER SETUP AND ROUTES
+===============================================
+
+From GhostKey.ino:
+
+```cpp
+void setupWebServer() {
+    Serial.println("Starting Web Server...");
+
+    // Only set up routes if not already initialized (prevents duplicate routes)
+    if (!webServerInitialized) {
+        Serial.println("Setting up web server routes...");
+
+    // Handle root path - serve setup page if first time, otherwise normal page
+    server.on("/", HTTP_GET, [](){
+        activeConnections++; // Track connection start
+        
+        // Add connection management headers to prevent resource exhaustion
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        
+        if (!firstSetupComplete) {
+            Serial.println("Serving first-time setup page");
+            Serial.printf("Free heap before setup page: %d bytes\n", ESP.getFreeHeap());
+            server.send_P(200, "text/html", setup_html);
+            Serial.printf("Free heap after setup page: %d bytes\n", ESP.getFreeHeap());
+        } else {
+            Serial.println("Serving main configuration page");
+            Serial.printf("Free heap before config page: %d bytes\n", ESP.getFreeHeap());
+            
+            // Check if we have enough memory for large content
+            size_t contentLength = strlen_P(config_html);
+            Serial.printf("Config page size: %d bytes\n", contentLength);
+            
+            // Force aggressive garbage collection before large transfer
+            ESP.getHeapSize(); // Trigger cleanup
+            delay(50);
+            
+            Serial.printf("Free heap after cleanup: %d bytes\n", ESP.getFreeHeap());
+            
+            // Use chunked sending for large content to prevent memory issues
+            // But skip chunked transmission right after setup completion to avoid reload issues
+            bool recentSetupCompletion = (millis() - lastSetupCompletionTime < 5000);  // Within 5 seconds of setup
+            
+            if (ESP.getFreeHeap() < 40000 && !recentSetupCompletion) {  // If less than 40KB free, use chunked sending
+                Serial.println("Using chunked transmission for large content");
+                server.sendHeader("Transfer-Encoding", "chunked");
+                server.send(200, "text/html", "");
+                
+                // Send in 4KB chunks
+                const size_t CHUNK_SIZE = 4096;
+                size_t sent = 0;
+                
+                while (sent < contentLength) {
+                    size_t remaining = contentLength - sent;
+                    size_t chunkSize = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
+                    
+                    // Create chunk from PROGMEM
+                    char chunk[CHUNK_SIZE + 1];
+                    memcpy_P(chunk, config_html + sent, chunkSize);
+                    chunk[chunkSize] = '\0';
+                    
+                    server.client().print(String(chunkSize, HEX) + "\r\n");
+                    server.client().print(chunk);
+                    server.client().print("\r\n");
+                    
+                    sent += chunkSize;
+                    delay(5); // Small delay between chunks
+                }
+                
+                // End chunked encoding
+                server.client().print("0\r\n\r\n");
+                Serial.println("Chunked transmission completed");
+                
+            } else {
+                // Sufficient memory - send normally
+                server.sendHeader("Content-Length", String(contentLength));
+                server.send_P(200, "text/html", config_html);
+                Serial.println("Normal transmission completed");
+            }
+            
+            Serial.printf("Free heap after config page: %d bytes\n", ESP.getFreeHeap());
+        }
+        delay(10);  // Small delay after serving large content
+        
+        activeConnections--; // Track connection end
+    });
+    
+    // Handle logo requests - serve JDI SVG from PROGMEM
+    server.on("/logo", HTTP_GET, [](){
+        Serial.println("Logo request received - serving JDI logo from PROGMEM");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
+        server.send_P(200, "image/svg+xml", jdi_logo_svg);
+        delay(5);  // Small delay after serving static content
+    });
+    
+    // Handle icon requests for PWA - serve simple PNG icon
+    server.on("/icon.png", HTTP_GET, [](){
+        Serial.println("PWA icon request received - serving PNG icon");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
+        // Simple 192x192 PNG icon (minimal size for compatibility)
+        // This creates a simple filled circle as a placeholder
+        static const uint8_t pwa_icon_png[] PROGMEM = {
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 
+            // ... [PNG data truncated for brevity] ...
+        };
+        server.send_P(200, "image/png", (const char*)pwa_icon_png, sizeof(pwa_icon_png));
+        delay(5);  // Small delay after serving binary content
+    });
+    
+    // Handle manifest.json requests - serve PWA manifest from PROGMEM
+    server.on("/manifest.json", HTTP_GET, [](){
+        Serial.println("Manifest request received - serving PWA manifest from PROGMEM");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
+        server.send_P(200, "application/json", manifest_json);
+        delay(5);  // Small delay after serving static content
+    });
+    
+    // System status endpoint
+    server.on("/status", HTTP_GET, [](){
+        if (!validateWebSessionOrSendError()) return;
+        
+        String stateStr;
+        switch(currentState) {
+            case OFF: stateStr = "OFF"; break;
+            case ACCESSORY: stateStr = "ACCESSORY"; break;
+            case IGNITION: stateStr = "IGNITION"; break;
+            case RUNNING: stateStr = "RUNNING"; break;
+            case CONFIG_MODE: stateStr = "CONFIG MODE"; break;
+            default: stateStr = "UNKNOWN"; break;
+        }
+        
+        String powerStateStr;
+        switch(currentPowerState) {
+            case POWER_ACTIVE: powerStateStr = "ACTIVE"; break;
+            case POWER_LIGHT_SLEEP: powerStateStr = "LIGHT_SLEEP"; break;
+            case POWER_DEEP_SLEEP: powerStateStr = "DEEP_SLEEP"; break;
+            default: powerStateStr = "UNKNOWN"; break;
+        }
+        
+        String json = "{";
+        json += "\"state\":\"" + stateStr + "\",";
+        json += "\"powerState\":\"" + powerStateStr + "\",";
+        json += "\"bluetooth\":" + String((bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled) ? "true" : "false") + ",";
+        json += "\"bluetoothEnabled\":" + String(bluetoothEnabled ? "true" : "false") + ",";
+        json += "\"starterPulse\":" + String(starterPulseTime) + ",";
+        json += "\"autoLockTimeout\":" + String(autoLockTimeout);
+        json += "}";
+        
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
+        server.send(200, "application/json", json);
+        delay(5);  // Small delay after JSON response
+    });
+    
+    // Bluetooth devices endpoint
+    server.on("/devices", HTTP_GET, [](){
+        Serial.println("Bluetooth devices request received");
+        if (!validateWebSessionOrSendError()) return;
+        
+        if (!bluetoothEnabled || !bluetoothInitialized) {
+            server.sendHeader("Connection", "close");
+            server.send(200, "application/json", "[]");
+            return;
+        }
+        const char* json = getDevicesJson();
+        server.sendHeader("Connection", "close");
+        server.send(200, "application/json", json);
+    });
+    
+    // Bluetooth pairing toggle endpoint
+    server.on("/pairing", HTTP_GET, [](){
+        Serial.println("Bluetooth pairing toggle request received");
+        if (!bluetoothEnabled || !bluetoothInitialized) {
+            server.send(400, "text/plain", "Bluetooth is disabled");
+            return;
+        }
+        toggleBluetoothPairingMode();
+        String status = isPairingMode ? "Pairing mode active" : "Pairing mode inactive";
+        server.send(200, "text/plain", status);
+    });
+    
+    // Bluetooth rename endpoint (new inline editing style)
+    server.on("/bluetooth_rename", HTTP_POST, [](){
+        Serial.println("Bluetooth rename request received");
+        
+        if (!server.hasArg("plain")) {
+            Serial.println("Bluetooth rename: No JSON body");
+            server.send(400, "text/plain", "No request body");
+            return;
+        }
+        
+        DynamicJsonDocument doc(512);
+        DeserializationError error = deserializeJson(doc, server.arg("plain"));
+        
+        if (error) {
+            Serial.printf("Bluetooth rename: JSON parse error: %s\n", error.c_str());
+            server.send(400, "text/plain", "Invalid JSON");
+            return;
+        }
+        
+        const char* macStr = doc["mac"];
+        const char* name = doc["name"];
+        
+        Serial.printf("Bluetooth rename: MAC=%s, Name=%s\n", macStr ? macStr : "NULL", name ? name : "NULL");
+        
+        if (!macStr || !name) {
+            Serial.println("Bluetooth rename: Missing mac or name field");
+            server.send(400, "text/plain", "Missing mac or name");
+            return;
+        }
+        
+        if (strlen(name) == 0 || strlen(name) > 32) {
+            Serial.printf("Bluetooth rename: Invalid name length: %d\n", strlen(name));
+            server.send(400, "text/plain", "Name must be 1-32 characters");
+            return;
+        }
+        
+        esp_bd_addr_t address;
+        int parsed = sscanf(macStr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+            &address[0], &address[1], &address[2],
+            &address[3], &address[4], &address[5]);
+        
+        if (parsed != 6) {
+            Serial.printf("Bluetooth rename: MAC parse failed, parsed %d fields\n", parsed);
+            server.send(400, "text/plain", "Invalid MAC address format");
+            return;
+        }
+        
+        Serial.printf("Bluetooth rename: Saving name '%s' for device %02x:%02x:%02x:%02x:%02x:%02x\n", 
+                     name, address[0], address[1], address[2], address[3], address[4], address[5]);
+        
+        saveDeviceName(address, name);
+        // Don't invalidate cache to avoid interrupting user experience
+        
+        Serial.println("Bluetooth rename: Success!");
+        server.send(200, "text/plain", "Bluetooth device renamed successfully");
+    });
+    
+    // Remove device endpoint
+    server.on("/remove", HTTP_POST, [](){
+        Serial.println("Remove device request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                const char* macStr = doc["mac"];
+                
+                if (macStr) {
+                    esp_bd_addr_t address;
+                    int parsed = sscanf(macStr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                        &address[0], &address[1], &address[2],
+                        &address[3], &address[4], &address[5]);
+                    
+                    if (parsed == 6) {
+                        if (esp_ble_remove_bond_device(address) == ESP_OK) {
+                            Serial.println("Bluetooth device removed successfully");
+                            sendWebNotification("Bluetooth device removed successfully!", "success");
+                            hasRemovedDevice = true;
+                            server.send(200, "text/plain", "Bluetooth device removed successfully");
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        server.send(400, "text/plain", "Failed to remove device");
+    });
+    
+    // Priority toggle endpoint (placeholder for now)
+    server.on("/priority", HTTP_POST, [](){
+        Serial.println("Priority toggle request received");
+        server.send(200, "text/plain", "Priority feature not implemented yet");
+    });
+
+    // Route for updating starter pulse time
+    server.on("/update_pulse", HTTP_POST, [](){
+        if (server.hasArg("pulse_time")) {
+            String pulseTimeStr = server.arg("pulse_time");
+            unsigned long newPulseTime = pulseTimeStr.toInt();
+            
+            if (newPulseTime >= 100 && newPulseTime <= 5000) {
+                starterPulseTime = newPulseTime;
+                preferences.putULong("starter_pulse", starterPulseTime);
+                Serial.printf("Starter pulse time updated to: %lu ms\n", starterPulseTime);
+                server.send(200, "text/plain", "Starter pulse time updated successfully");
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid pulse time (must be 100-5000ms)");
+    });
+
+    // Route for updating auto-lock timeout
+    server.on("/update_autolock", HTTP_POST, [](){
+        if (server.hasArg("auto_lock")) {
+            String timeoutStr = server.arg("auto_lock");
+            unsigned long newTimeout = timeoutStr.toInt() * 1000; // Convert to milliseconds
+            
+            if (newTimeout >= 5000 && newTimeout <= 300000) { // 5-300 seconds
+                autoLockTimeout = newTimeout;
+                preferences.putULong("auto_lock", autoLockTimeout);
+                Serial.printf("Auto-lock timeout updated to: %lu ms\n", autoLockTimeout);
+                server.send(200, "text/plain", "Auto-lock timeout updated successfully");
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid timeout (must be 5-300 seconds)");
+    });
+
+    // WiFi password management endpoints
+    server.on("/wifi_password", HTTP_GET, [](){
+        Serial.println("WiFi password request received");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
+        // Return masked password for security
+        String maskedPassword = String(ap_password.length(), '*');
+        server.send(200, "text/plain", maskedPassword);
+    });
+    
+    // Web interface password endpoints
+    server.on("/web_password", HTTP_GET, [](){
+        Serial.println("Web password request received");
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
+        // Return masked password for security
+        server.send(200, "text/plain", "****");
+    });
+    
+    server.on("/validate_web_password", HTTP_POST, [](){
+        Serial.println("Web password validation request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                const char* password = doc["password"];
+                
+                if (password && String(password) == web_password) {
+                    // Start new web session on successful login
+                    startWebSession();
+                    server.send(200, "text/plain", "Password correct");
+                    return;
+                } else {
+                    // End any existing session on failed login
+                    endWebSession();
+                    server.send(401, "text/plain", "Invalid password");
+                    return;
+                }
+            }
+        }
+        endWebSession();
+        server.send(400, "text/plain", "Invalid request");
+    });
+    
+    // Session status endpoint
+    server.on("/session_status", HTTP_GET, [](){
+        // Add connection management headers
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
+        
+        if (isWebSessionValid()) {
+            updateWebActivity();
+            unsigned long remainingTime = WEB_SESSION_TIMEOUT - (millis() - webSessionStartTime);
+            unsigned long activityTime = WEB_ACTIVITY_TIMEOUT - (millis() - lastWebActivity);
+            String json = "{\"valid\":true,\"remainingTime\":" + String(remainingTime) + 
+                         ",\"activityTimeout\":" + String(activityTime) + "}";
+            server.send(200, "application/json", json);
+        } else {
+            server.send(200, "application/json", "{\"valid\":false}");
+        }
+        delay(5);  // Small delay after JSON response
+    });
+    
+    // Notification polling endpoint
+    server.on("/notifications", HTTP_GET, [](){
+        if (!validateWebSessionOrSendError()) return;
+        
+        String json = "{";
+        json += "\"hasNotification\":" + String((!pendingNotification.consumed && pendingNotification.message.length() > 0) ? "true" : "false") + ",";
+        json += "\"message\":\"" + pendingNotification.message + "\",";
+        json += "\"type\":\"" + pendingNotification.type + "\",";
+        json += "\"hasNewRfidKey\":" + String(hasNewRfidKey ? "true" : "false") + ",";
+        json += "\"hasNewBluetoothDevice\":" + String(hasNewBluetoothDevice ? "true" : "false") + ",";
+        json += "\"hasRemovedDevice\":" + String(hasRemovedDevice ? "true" : "false");
+        json += "}";
+        
+        // Mark notification as consumed and reset flags
+        pendingNotification.consumed = true;
+        hasNewRfidKey = false;
+        hasNewBluetoothDevice = false;
+        hasRemovedDevice = false;
+        
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
+        server.send(200, "application/json", json);
+        delay(5);  // Small delay after JSON response
+    });
+    
+    server.on("/update_web_password", HTTP_POST, [](){
+        Serial.println("Web PIN update request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                const char* newPassword = doc["password"];
+                
+                // Validate: exactly 4 digits
+                if (newPassword && strlen(newPassword) == 4) {
+                    bool isValid = true;
+                    for (int i = 0; i < 4; i++) {
+                        if (!isdigit(newPassword[i])) {
+                            isValid = false;
+                            break;
+                        }
+                    }
+                    
+                    if (isValid) {
+                        web_password = String(newPassword);
+                        preferences.putString("web_password", web_password);
+                        Serial.println("Web PIN updated successfully");
+                        server.send(200, "text/plain", "Web PIN updated successfully");
+                        return;
+                    }
+                }
+                server.send(400, "text/plain", "PIN must be exactly 4 digits");
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+    
+    server.on("/update_wifi_password", HTTP_POST, [](){
+        Serial.println("WiFi password update request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                const char* newPassword = doc["password"];
+                if (newPassword && strlen(newPassword) >= 8) {
+                    preferences.putString("wifi_password", String(newPassword));
+                    Serial.println("WiFi password updated - will take effect on next config mode entry");
+                    server.send(200, "text/plain", "WiFi password updated successfully");
+                    return;
+                }
+                server.send(400, "text/plain", "Password must be at least 8 characters");
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+
+    // RFID endpoints
+    server.on("/rfid_keys", HTTP_GET, [](){
+        Serial.println("RFID keys request received");
+        String json = getRfidKeysJson();
+        server.send(200, "application/json", json);
+    });
+    
+    server.on("/rfid_pair", HTTP_POST, [](){
+        Serial.println("RFID pair mode request received");
+        rfidPairingMode = true;
+        server.send(200, "text/plain", "RFID pairing mode activated");
+    });
+    
+    server.on("/rfid_remove", HTTP_POST, [](){
+        Serial.println("RFID remove request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                int index = doc["index"];
+                if (index >= 0 && index < numStoredKeys) {
+                    // Shift remaining keys down
+                    for (int i = index; i < numStoredKeys - 1; i++) {
+                        memcpy(storedKeys[i], storedKeys[i + 1], sizeof(storedKeys[i]));
+                    }
+                    numStoredKeys--;
+                    saveRfidKeys();
+                    Serial.printf("RFID key at index %d removed\n", index);
+                    server.send(200, "text/plain", "RFID key removed successfully");
+                    return;
+                }
+            }
+        }
+        server.send(400, "text/plain", "Invalid request or index");
+    });
+    
+    server.on("/rfid_rename", HTTP_POST, [](){
+        Serial.println("RFID rename request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                int index = doc["index"];
+                const char* name = doc["name"];
+                if (index >= 0 && index < numStoredKeys && name && strlen(name) > 0 && strlen(name) <= 32) {
+                    strncpy(rfidKeyNames[index], name, sizeof(rfidKeyNames[index]) - 1);
+                    rfidKeyNames[index][sizeof(rfidKeyNames[index]) - 1] = '\0';
+                    saveRfidKeyNames();
+                    Serial.printf("RFID key at index %d renamed to '%s'\n", index, name);
+                    server.send(200, "text/plain", "RFID key renamed successfully");
+                    return;
+                }
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+    
+    server.on("/rfid_status", HTTP_GET, [](){
+        String json = "{";
+        json += "\"pairing\":" + String(rfidPairingMode ? "true" : "false") + ",";
+        json += "\"authenticated\":" + String(rfidAuthenticated ? "true" : "false") + ",";
+        json += "\"keyCount\":" + String(numStoredKeys);
+        json += "}";
+        server.send(200, "application/json", json);
+    });
+
+    // Bluetooth enable/disable endpoints
+    server.on("/bluetooth_status", HTTP_GET, [](){
+        Serial.println("Bluetooth status request received");
+        String json = "{";
+        json += "\"enabled\":" + String(bluetoothEnabled ? "true" : "false") + ",";
+        json += "\"initialized\":" + String(bluetoothInitialized ? "true" : "false");
+        json += "}";
+        server.send(200, "application/json", json);
+    });
+    
+    server.on("/bluetooth_toggle", HTTP_POST, [](){
+        Serial.println("Bluetooth toggle request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                bool newState = doc["enabled"];
+                
+                if (newState != bluetoothEnabled) {
+                    if (newState && !bluetoothEnabled) {
+                        // Enabling Bluetooth - set flag for restart on config exit
+                        bluetoothEnabled = true;
+                        preferences.putBool("bt_enabled", true);
+                        preferences.putBool("bt_restart", true);
+                        restartPendingForBluetooth = true;
+                        Serial.println("Bluetooth will be enabled when you exit configuration mode");
+                        server.send(200, "text/plain", "Bluetooth will be enabled when you exit configuration mode. Device will restart.");
+                    } else if (!newState && bluetoothEnabled) {
+                        // Disabling Bluetooth
+                        bluetoothEnabled = false;
+                        preferences.putBool("bt_enabled", false);
+                        if (bluetoothInitialized) {
+                            shutdownBluetooth();
+                        }
+                        Serial.println("Bluetooth disabled and stopped immediately");
+                        server.send(200, "text/plain", "Bluetooth disabled successfully");
+                    }
+                } else {
+                    // No change needed
+                    String status = bluetoothEnabled ? "enabled" : "disabled";
+                    server.send(200, "text/plain", "Bluetooth already " + status);
+                }
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+
+    // Ghost Key/Power system toggle endpoints
+    server.on("/system_status", HTTP_GET, [](){
+        Serial.println("System status request received");
+        String json = "{";
+        json += "\"ghostKeyEnabled\":" + String(ghostKeyEnabled ? "true" : "false") + ",";
+        json += "\"ghostPowerEnabled\":" + String(ghostPowerEnabled ? "true" : "false");
+        json += "}";
+        server.send(200, "application/json", json);
+    });
+    
+    server.on("/toggle_ghost_key", HTTP_POST, [](){
+        Serial.println("Ghost Key toggle request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                bool newState = doc["enabled"];
+                
+                // Prevent disabling both systems
+                if (!newState && !ghostPowerEnabled) {
+                    server.send(400, "text/plain", "Cannot disable both Ghost Key and Ghost Power systems");
+                    return;
+                }
+                
+                ghostKeyEnabled = newState;
+                preferences.putBool("gk_enabled", ghostKeyEnabled);
+                
+                Serial.printf("Ghost Key %s\n", ghostKeyEnabled ? "enabled" : "disabled");
+                String message = ghostKeyEnabled ? "Ghost Key enabled." : "Ghost Key disabled.";
+                server.send(200, "text/plain", message);
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+    
+    server.on("/toggle_ghost_power", HTTP_POST, [](){
+        Serial.println("Ghost Power toggle request received");
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(512);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                bool newState = doc["enabled"];
+                
+                // Prevent disabling both systems
+                if (!newState && !ghostKeyEnabled) {
+                    server.send(400, "text/plain", "Cannot disable both Ghost Key and Ghost Power systems");
+                    return;
+                }
+                
+                ghostPowerEnabled = newState;
+                preferences.putBool("gp_enabled", ghostPowerEnabled);
+                
+                Serial.printf("Ghost Power %s\n", ghostPowerEnabled ? "enabled" : "disabled");
+                String message = ghostPowerEnabled ? "Ghost Power enabled." : "Ghost Power disabled.";
+                server.send(200, "text/plain", message);
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+
+    // Route for exiting config mode
+    server.on("/exit", HTTP_POST, [](){
+        // Send response first, then exit to avoid race condition
+        server.send(200, "text/plain", "Exiting config mode...");
+        // Give more time for response to be sent before shutting down WiFi
+        delay(5000);  // Increased from 1000ms to 5000ms
+        exitConfigMode();
+    });
+
+    // Setup completion endpoint - marks first setup as complete
+    server.on("/complete_setup", HTTP_POST, [](){
+        Serial.println("Setup completion request received");
+        // Add connection management headers for setup completion
+        server.sendHeader("Connection", "close");
+        server.sendHeader("Cache-Control", "no-cache");
+        
+        if (server.hasArg("plain")) {
+            DynamicJsonDocument doc(1024);
+            DeserializationError error = deserializeJson(doc, server.arg("plain"));
+            
+            if (!error) {
+                // Apply all the setup settings
+                bool ghostKey = doc["ghostKeyEnabled"];
+                bool ghostPower = doc["ghostPowerEnabled"];
+                bool bluetooth = doc["bluetoothEnabled"];
+                String wifiPass = doc["wifiPassword"];
+                String webPass = doc["webPassword"];
+                
+                // Validate settings
+                bool validWebPin = (webPass.length() == 4);
+                if (validWebPin) {
+                    for (int i = 0; i < 4; i++) {
+                        if (!isdigit(webPass[i])) {
+                            validWebPin = false;
+                            break;
+                        }
+                    }
+                }
+                
+                if ((!ghostKey && !ghostPower) || wifiPass.length() < 8 || !validWebPin) {
+                    server.send(400, "text/plain", "Invalid settings - Web PIN must be exactly 4 digits, WiFi password minimum 8 characters");
+                    return;
+                }
+                
+                // Save all settings except Bluetooth (handled separately)
+                ghostKeyEnabled = ghostKey;
+                ghostPowerEnabled = ghostPower;
+                ap_password = wifiPass;
+                web_password = webPass;
+                
+                preferences.putBool("gk_enabled", ghostKeyEnabled);
+                preferences.putBool("gp_enabled", ghostPowerEnabled);
+                preferences.putString("wifi_password", ap_password);
+                preferences.putString("web_password", web_password);
+                
+                // Handle Bluetooth state change using the same logic as the toggle endpoint
+                if (bluetooth != bluetoothEnabled) {
+                    if (bluetooth && !bluetoothEnabled) {
+                        // Enabling Bluetooth - set flag for restart on config exit
+                        bluetoothEnabled = true;
+                        preferences.putBool("bt_enabled", true);
+                        preferences.putBool("bt_restart", true);
+                        restartPendingForBluetooth = true;
+                        Serial.println("Setup: Bluetooth will be enabled when you exit configuration mode");
+                    } else if (!bluetooth && bluetoothEnabled) {
+                        // Disabling Bluetooth
+                        bluetoothEnabled = false;
+                        preferences.putBool("bt_enabled", false);
+                        if (bluetoothInitialized) {
+                            shutdownBluetooth();
+                        }
+                        Serial.println("Setup: Bluetooth disabled and stopped immediately");
+                    }
+                } else {
+                    // No change to Bluetooth state, just save current setting
+                    preferences.putBool("bt_enabled", bluetoothEnabled);
+                }
+                
+                // Mark setup as complete
+                firstSetupComplete = true;
+                preferences.putBool("setup_done", true);
+                
+                // Record setup completion time to avoid chunked transmission during reload
+                lastSetupCompletionTime = millis();
+                Serial.println("Setup completion time recorded for smooth page transition");
+                
+                Serial.println("Setup completed successfully");
+                server.send(200, "text/plain", "Setup completed successfully");
+                delay(100);  // Ensure response is sent before any reload
+                return;
+            }
+        }
+        server.send(400, "text/plain", "Invalid request");
+    });
+
+    // RSSI analysis endpoint for confidence-based authentication monitoring
+    server.on("/rssi_analysis", HTTP_GET, [](){
+        Serial.println("RSSI analysis status request received");
+        String json = getRSSIAnalysisJson();
+        server.send(200, "application/json", json);
+    });
+
+    // Calibration system endpoints
+    server.on("/calibration_start", HTTP_POST, [](){
+        Serial.println("Calibration start request received");
+        if (!bluetoothEnabled || !bluetoothInitialized) {
+            server.send(400, "text/plain", "Bluetooth is disabled");
+            return;
+        }
+        if (isCalibrating) {
+            server.send(400, "text/plain", "Calibration already in progress");
+            return;
+        }
+        startCalibration();
+        server.send(200, "text/plain", "Calibration started - position your phone and wait 30 seconds");
+    });
+    
+    server.on("/calibration_stop", HTTP_POST, [](){
+        Serial.println("Calibration stop request received");
+        if (!isCalibrating) {
+            server.send(400, "text/plain", "No calibration in progress");
+            return;
+        }
+        stopCalibration();
+        server.send(200, "text/plain", "Calibration stopped and offset calculated");
+    });
+    
+    server.on("/calibration_reset", HTTP_POST, [](){
+        Serial.println("Calibration reset request received");
+        resetCalibration();
+        server.send(200, "text/plain", "Calibration reset to default");
+    });
+    
+    server.on("/calibration_status", HTTP_GET, [](){
+        String json = "{";
+        json += "\"isCalibrating\":" + String(isCalibrating ? "true" : "false") + ",";
+        json += "\"offset\":" + String(calibrationOffset, 1) + ",";
+        json += "\"sampleCount\":" + String(calibrationSampleCount) + ",";
+        if (isCalibrating) {
+            unsigned long elapsed = millis() - calibrationStartTime;
+            unsigned long remaining = (elapsed < calibrationDuration) ? (calibrationDuration - elapsed) : 0;
+            json += "\"timeRemaining\":" + String(remaining);
+        } else {
+            json += "\"timeRemaining\":0";
+        }
+        json += "}";
+        server.send(200, "application/json", json);
+    });
+
+        // Mark routes as initialized
+        webServerInitialized = true;
+        Serial.println("Web server routes set up successfully");
+    } else {
+        Serial.println("Web server routes already initialized, skipping setup");
+    }
+
+    // Start server (always call this to ensure server is listening)
+    server.begin();
+    Serial.println("Web server started successfully");
+    Serial.print("Server listening on IP: ");
+    Serial.println(WiFi.softAPIP());
+}
+```
+
+Main loop web server handling:
+```cpp
+// Web server handling with throttling to prevent resource exhaustion
+if (currentState == CONFIG_MODE) {
+    static unsigned long lastWebServerUpdate = 0;
+    if (millis() - lastWebServerUpdate >= 50) {  // Throttle to 20Hz max (50ms interval)
+        // Check if we have too many active connections (basic circuit breaker)
+        if (activeConnections < 5) {  // Limit concurrent connections
+            server.handleClient();
+            lastWebServerUpdate = millis();
+            delay(10);  // Small delay to allow other processes and prevent overwhelming
+        } else {
+            // Skip handling if too many connections, let them timeout
+            delay(50);  // Longer delay when circuit breaker is active
+        }
+    }
+}
+```
+
+===============================================
+6. HTML FILES (EMBEDDED)
+===============================================
+
+setup_html.h contains the first-time setup page:
+- Progressive Web App (PWA) compatible
+- Responsive design with mobile optimization
+- System configuration toggles (Ghost Key/Power)
+- Bluetooth configuration
+- Security settings (WiFi password, Web PIN)
+- Form validation and submission
+
+config_standalone.html contains the main configuration interface:
+- Full configuration dashboard
+- Device management (Bluetooth, RFID)
+- System status monitoring
+- Settings management
+- Real-time notifications
+- PWA features with offline capability
+
+Both files are embedded as PROGMEM strings in the ESP32 firmware.
+
+===============================================
+7. PWA MANIFEST AND ASSETS
+===============================================
+
+PWA Manifest (served at /manifest.json):
+```json
+{
+  "name": "Ghost Key Configuration",
+  "short_name": "Ghost Key",
+  "description": "Ghost Key ESP32 Configuration Interface",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#667eea",
+  "theme_color": "#667eea",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/logo",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}
+```
+
+Assets served:
+- /logo - JDI SVG logo (embedded in PROGMEM)
+- /icon.png - 192x192 PNG icon (embedded in PROGMEM)
+- /manifest.json - PWA manifest
+
+===============================================
+8. CONFIGURATION MODE ENTRY/EXIT
+===============================================
+
+Enter configuration mode:
+```cpp
+void enterConfigMode() {
+    // Check if already in config mode to prevent double-entry
+    if (currentState == CONFIG_MODE) {
+        DEBUG_PRINTLN("Already in configuration mode - ignoring request");
+        return;
+    }
+    
+    // Check authentication before allowing config mode access
+    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
+    if (!isAuthenticated) {
+        DEBUG_PRINTLN("Not authenticated - Access denied");
+        return;
+    }
+    currentState = CONFIG_MODE;
+    DEBUG_PRINTLN("Entering configuration mode");
+    
+    // Initialize LED flashing immediately when entering config mode
+    static unsigned long lastConfigLedUpdate = 0;
+    static bool configLedState = false;
+    lastConfigLedUpdate = millis();
+    configLedState = true;  // Start with LED on
+    ledcWrite(LED_PWM_CHANNEL, 255);  // Turn on LED immediately
+    DEBUG_PRINTLN("Config mode LED flashing started");
+    
+    // Reset button state to prevent immediate exit from lingering long press
+    buttonPressed = false;
+    isLongPressDetected = false;
+    lastButtonPress = millis();
+    
+    // Initialize WiFi and web server with error handling
+    setupWiFi();
+    if (!wifiEnabled) {
+        DEBUG_PRINTLN("ERROR: WiFi setup failed - exiting config mode");
+        currentState = OFF;
+        return;
+    }
+    
+    setupWebServer();
+    
+    // Visual feedback
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(LED_PIN, LOW);
+        delay(100);
+    }
+    
+    // Start LED pulsing
+    ledBrightness = 0;
+    ledFadeAmount = 5;
+}
+```
+
+===============================================
+END OF DOCUMENT
+===============================================
+
+This document contains all web server and WiFi related code from the GhostKey project.
+The system provides a complete ESP32-based web configuration interface with:
+- WiFi Access Point mode
+- Progressive Web App (PWA) support
+- Session management and security
+- REST API endpoints for all system functions
+- Real-time device management
+- Responsive mobile-first design
+- Chunked transmission for large content
+- Connection throttling and resource management
+
+For implementation details, refer to the specific code sections above.

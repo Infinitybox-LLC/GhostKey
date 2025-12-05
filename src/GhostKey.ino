@@ -3002,34 +3002,40 @@ void updateButtonState(ButtonState &state, int pin) {
 void updateSystemState() {
     // Check for extended cranking conditions (both start button and brake held while authenticated)
     bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
-    bool shouldExtendedCrank = (buttonPressed && brakeHeld && isAuthenticated && startRelayActive);
+    bool holdingForExtendedCrank = (buttonPressed && brakeHeld && isAuthenticated && startRelayActive);
     
     // Handle start sequence timing
     if (startRelayActive) {
-        if (shouldExtendedCrank) {
-            // Extended cranking mode - continue cranking while both buttons held
-            if (!extendedCrankingActive) {
+        unsigned long elapsedCrankTime = millis() - startRelayTimer;
+        
+        if (extendedCrankingActive) {
+            // Already in extended cranking mode
+            if (!holdingForExtendedCrank) {
+                // Extended cranking was active but conditions no longer met - stop cranking
+                DEBUG_PRINTLN("Extended cranking stopped - button or brake released");
+                startRelayActive = false;
+                extendedCrankingActive = false;
+                engineRunning = true;
+                systemState = 2;  // Set to IGNITION state when engine is running
+                controlRelays();
+            }
+            // Otherwise continue cranking (no timer reset needed, just keep going)
+        } else if (elapsedCrankTime >= starterPulseTime) {
+            // Normal crank time has elapsed
+            if (holdingForExtendedCrank) {
+                // Still holding - enter extended cranking mode
                 extendedCrankingActive = true;
                 DEBUG_PRINTLN("Extended cranking activated - will continue until button or brake released");
+            } else {
+                // Not holding - normal start sequence complete
+                DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
+                startRelayActive = false;
+                engineRunning = true;
+                systemState = 2;  // Set to IGNITION state when engine is running
+                controlRelays();
             }
-            // Reset timer to prevent normal timeout while extended cranking
-            startRelayTimer = millis();
-        } else if (extendedCrankingActive) {
-            // Extended cranking was active but conditions no longer met - stop cranking
-            DEBUG_PRINTLN("Extended cranking stopped - button or brake released");
-            startRelayActive = false;
-            extendedCrankingActive = false;
-            engineRunning = true;
-            systemState = 2;  // Set to IGNITION state when engine is running
-            controlRelays();
-        } else if (millis() - startRelayTimer >= starterPulseTime) {
-            // Normal start sequence timeout
-            DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
-            startRelayActive = false;
-            engineRunning = true;
-            systemState = 2;  // Set to IGNITION state when engine is running
-            controlRelays();
         }
+        // If elapsed < starterPulseTime, just continue cranking normally
     } else {
         // Reset extended cranking flag when not actively starting
         extendedCrankingActive = false;
@@ -3092,6 +3098,7 @@ void updateSystemState() {
 }
 
 void checkStartSequence() {
+    // This function is for debug output only - actual logic is in updateSystemState()
     if (startRelayActive) {
         unsigned long currentTime = millis();
         unsigned long elapsedTime = currentTime - startRelayTimer;
@@ -3099,21 +3106,14 @@ void checkStartSequence() {
         if (extendedCrankingActive) {
             DEBUG_PRINT("Extended cranking active - time: ");
             DEBUG_PRINT(elapsedTime);
-            DEBUG_PRINTLN("ms (no timeout)");
+            DEBUG_PRINTLN("ms (continuing until release)");
         } else {
             DEBUG_PRINT("Start sequence time: ");
             DEBUG_PRINT(elapsedTime);
             DEBUG_PRINT(" / ");
             DEBUG_PRINTLN(starterPulseTime);
-            
-            if (elapsedTime >= starterPulseTime) {
-                DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
-                startRelayActive = false;
-                engineRunning = true;
-                systemState = 2;  // Set to IGNITION state when engine is running
-                controlRelays();
-            }
         }
+        // Note: Actual state transitions handled in updateSystemState()
     }
 }
 

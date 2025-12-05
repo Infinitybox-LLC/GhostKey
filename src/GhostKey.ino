@@ -186,7 +186,7 @@ const char manifest_json[] PROGMEM = R"({
 #define DEVICE_PRIORITY_KEY "dp_"
 #define MAX_RSSI -30
 #define MIN_RSSI -100
-#define RSSI_UPDATE_INTERVAL 1000
+#define RSSI_UPDATE_INTERVAL 200      // FAST: 200ms update interval (was 1000ms)
 #define CONNECTION_TIMEOUT 30000
 #define MIN_CONN_INTERVAL 0x10
 #define MAX_CONN_INTERVAL 0x20
@@ -199,16 +199,17 @@ const char manifest_json[] PROGMEM = R"({
 #define RSSI_INVALID_VALUE -99   // Value to use for invalid RSSI
 
 // Statistical RSSI Analysis constants (CONFIDENCE-BASED AUTHENTICATION)
-#define RSSI_SHORT_TERM_SIZE 30       // ~3 seconds of readings for quick confidence
-#define RSSI_MEDIUM_TERM_SIZE 50      // 5 seconds of readings  
-#define RSSI_LONG_TERM_SIZE 300       // 30 seconds of readings
+// FAST DETECTION MODE - Optimized for quick response without hysteresis
+#define RSSI_SHORT_TERM_SIZE 15       // FAST: ~1.5 seconds of readings (was 30)
+#define RSSI_MEDIUM_TERM_SIZE 25      // FAST: ~2.5 seconds of readings (was 50)
+#define RSSI_LONG_TERM_SIZE 150       // FAST: 15 seconds of readings (was 300)
 #define CONFIDENCE_AUTH_THRESHOLD 65.0f    // Minimum confidence % for authentication (easier to authenticate)
 #define CONFIDENCE_DEAUTH_THRESHOLD 50.0f  // Confidence % to lose authentication (faster to deauthenticate)
 #define STABILITY_WEIGHT 35.0f        // Max points for stability (35%)
 #define TREND_WEIGHT 25.0f           // Max points for trend analysis (25%)
 #define STRENGTH_WEIGHT 40.0f        // Max points for signal strength (40%)
-#define MIN_READINGS_FOR_ANALYSIS 3  // Minimum readings before analysis (faster startup)
-#define TREND_WINDOW_MS 8000         // 8 seconds for trend analysis (increased from 3s)
+#define MIN_READINGS_FOR_ANALYSIS 2  // FAST: Minimum readings before analysis (was 3)
+#define TREND_WINDOW_MS 3000         // FAST: 3 seconds for trend analysis (was 8000ms)
 #define STABILITY_THRESHOLD 12.0f    // Max std deviation for "stable" (increased tolerance)
 #define STRONG_SIGNAL_THRESHOLD -60  // RSSI above this = strong signal
 #define WEAK_SIGNAL_THRESHOLD -80    // RSSI below this = weak signal
@@ -216,11 +217,12 @@ const char manifest_json[] PROGMEM = R"({
 #define PROXIMITY_BONUS_THRESHOLD -55     // RSSI above this gets proximity bonus
 
 // Enhanced confidence calculation constants
+// FAST DETECTION MODE - Higher momentum rates for quicker response
 #define STATIONARY_BONUS_POINTS 10.0f     // Bonus for stationary strong signal
-#define CONFIDENCE_MOMENTUM_RATE 0.25f    // 25% change rate for faster response
-#define CONFIDENCE_MOMENTUM_RATE_FAST 0.40f    // Fast momentum for rapid changes
-#define CONFIDENCE_CHANGE_THRESHOLD 20.0f      // Threshold for switching to fast momentum
-#define STATIONARY_MIN_SAMPLES 8          // Minimum samples for stationary detection
+#define CONFIDENCE_MOMENTUM_RATE 0.45f    // FAST: 45% change rate (was 0.25)
+#define CONFIDENCE_MOMENTUM_RATE_FAST 0.70f    // FAST: 70% for rapid changes (was 0.40)
+#define CONFIDENCE_CHANGE_THRESHOLD 15.0f      // FAST: Lower threshold for fast mode (was 20.0)
+#define STATIONARY_MIN_SAMPLES 5          // FAST: Quicker stationary detection (was 8)
 #define STATIONARY_MAX_STDDEV 6.0f        // Max std dev for "stationary" signal
 
 // Outlier rejection and signal quality constants
@@ -270,6 +272,9 @@ enum PowerState {
     POWER_LIGHT_SLEEP, // 160MHz - Reduced power, all systems active but slower
     POWER_DEEP_SLEEP   // 80MHz - Minimal power, RFID cycling, BLE advertising reduced
 };
+
+// Disable all power management - run at full power (240MHz) at all times
+#define DISABLE_POWER_MANAGEMENT true
 
 // Power management timing constants
 #define LIGHT_SLEEP_DELAY_MS 20000      // 20 seconds after losing authentication
@@ -1448,8 +1453,8 @@ void startRSSIScan() {
         .scan_type = BLE_SCAN_TYPE_ACTIVE,
         .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
         .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval = 0x50,  // Reduced interval for more frequent updates
-        .scan_window = 0x30,    // Increased window for better reception
+        .scan_interval = 0x30,  // FAST: 30ms interval (was 0x50/50ms) - more frequent scanning
+        .scan_window = 0x28,    // FAST: 25ms window (was 0x30/30ms) - continuous active scanning
         .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE
     };
     esp_ble_gap_set_scan_params(&scan_params);
@@ -1981,6 +1986,16 @@ void setup() {
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     bootCount++;
     
+    #if DISABLE_POWER_MANAGEMENT
+    // Power management disabled - always run at full power (240MHz)
+    Serial.println("=== POWER MANAGEMENT DISABLED ===");
+    Serial.println("Running at full power (240MHz) at all times");
+    setCpuFrequencyMhz(240);
+    delay(100);
+    currentPowerState = POWER_ACTIVE;
+    wasInDeepSleep = false;
+    Serial.printf("ESP32: Boot #%d - Full power mode\n", bootCount);
+    #else
     if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0 && wasInDeepSleep) {
         // Woke from hardware deep sleep via start button (GPIO35)
         Serial.printf("ESP32 Deep Sleep: Wake-up #%d from start button press\n", bootCount);
@@ -2035,6 +2050,7 @@ void setup() {
         wasInDeepSleep = false;
         currentPowerState = POWER_ACTIVE;  // Start in active mode
     }
+    #endif
     
     // Hardware setup
     setupPins();
@@ -5429,7 +5445,7 @@ void addRSSIReading(int8_t rssi, esp_bd_addr_t address) {
     rssiAnalysis.lastUpdate = now;
     
     // Trigger analysis if enough time has passed
-    if (now - rssiAnalysis.lastAnalysis >= 250) { // Analyze every 250ms (4x faster response)
+    if (now - rssiAnalysis.lastAnalysis >= 100) { // FAST: Analyze every 100ms (was 250ms)
         performRSSIAnalysis();
         rssiAnalysis.lastAnalysis = now;
     }
@@ -5685,14 +5701,15 @@ void performRSSIAnalysis() {
     }
     
     // Calculate statistics for each time window
+    // FAST: Reduced max ages for quicker response
     rssiAnalysis.shortTermStats = calculateBufferStatistics(
-        rssiAnalysis.shortTerm, RSSI_SHORT_TERM_SIZE, 2000); // 2 second max age
+        rssiAnalysis.shortTerm, RSSI_SHORT_TERM_SIZE, 1500); // FAST: 1.5 second max age (was 2000)
     
     rssiAnalysis.mediumTermStats = calculateBufferStatistics(
-        rssiAnalysis.mediumTerm, RSSI_MEDIUM_TERM_SIZE, 10000); // 10 second max age
+        rssiAnalysis.mediumTerm, RSSI_MEDIUM_TERM_SIZE, 5000); // FAST: 5 second max age (was 10000)
     
     rssiAnalysis.longTermStats = calculateBufferStatistics(
-        rssiAnalysis.longTerm, RSSI_LONG_TERM_SIZE, 60000); // 60 second max age
+        rssiAnalysis.longTerm, RSSI_LONG_TERM_SIZE, 30000); // FAST: 30 second max age (was 60000)
     
     // Calculate confidence components
     rssiAnalysis.stabilityScore = calculateStabilityScore();
@@ -5969,6 +5986,15 @@ void addCalibrationSample(float rssi, float confidence) {
 
 // Update power management state based on authentication and timing
 void updatePowerManagement() {
+    // If power management is disabled, always stay in POWER_ACTIVE (240MHz full power)
+    #if DISABLE_POWER_MANAGEMENT
+    if (currentPowerState != POWER_ACTIVE) {
+        Serial.println("Power Management DISABLED - forcing POWER_ACTIVE (240MHz)");
+        setPowerState(POWER_ACTIVE);
+    }
+    return;  // Skip all power management logic
+    #endif
+    
     // If in CONFIG_MODE, always stay in POWER_ACTIVE
     if (currentState == CONFIG_MODE) {
         if (currentPowerState != POWER_ACTIVE) {

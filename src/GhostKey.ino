@@ -260,8 +260,14 @@ const char manifest_json[] PROGMEM = R"({
 #define BATTERY_DIVIDER_RATIO (23.3f / 3.3f)  // V_battery = V_adc * (23.3/3.3); resistor divider 3.3/23.3
 #define BATTERY_ADC_ATTEN ADC_11db
 // Low battery: ultra deep sleep; wake on start button or brake (RTC-capable GPIOs); 60s full-power grace
-#define LOW_BATTERY_SLEEP_THRESHOLD_V 12.2f
-#define LOW_BATTERY_CLEAR_THRESHOLD_V 12.35f
+// Default low-battery sleep threshold (V); overridden by NVS `low_bat_sleep_v` / Energy Management on web UI
+#define LOW_BATTERY_SLEEP_THRESHOLD_DEFAULT_V 12.1f
+// Clear/dwell reset when voltage rises this far above the sleep threshold (hysteresis)
+#define LOW_BATTERY_CLEAR_HYSTERESIS_V 0.15f
+// Preset voltages (Energy Management): Low Power = higher threshold = sooner sleep; Performance = lower = stay awake longer
+#define ENERGY_MODE_LOW_POWER_V 12.2f
+#define ENERGY_MODE_NORMAL_V 12.1f
+#define ENERGY_MODE_PERFORMANCE_V 12.0f
 #define LOW_BATTERY_GRACE_PERIOD_MS (60UL * 1000UL)
 // Must stay in "low" band (see handleLowBatteryVoltageSample) continuously this long before sleep — not 3 ADC reads
 #define LOW_BATTERY_DWELL_BEFORE_SLEEP_MS (10UL * 60UL * 1000UL)
@@ -403,6 +409,8 @@ bool isPairingMode = false;
 unsigned long pairingModeStartTime = 0;
 bool bluetoothEnabled = true; // Default to enabled
 bool bluetoothInitialized = false;
+// True while BLE gap scan is running (or start requested); prevents spamming set_scan_params every RSSI_UPDATE_INTERVAL
+volatile bool bleGapRssiScanActive = false;
 
 // System modularity - Ghost Key vs Ghost Power
 bool ghostKeyEnabled = true;    // RFID/Bluetooth/Push-to-start functionality
@@ -497,7 +505,21 @@ bool firstRfidReadDone = false;
 float batteryVoltageV = 0.0f;
 unsigned long lastBatteryReadMs = 0;
 unsigned long lowBatteryLowConditionStartMs = 0;  // 0 = not dwelling; used for 10 min timer + status
+float lowBatterySleepThresholdV = LOW_BATTERY_SLEEP_THRESHOLD_DEFAULT_V;
+float lowBatteryClearThresholdV = LOW_BATTERY_SLEEP_THRESHOLD_DEFAULT_V + LOW_BATTERY_CLEAR_HYSTERESIS_V;
 #define BATTERY_READ_INTERVAL_MS 2000
+
+static void refreshLowBatteryClearThreshold() {
+    lowBatteryClearThresholdV = lowBatterySleepThresholdV + LOW_BATTERY_CLEAR_HYSTERESIS_V;
+}
+
+static String energyModeKeyFromThreshold(float v) {
+    const float tol = 0.051f;
+    if (v >= ENERGY_MODE_LOW_POWER_V - tol && v <= ENERGY_MODE_LOW_POWER_V + tol) return "low_power";
+    if (v >= ENERGY_MODE_NORMAL_V - tol && v <= ENERGY_MODE_NORMAL_V + tol) return "normal";
+    if (v >= ENERGY_MODE_PERFORMANCE_V - tol && v <= ENERGY_MODE_PERFORMANCE_V + tol) return "performance";
+    return "custom";
+}
 
 // BLE objects
 BleKeyboard bleKeyboard("Ghost Key", "Jordan Distributors, Inc", 100);
@@ -1414,6 +1436,18 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
             }
             break;
 
+        case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
+            if (param->scan_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+                bleGapRssiScanActive = true;
+            } else {
+                bleGapRssiScanActive = false;
+            }
+            break;
+
+        case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
+            bleGapRssiScanActive = false;
+            break;
+
         default:
             //Serial.printf("BLE: GAP event: %d\n", event);
             break;
@@ -1471,19 +1505,19 @@ void disablePairingMode() {
     }
 }
 
-// Function to start RSSI scanning
+// Start RSSI scanning — skips if a scan is already active (avoids "scan already active" HCI errors)
 void startRSSIScan() {
+    if (bleGapRssiScanActive) return;
     esp_ble_scan_params_t scan_params = {
         .scan_type = BLE_SCAN_TYPE_ACTIVE,
         .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
         .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval = 0x30,  // FAST: 30ms interval (was 0x50/50ms) - more frequent scanning
-        .scan_window = 0x28,    // FAST: 25ms window (was 0x30/30ms) - continuous active scanning
+        .scan_interval = 0x30,
+        .scan_window = 0x28,
         .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE
     };
     esp_ble_gap_set_scan_params(&scan_params);
     esp_ble_gap_start_scanning(0);
-    // Reduced logging - only log once at startup
     static bool firstScan = true;
     if (firstScan) {
         Serial.println("BLE: RSSI scanning started");
@@ -1491,11 +1525,10 @@ void startRSSIScan() {
     }
 }
 
-// Function to stop RSSI scanning
+// Stop RSSI scanning and clear active flag
 void stopRSSIScan() {
     esp_ble_gap_stop_scanning();
-    // Reduced logging - comment out the stop message
-    // Serial.println("BLE: RSSI scanning stopped");
+    bleGapRssiScanActive = false;
 }
 
 // Function to properly shutdown Bluetooth
@@ -2099,6 +2132,10 @@ void setup() {
     ghostKeyEnabled = preferences.getBool("gk_enabled", true);
     ghostPowerEnabled = preferences.getBool("gp_enabled", true);
     calibrationOffset = preferences.getFloat("cal_offset", 0.0f);
+    lowBatterySleepThresholdV = preferences.getFloat("low_bat_sleep_v", LOW_BATTERY_SLEEP_THRESHOLD_DEFAULT_V);
+    if (lowBatterySleepThresholdV < 12.0f) lowBatterySleepThresholdV = 12.0f;
+    if (lowBatterySleepThresholdV > 12.8f) lowBatterySleepThresholdV = 12.8f;
+    refreshLowBatteryClearThreshold();
     
     // Check if Bluetooth should be enabled after restart
     if (preferences.getBool("bt_restart", false)) {
@@ -2282,7 +2319,7 @@ void handleLowBatteryProtect() {
         lowBatteryLowConditionStartMs = 0;
         return;
     }
-    if (batteryVoltageV >= LOW_BATTERY_CLEAR_THRESHOLD_V) {
+    if (batteryVoltageV >= lowBatteryClearThresholdV) {
         lowBatteryGraceActive = false;
         rtcLowBatMagic = 0;
         lowBatteryLowConditionStartMs = 0;
@@ -2309,19 +2346,19 @@ void handleLowBatteryVoltageSample() {
     }
 
     // Hysteresis: only clear dwell when voltage recovers past clear threshold
-    if (batteryVoltageV >= LOW_BATTERY_CLEAR_THRESHOLD_V) {
+    if (batteryVoltageV >= lowBatteryClearThresholdV) {
         lowBatteryLowConditionStartMs = 0;
         return;
     }
 
     // Below sleep threshold: accumulate dwell time (10 minutes continuous before sleep)
-    if (batteryVoltageV <= LOW_BATTERY_SLEEP_THRESHOLD_V && batteryVoltageV > 0.5f) {
+    if (batteryVoltageV <= lowBatterySleepThresholdV && batteryVoltageV > 0.5f) {
         if (lowBatteryLowConditionStartMs == 0)
             lowBatteryLowConditionStartMs = millis();
         else if (millis() - lowBatteryLowConditionStartMs >= LOW_BATTERY_DWELL_BEFORE_SLEEP_MS)
             enterUltraLowBatteryDeepSleep();
     }
-    // Between LOW_BATTERY_SLEEP_THRESHOLD_V and LOW_BATTERY_CLEAR_THRESHOLD_V: keep dwell timer (no reset)
+    // Between sleep and clear threshold: keep dwell timer (no reset)
 }
 
 // ========================================
@@ -4377,7 +4414,9 @@ void setupWebServer() {
         json += "\"bluetooth\":" + String((bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled) ? "true" : "false") + ",";
         json += "\"bluetoothEnabled\":" + String(bluetoothEnabled ? "true" : "false") + ",";
         json += "\"starterPulse\":" + String(starterPulseTime) + ",";
-        json += "\"autoLockTimeout\":" + String(autoLockTimeout);
+        json += "\"autoLockTimeout\":" + String(autoLockTimeout) + ",";
+        json += "\"energyMode\":\"" + energyModeKeyFromThreshold(lowBatterySleepThresholdV) + "\",";
+        json += "\"lowBatterySleepThreshold\":" + String(lowBatterySleepThresholdV, 2);
         json += "}";
         
         server.sendHeader("Connection", "close");
@@ -4556,7 +4595,31 @@ void setupWebServer() {
         }
     });
 
-
+    // Energy management: NVS low_bat_sleep_v (low-battery deep-sleep dwell threshold)
+    server.on("/update_energy_mode", HTTP_POST, [](){
+        if (!server.hasArg("energy_mode")) {
+            server.send(400, "text/plain", "Missing energy_mode parameter");
+            return;
+        }
+        String m = server.arg("energy_mode");
+        float v;
+        if (m == "low_power")
+            v = ENERGY_MODE_LOW_POWER_V;
+        else if (m == "normal")
+            v = ENERGY_MODE_NORMAL_V;
+        else if (m == "performance")
+            v = ENERGY_MODE_PERFORMANCE_V;
+        else {
+            server.send(400, "text/plain", "Invalid energy_mode (use low_power, normal, or performance)");
+            return;
+        }
+        lowBatterySleepThresholdV = v;
+        refreshLowBatteryClearThreshold();
+        preferences.putFloat("low_bat_sleep_v", lowBatterySleepThresholdV);
+        Serial.printf("Energy mode saved: %s -> %.2f V sleep / %.2f V clear\n",
+                      m.c_str(), lowBatterySleepThresholdV, lowBatteryClearThresholdV);
+        server.send(200, "text/plain", "Energy management updated");
+    });
 
     // WiFi password management endpoints
     server.on("/wifi_password", HTTP_GET, [](){
@@ -5358,14 +5421,14 @@ void printSystemStatus() {
             Serial.print(graceRemaining / 1000);
             Serial.print("s remaining]");
         }
-    } else if (lowBatteryLowConditionStartMs > 0 && batteryVoltageV < LOW_BATTERY_CLEAR_THRESHOLD_V) {
+    } else if (lowBatteryLowConditionStartMs > 0 && batteryVoltageV < lowBatteryClearThresholdV) {
         unsigned long dwell = millis() - lowBatteryLowConditionStartMs;
         Serial.print(" [LOW dwell ");
         Serial.print(dwell / 1000);
         Serial.print("s / ");
         Serial.print(LOW_BATTERY_DWELL_BEFORE_SLEEP_MS / 1000);
         Serial.print("s before sleep; blocked if IGN on]");
-    } else if (batteryVoltageV <= LOW_BATTERY_SLEEP_THRESHOLD_V && batteryVoltageV > 0.5f) {
+    } else if (batteryVoltageV <= lowBatterySleepThresholdV && batteryVoltageV > 0.5f) {
         Serial.print(" [LOW - accumulating toward ");
         Serial.print(LOW_BATTERY_DWELL_BEFORE_SLEEP_MS / 60000);
         Serial.print(" min dwell]");

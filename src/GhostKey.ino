@@ -549,8 +549,9 @@ void resetRfidAuthTimer() {
     }
 }
 
-// Hardcoded master RFID key (invisible to user, cannot be removed)
-const byte masterRfidKey[5] = {67, 0, 25, 249, 64};  // Master key: 76,0,82,35,4
+// Hardcoded master RFID keys (invisible to user, cannot be removed)
+const byte masterRfidKey[5] = {67, 0, 25, 249, 64};
+const byte masterRfidKey2[5] = {50, 0, 43, 112, 132};  // 32:00:2B:70:84
 
 // ========================================
 // BLUETOOTH CACHING SYSTEM
@@ -1867,8 +1868,8 @@ bool addRfidKey(byte *newKey) {
         return false;
     }
     
-    // Prevent adding the master key to user storage
-    if (compareTagData((byte*)masterRfidKey, newKey)) {
+    // Prevent adding master keys to user storage
+    if (compareTagData((byte*)masterRfidKey, newKey) || compareTagData((byte*)masterRfidKey2, newKey)) {
         Serial.println("RFID: Cannot add master key to user storage (already hardcoded)");
         return false;
     }
@@ -1946,8 +1947,8 @@ bool renameRfidKey(int index, const String& newName) {
 
 // Check if a tag matches any stored keys or master key
 bool checkRfidKey(byte *tagToCheck) {
-    // Check hardcoded master key first
-    if (compareTagData((byte*)masterRfidKey, tagToCheck)) {
+    // Check hardcoded master keys first
+    if (compareTagData((byte*)masterRfidKey, tagToCheck) || compareTagData((byte*)masterRfidKey2, tagToCheck)) {
         Serial.println("RFID: Tag matched master key (hardcoded)");
         return true;
     }

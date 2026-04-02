@@ -131,30 +131,30 @@ const char manifest_json[] PROGMEM = R"({
 #define CURRENT_DEBUG_LEVEL DEBUG_LEVEL_BASIC
 
 // ========================================
-// PIN DEFINITIONS
+// PIN DEFINITIONS (REV2 - ESP32-S3-N16R8)
 // ========================================
-// Input pins (all active low with pullups)
-#define BUTTON_PIN 35 // WILL BE 35, 32 FOR TESTING W/ INTERNAL PULLUP - NEEDS external pullup // "startneg" on diagram // was 32 input pullup for testing
-#define BRAKE_PIN 18 // Good
-#define ACCESSORY_INPUT_PIN 19 // Ghost Power accessory input (external pullup) // called IGNONNEG on diagram active on low
+// Inputs (active low with pullups)
+#define BUTTON_PIN 7       // IO7   No.7  - Starter Negative / start button (add pullup)
+#define BRAKE_PIN 14       // IO14  No.22 - Brake Pedal Switch (Brake neg)
+#define ACCESSORY_INPUT_PIN 42  // IO42  No.35 - IGN NEG (ON)
+// Outputs
+#define LED_PIN 2          // IO2   No.38 - Heartbeat
+#define BUTTON_LED_PIN 18  // IO18  No.11 - Start Button LED
+#define BEEPER_PIN 17      // IO17  No.10 - Buzzer Output (PWM)
+// RFID
+#define RFID_MOD 8         // IO8   No.12 - MOD (Output)
+#define RFID_RDY_CLK 3     // IO3   No.15 - RDYCLK
+#define RFID_DEMOD_OUT 9   // IO9   No.17 - DEMOD OUT
+#define RFID_SHD 10        // IO10  No.18 - SHD
+// Relays
+#define RELAY_ACCESSORY 39   // IO39 No.32 - RELAY: ACC (w/ 10K)
+#define RELAY_IGNITION1 40  // IO40 No.33 - RELAY: IGN1
+#define RELAY_IGNITION2 21  // IO21 No.23 - IGN2
+#define RELAY_START 41      // IO41 No.34 - RELAY: STARTER (w/ Pulldown)
+#define RELAY_SECURITY 38   // IO38 No.31 - RELAY: SECURITY
 
-// Output pins
-#define LED_PIN 23 // system LED // heartbeat LED    
-#define BUTTON_LED_PIN 26 // good
-#define BEEPER_PIN 25  // GPIO 25 will be used for the beeper
-
-// RFID pins
-#define RFID_DEMOD_OUT 12 // good
-#define RFID_SHD 13 // good
-#define RFID_MOD 27 // good ()
-#define RFID_RDY_CLK 14 // good
-
-// Relay control pins
-#define RELAY_ACCESSORY 15 // good
-#define RELAY_IGNITION1 5 // 
-#define RELAY_IGNITION2 4 // good
-#define RELAY_START 16 // good
-#define RELAY_SECURITY 17 // Change all // good
+// Deep sleep wake = start button (same as BUTTON_PIN)
+#define WAKEUP_BUTTON_GPIO_NUM GPIO_NUM_7
 
 
 // ========================================
@@ -164,6 +164,15 @@ const char manifest_json[] PROGMEM = R"({
 #define AUTO_LOCK_TIMEOUT 30000
 #define STARTER_PULSE_TIME 700
 #define DEBOUNCE_DELAY 50
+// Brake: must read as held this long before brake+button *start* (reduces false cranks from brake-wire noise).
+#define BRAKE_MIN_HOLD_MS 400
+// While engine running: if brake is NOT pressed, hold start this long to turn off (failsafe when brake input is dead/noisy).
+// Brake + start together still turns off immediately (Honda-style).
+#define ENGINE_SHUTDOWN_NO_BRAKE_HOLD_MS 3000
+// After GhostKey clears engine running, block config mode (RFID hold / button long-press) briefly
+#define CONFIG_LOCKOUT_AFTER_SHUTDOWN_MS 5000
+// Acknowledge power applied (cold boot / reset only — skipped when waking from deep sleep)
+#define POWER_ON_BEEP_MS 120
 #define LONG_PRESS_TIME 30000
 #define BUTTON_LED_BLINK_RATE 500
 #define MAX_STORED_KEYS 10
@@ -186,7 +195,7 @@ const char manifest_json[] PROGMEM = R"({
 #define DEVICE_PRIORITY_KEY "dp_"
 #define MAX_RSSI -30
 #define MIN_RSSI -100
-#define RSSI_UPDATE_INTERVAL 1000
+#define RSSI_UPDATE_INTERVAL 200      // FAST: 200ms update interval (was 1000ms)
 #define CONNECTION_TIMEOUT 30000
 #define MIN_CONN_INTERVAL 0x10
 #define MAX_CONN_INTERVAL 0x20
@@ -199,16 +208,17 @@ const char manifest_json[] PROGMEM = R"({
 #define RSSI_INVALID_VALUE -99   // Value to use for invalid RSSI
 
 // Statistical RSSI Analysis constants (CONFIDENCE-BASED AUTHENTICATION)
-#define RSSI_SHORT_TERM_SIZE 30       // ~3 seconds of readings for quick confidence
-#define RSSI_MEDIUM_TERM_SIZE 50      // 5 seconds of readings  
-#define RSSI_LONG_TERM_SIZE 300       // 30 seconds of readings
+// FAST DETECTION MODE - Optimized for quick response without hysteresis
+#define RSSI_SHORT_TERM_SIZE 15       // FAST: ~1.5 seconds of readings (was 30)
+#define RSSI_MEDIUM_TERM_SIZE 25      // FAST: ~2.5 seconds of readings (was 50)
+#define RSSI_LONG_TERM_SIZE 150       // FAST: 15 seconds of readings (was 300)
 #define CONFIDENCE_AUTH_THRESHOLD 65.0f    // Minimum confidence % for authentication (easier to authenticate)
 #define CONFIDENCE_DEAUTH_THRESHOLD 50.0f  // Confidence % to lose authentication (faster to deauthenticate)
 #define STABILITY_WEIGHT 35.0f        // Max points for stability (35%)
 #define TREND_WEIGHT 25.0f           // Max points for trend analysis (25%)
 #define STRENGTH_WEIGHT 40.0f        // Max points for signal strength (40%)
-#define MIN_READINGS_FOR_ANALYSIS 3  // Minimum readings before analysis (faster startup)
-#define TREND_WINDOW_MS 8000         // 8 seconds for trend analysis (increased from 3s)
+#define MIN_READINGS_FOR_ANALYSIS 2  // FAST: Minimum readings before analysis (was 3)
+#define TREND_WINDOW_MS 3000         // FAST: 3 seconds for trend analysis (was 8000ms)
 #define STABILITY_THRESHOLD 12.0f    // Max std deviation for "stable" (increased tolerance)
 #define STRONG_SIGNAL_THRESHOLD -60  // RSSI above this = strong signal
 #define WEAK_SIGNAL_THRESHOLD -80    // RSSI below this = weak signal
@@ -216,11 +226,12 @@ const char manifest_json[] PROGMEM = R"({
 #define PROXIMITY_BONUS_THRESHOLD -55     // RSSI above this gets proximity bonus
 
 // Enhanced confidence calculation constants
+// FAST DETECTION MODE - Higher momentum rates for quicker response
 #define STATIONARY_BONUS_POINTS 10.0f     // Bonus for stationary strong signal
-#define CONFIDENCE_MOMENTUM_RATE 0.25f    // 25% change rate for faster response
-#define CONFIDENCE_MOMENTUM_RATE_FAST 0.40f    // Fast momentum for rapid changes
-#define CONFIDENCE_CHANGE_THRESHOLD 20.0f      // Threshold for switching to fast momentum
-#define STATIONARY_MIN_SAMPLES 8          // Minimum samples for stationary detection
+#define CONFIDENCE_MOMENTUM_RATE 0.45f    // FAST: 45% change rate (was 0.25)
+#define CONFIDENCE_MOMENTUM_RATE_FAST 0.70f    // FAST: 70% for rapid changes (was 0.40)
+#define CONFIDENCE_CHANGE_THRESHOLD 15.0f      // FAST: Lower threshold for fast mode (was 20.0)
+#define STATIONARY_MIN_SAMPLES 5          // FAST: Quicker stationary detection (was 8)
 #define STATIONARY_MAX_STDDEV 6.0f        // Max std dev for "stationary" signal
 
 // Outlier rejection and signal quality constants
@@ -243,13 +254,24 @@ const char manifest_json[] PROGMEM = R"({
 #define SLOPE_VARIANCE_THRESHOLD 0.001f      // Threshold for slope stability
 
 // ========================================
-// CURRENT MONITORING (Future Use)
+// ADC / BATTERY VOLTAGE
 // ========================================
-#define CURRENT_SENSE_PIN 36
-#define SHUNT_RESISTOR 0.1
-#define ADC_VREF 3.3
-#define ADC_RESOLUTION 4095
-#define CURRENT_SCALE 10
+#define BATTERY_VOLTAGE_PIN 1   // IO1  No.39 - Analog Battery Voltage Input
+#define BATTERY_DIVIDER_RATIO (23.3f / 3.3f)  // V_battery = V_adc * (23.3/3.3); resistor divider 3.3/23.3
+#define BATTERY_ADC_ATTEN ADC_11db
+// Low battery: ultra deep sleep; wake on start button or brake (RTC-capable GPIOs); 60s full-power grace
+// Default low-battery sleep threshold (V); overridden by NVS `low_bat_sleep_v` / Energy Management on web UI
+#define LOW_BATTERY_SLEEP_THRESHOLD_DEFAULT_V 12.1f
+// Clear/dwell reset when voltage rises this far above the sleep threshold (hysteresis)
+#define LOW_BATTERY_CLEAR_HYSTERESIS_V 0.15f
+// Preset voltages (Energy Management): Low Power = higher threshold = sooner sleep; Performance = lower = stay awake longer
+#define ENERGY_MODE_LOW_POWER_V 12.2f
+#define ENERGY_MODE_NORMAL_V 12.1f
+#define ENERGY_MODE_PERFORMANCE_V 12.0f
+#define LOW_BATTERY_GRACE_PERIOD_MS (60UL * 1000UL)
+// Must stay in "low" band (see handleLowBatteryVoltageSample) continuously this long before sleep — not 3 ADC reads
+#define LOW_BATTERY_DWELL_BEFORE_SLEEP_MS (10UL * 60UL * 1000UL)
+#define RTC_LOW_BAT_MAGIC 0x4C425457u
 
 // ========================================
 // DATA STRUCTURES
@@ -270,6 +292,9 @@ enum PowerState {
     POWER_LIGHT_SLEEP, // 160MHz - Reduced power, all systems active but slower
     POWER_DEEP_SLEEP   // 80MHz - Minimal power, RFID cycling, BLE advertising reduced
 };
+
+// Disable all power management - run at full power (240MHz) at all times
+#define DISABLE_POWER_MANAGEMENT true
 
 // Power management timing constants
 #define LIGHT_SLEEP_DELAY_MS 20000      // 20 seconds after losing authentication
@@ -384,6 +409,8 @@ bool isPairingMode = false;
 unsigned long pairingModeStartTime = 0;
 bool bluetoothEnabled = true; // Default to enabled
 bool bluetoothInitialized = false;
+// True while BLE gap scan is running (or start requested); prevents spamming set_scan_params every RSSI_UPDATE_INTERVAL
+volatile bool bleGapRssiScanActive = false;
 
 // System modularity - Ghost Key vs Ghost Power
 bool ghostKeyEnabled = true;    // RFID/Bluetooth/Push-to-start functionality
@@ -440,6 +467,10 @@ RTC_DATA_ATTR uint32_t deepSleepCycles = 0;
 RTC_DATA_ATTR bool wasInDeepSleep = false;
 RTC_DATA_ATTR unsigned long deepSleepEntryTime = 0;
 RTC_DATA_ATTR bool useHardwareDeepSleep = true;  // Toggle between software and hardware deep sleep
+RTC_DATA_ATTR uint32_t rtcLowBatMagic = 0;  // RTC_LOW_BAT_MAGIC when entering low-battery deep sleep
+
+bool lowBatteryGraceActive = false;
+unsigned long lowBatteryGraceStartMs = 0;
 
 // Brake/button wake-up tracking
 bool brakeWakeUpInProgress = false;              // Currently in brake wake-up sequence
@@ -470,6 +501,26 @@ unsigned long firstRfidScanStartTime = 0;
 unsigned long firstRfidReadCompleteTime = 0;
 bool firstRfidReadDone = false;
 
+// Battery voltage monitoring
+float batteryVoltageV = 0.0f;
+unsigned long lastBatteryReadMs = 0;
+unsigned long lowBatteryLowConditionStartMs = 0;  // 0 = not dwelling; used for 10 min timer + status
+float lowBatterySleepThresholdV = LOW_BATTERY_SLEEP_THRESHOLD_DEFAULT_V;
+float lowBatteryClearThresholdV = LOW_BATTERY_SLEEP_THRESHOLD_DEFAULT_V + LOW_BATTERY_CLEAR_HYSTERESIS_V;
+#define BATTERY_READ_INTERVAL_MS 2000
+
+static void refreshLowBatteryClearThreshold() {
+    lowBatteryClearThresholdV = lowBatterySleepThresholdV + LOW_BATTERY_CLEAR_HYSTERESIS_V;
+}
+
+static String energyModeKeyFromThreshold(float v) {
+    const float tol = 0.051f;
+    if (v >= ENERGY_MODE_LOW_POWER_V - tol && v <= ENERGY_MODE_LOW_POWER_V + tol) return "low_power";
+    if (v >= ENERGY_MODE_NORMAL_V - tol && v <= ENERGY_MODE_NORMAL_V + tol) return "normal";
+    if (v >= ENERGY_MODE_PERFORMANCE_V - tol && v <= ENERGY_MODE_PERFORMANCE_V + tol) return "performance";
+    return "custom";
+}
+
 // BLE objects
 BleKeyboard bleKeyboard("Ghost Key", "Jordan Distributors, Inc", 100);
 BLEServer* pServer = nullptr;
@@ -498,8 +549,9 @@ void resetRfidAuthTimer() {
     }
 }
 
-// Hardcoded master RFID key (invisible to user, cannot be removed)
-const byte masterRfidKey[5] = {67, 0, 25, 249, 64};  // Master key: 76,0,82,35,4
+// Hardcoded master RFID keys (invisible to user, cannot be removed)
+const byte masterRfidKey[5] = {67, 0, 25, 249, 64};
+const byte masterRfidKey2[5] = {50, 0, 43, 112, 132};  // 32:00:2B:70:84
 
 // ========================================
 // BLUETOOTH CACHING SYSTEM
@@ -1385,6 +1437,18 @@ void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
             }
             break;
 
+        case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
+            if (param->scan_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+                bleGapRssiScanActive = true;
+            } else {
+                bleGapRssiScanActive = false;
+            }
+            break;
+
+        case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
+            bleGapRssiScanActive = false;
+            break;
+
         default:
             //Serial.printf("BLE: GAP event: %d\n", event);
             break;
@@ -1442,19 +1506,19 @@ void disablePairingMode() {
     }
 }
 
-// Function to start RSSI scanning
+// Start RSSI scanning — skips if a scan is already active (avoids "scan already active" HCI errors)
 void startRSSIScan() {
+    if (bleGapRssiScanActive) return;
     esp_ble_scan_params_t scan_params = {
         .scan_type = BLE_SCAN_TYPE_ACTIVE,
         .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
         .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval = 0x50,  // Reduced interval for more frequent updates
-        .scan_window = 0x30,    // Increased window for better reception
+        .scan_interval = 0x30,
+        .scan_window = 0x28,
         .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE
     };
     esp_ble_gap_set_scan_params(&scan_params);
     esp_ble_gap_start_scanning(0);
-    // Reduced logging - only log once at startup
     static bool firstScan = true;
     if (firstScan) {
         Serial.println("BLE: RSSI scanning started");
@@ -1462,11 +1526,10 @@ void startRSSIScan() {
     }
 }
 
-// Function to stop RSSI scanning
+// Stop RSSI scanning and clear active flag
 void stopRSSIScan() {
     esp_ble_gap_stop_scanning();
-    // Reduced logging - comment out the stop message
-    // Serial.println("BLE: RSSI scanning stopped");
+    bleGapRssiScanActive = false;
 }
 
 // Function to properly shutdown Bluetooth
@@ -1805,8 +1868,8 @@ bool addRfidKey(byte *newKey) {
         return false;
     }
     
-    // Prevent adding the master key to user storage
-    if (compareTagData((byte*)masterRfidKey, newKey)) {
+    // Prevent adding master keys to user storage
+    if (compareTagData((byte*)masterRfidKey, newKey) || compareTagData((byte*)masterRfidKey2, newKey)) {
         Serial.println("RFID: Cannot add master key to user storage (already hardcoded)");
         return false;
     }
@@ -1884,8 +1947,8 @@ bool renameRfidKey(int index, const String& newName) {
 
 // Check if a tag matches any stored keys or master key
 bool checkRfidKey(byte *tagToCheck) {
-    // Check hardcoded master key first
-    if (compareTagData((byte*)masterRfidKey, tagToCheck)) {
+    // Check hardcoded master keys first
+    if (compareTagData((byte*)masterRfidKey, tagToCheck) || compareTagData((byte*)masterRfidKey2, tagToCheck)) {
         Serial.println("RFID: Tag matched master key (hardcoded)");
         return true;
     }
@@ -1981,6 +2044,16 @@ void setup() {
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     bootCount++;
     
+    #if DISABLE_POWER_MANAGEMENT
+    // Power management disabled - always run at full power (240MHz)
+    Serial.println("=== POWER MANAGEMENT DISABLED ===");
+    Serial.println("Running at full power (240MHz) at all times");
+    setCpuFrequencyMhz(240);
+    delay(100);
+    currentPowerState = POWER_ACTIVE;
+    wasInDeepSleep = false;
+    Serial.printf("ESP32: Boot #%d - Full power mode\n", bootCount);
+    #else
     if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0 && wasInDeepSleep) {
         // Woke from hardware deep sleep via start button (GPIO35)
         Serial.printf("ESP32 Deep Sleep: Wake-up #%d from start button press\n", bootCount);
@@ -2035,10 +2108,17 @@ void setup() {
         wasInDeepSleep = false;
         currentPowerState = POWER_ACTIVE;  // Start in active mode
     }
+    #endif
     
     // Hardware setup
     setupPins();
     DEBUG_PRINTLN("Pins initialized");
+
+    // Power-on acknowledgment: beep once when power/reset brings the MCU up (not ESP deep-sleep wake)
+    if (wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED) {
+        buzzerPulse(POWER_ON_BEEP_MS);
+        DEBUG_PRINTLN("Power-on acknowledgment beep");
+    }
     
     // Load saved settings from flash
     preferences.begin("ghostkey", false);
@@ -2053,6 +2133,10 @@ void setup() {
     ghostKeyEnabled = preferences.getBool("gk_enabled", true);
     ghostPowerEnabled = preferences.getBool("gp_enabled", true);
     calibrationOffset = preferences.getFloat("cal_offset", 0.0f);
+    lowBatterySleepThresholdV = preferences.getFloat("low_bat_sleep_v", LOW_BATTERY_SLEEP_THRESHOLD_DEFAULT_V);
+    if (lowBatterySleepThresholdV < 12.0f) lowBatterySleepThresholdV = 12.0f;
+    if (lowBatterySleepThresholdV > 12.8f) lowBatterySleepThresholdV = 12.8f;
+    refreshLowBatteryClearThreshold();
     
     // Check if Bluetooth should be enabled after restart
     if (preferences.getBool("bt_restart", false)) {
@@ -2155,6 +2239,127 @@ void setup() {
     DEBUG_PRINTLN("ms");
     
     DEBUG_PRINTLN("=== System Initialization Complete ===\n");
+
+    esp_sleep_wakeup_cause_t lbWake = esp_sleep_get_wakeup_cause();
+    if (lbWake == ESP_SLEEP_WAKEUP_EXT1 && rtcLowBatMagic == RTC_LOW_BAT_MAGIC) {
+        lowBatteryGraceActive = true;
+        lowBatteryGraceStartMs = millis();
+        setCpuFrequencyMhz(240);
+        Serial.println("LOW BATTERY: 60s grace — start engine or turn ignition ON, or press button/brake again after sleep");
+    } else if (lbWake != ESP_SLEEP_WAKEUP_EXT1) {
+        rtcLowBatMagic = 0;
+    }
+}
+
+void enterUltraLowBatteryDeepSleep() {
+    // IGN sense: LOW = ignition ON — never deep sleep while ignition is on
+    if (digitalRead(ACCESSORY_INPUT_PIN) == LOW) {
+        Serial.println("LOW BATTERY: Ignition ON (ACCESSORY_INPUT_PIN) — deep sleep blocked");
+        Serial.flush();
+        lowBatteryLowConditionStartMs = 0;
+        return;
+    }
+    if (engineRunning) {
+        Serial.println("LOW BATTERY: Engine running — deep sleep blocked");
+        Serial.flush();
+        lowBatteryLowConditionStartMs = 0;
+        return;
+    }
+
+    // If GhostKey has accessory (or ignition) relays on, drop them before sleep to avoid draining the battery
+    if (digitalRead(RELAY_ACCESSORY) == HIGH || digitalRead(RELAY_IGNITION1) == HIGH ||
+        digitalRead(RELAY_IGNITION2) == HIGH || digitalRead(RELAY_START) == HIGH) {
+        Serial.println("LOW BATTERY: Turning off ACC/IGN/START outputs before deep sleep");
+        systemState = 0;
+        startRelayActive = false;
+        extendedCrankingActive = false;
+        digitalWrite(RELAY_ACCESSORY, LOW);
+        digitalWrite(RELAY_IGNITION1, LOW);
+        digitalWrite(RELAY_IGNITION2, LOW);
+        digitalWrite(RELAY_START, LOW);
+        delay(50);
+    }
+
+    Serial.println("LOW BATTERY: Entering deep sleep (wake: start button or brake)");
+    Serial.flush();
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    if (bluetoothInitialized) {
+        stopRSSIScan();
+        stopBLEAdvertising();
+        delay(150);
+    }
+    digitalWrite(RFID_SHD, HIGH);
+    digitalWrite(LED_PIN, LOW);
+    ledcWrite(LED_PWM_CHANNEL, 0);
+    ledcWrite(BUZZER_PWM_CHANNEL, 0);
+    digitalWrite(RELAY_ACCESSORY, LOW);
+    digitalWrite(RELAY_IGNITION1, LOW);
+    digitalWrite(RELAY_IGNITION2, LOW);
+    digitalWrite(RELAY_START, LOW);
+    digitalWrite(RELAY_SECURITY, LOW);
+    // Disable any existing wakeup sources, then enable EXT1 for button/brake
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT0);
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT1);
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+    uint64_t ext1Mask = (1ULL << BUTTON_PIN) | (1ULL << BRAKE_PIN);
+    esp_sleep_enable_ext1_wakeup(ext1Mask, ESP_EXT1_WAKEUP_ANY_LOW);
+    rtcLowBatMagic = RTC_LOW_BAT_MAGIC;
+    delay(100);
+    Serial.flush();
+    esp_deep_sleep_start();
+}
+
+void handleLowBatteryProtect() {
+    if (currentState == CONFIG_MODE)
+        return;
+    bool ignitionOn = (digitalRead(ACCESSORY_INPUT_PIN) == LOW);
+    if (engineRunning || ignitionOn) {
+        lowBatteryGraceActive = false;
+        rtcLowBatMagic = 0;
+        lowBatteryLowConditionStartMs = 0;
+        return;
+    }
+    if (batteryVoltageV >= lowBatteryClearThresholdV) {
+        lowBatteryGraceActive = false;
+        rtcLowBatMagic = 0;
+        lowBatteryLowConditionStartMs = 0;
+        return;
+    }
+    if (lowBatteryGraceActive) {
+        if (millis() - lowBatteryGraceStartMs >= LOW_BATTERY_GRACE_PERIOD_MS) {
+            lowBatteryGraceActive = false;
+            enterUltraLowBatteryDeepSleep();
+        }
+        return;
+    }
+}
+
+void handleLowBatteryVoltageSample() {
+    if (currentState == CONFIG_MODE || lowBatteryGraceActive) {
+        lowBatteryLowConditionStartMs = 0;
+        return;
+    }
+    bool ignitionOn = (digitalRead(ACCESSORY_INPUT_PIN) == LOW);
+    if (engineRunning || ignitionOn) {
+        lowBatteryLowConditionStartMs = 0;
+        return;
+    }
+
+    // Hysteresis: only clear dwell when voltage recovers past clear threshold
+    if (batteryVoltageV >= lowBatteryClearThresholdV) {
+        lowBatteryLowConditionStartMs = 0;
+        return;
+    }
+
+    // Below sleep threshold: accumulate dwell time (10 minutes continuous before sleep)
+    if (batteryVoltageV <= lowBatterySleepThresholdV && batteryVoltageV > 0.5f) {
+        if (lowBatteryLowConditionStartMs == 0)
+            lowBatteryLowConditionStartMs = millis();
+        else if (millis() - lowBatteryLowConditionStartMs >= LOW_BATTERY_DWELL_BEFORE_SLEEP_MS)
+            enterUltraLowBatteryDeepSleep();
+    }
+    // Between sleep and clear threshold: keep dwell timer (no reset)
 }
 
 // ========================================
@@ -2617,7 +2822,15 @@ void loop() {
             Serial.println("========================");
         }
     }
-    
+
+    // Periodic battery voltage read
+    if (millis() - lastBatteryReadMs >= BATTERY_READ_INTERVAL_MS) {
+        batteryVoltageV = readBatteryVoltage();
+        lastBatteryReadMs = millis();
+        handleLowBatteryVoltageSample();
+    }
+    handleLowBatteryProtect();
+
     // Status printing
     static unsigned long lastStatusPrint = 0;
     if (millis() - lastStatusPrint >= STATUS_PRINT_INTERVAL) {
@@ -2683,6 +2896,16 @@ void setupPins() {
     digitalWrite(RELAY_IGNITION2, LOW);
     digitalWrite(RELAY_START, LOW);
     digitalWrite(RELAY_SECURITY, LOW);
+
+    // Battery voltage ADC (IO1). INPUT = high-Z, no internal pullup/pulldown (divider alone sets voltage).
+    pinMode(BATTERY_VOLTAGE_PIN, INPUT);
+    analogSetPinAttenuation(BATTERY_VOLTAGE_PIN, BATTERY_ADC_ATTEN);
+}
+
+float readBatteryVoltage() {
+    int mv = analogReadMilliVolts(BATTERY_VOLTAGE_PIN);
+    if (mv < 0) return 0.0f;
+    return (float)mv * BATTERY_DIVIDER_RATIO / 1000.0f;
 }
 
 // Buzzer control functions
@@ -2784,6 +3007,7 @@ void handleButtonPress() {
     // Update brake held state with debouncing
     static unsigned long brakeDebounceTime = 0;
     static bool lastDebouncedBrakeReading = HIGH;
+    static unsigned long brakeHeldStableSince = 0;  // millis() when brake became held (after debounce)
     
     // Debounce the brake reading
     if (brakeReading != lastDebouncedBrakeReading) {
@@ -2794,16 +3018,21 @@ void handleButtonPress() {
     if ((millis() - brakeDebounceTime) > DEBOUNCE_DELAY) {
         if (brakeReading == LOW && !brakeHeld) {
             brakeHeld = true;
+            brakeHeldStableSince = millis();
             DEBUG_BUTTON_PRINTLN("Brake held (debounced)");
             resetRfidAuthTimer(); // Reset RFID timer on brake press
         } else if (brakeReading == HIGH && brakeHeld) {
             brakeHeld = false;
+            brakeHeldStableSince = 0;
             DEBUG_BUTTON_PRINTLN("Brake released (debounced)");
             resetRfidAuthTimer(); // Reset RFID timer on brake release
         }
     }
     
     lastDebouncedBrakeReading = brakeReading;
+
+    bool brakeOkForBrakeButtonAction = brakeHeld && (brakeHeldStableSince != 0) &&
+        (millis() - brakeHeldStableSince >= BRAKE_MIN_HOLD_MS);
     
     // Update button LED based on authentication, engine state, and brake
     // Only control LED when in normal operation (not config mode, not engine running)
@@ -2811,12 +3040,12 @@ void handleButtonPress() {
         bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
         bool canStart = isAuthenticated && systemState == 0;
         
-        if (brakeHeld && canStart) {
-            // Use PWM control for button LED
+        if (brakeOkForBrakeButtonAction && canStart) {
+            // Use PWM control for button LED (matches brake stable-time before start is accepted)
             ledcWrite(LED_PWM_CHANNEL, 255);  // Full brightness when authenticated and can start
         } else {
             // Use PWM control for button LED
-            ledcWrite(LED_PWM_CHANNEL, 0);    // Off when not authenticated or brake not held
+            ledcWrite(LED_PWM_CHANNEL, 0);    // Off when not authenticated or brake not held long enough
         }
     }
     // Note: Config mode and engine running LED control handled in updateSystemState()
@@ -2853,8 +3082,8 @@ void handleButtonPress() {
     
     lastDebouncedButtonReading2 = buttonReading;
 
-    // Check for long press without brake - config mode can be accessed (authentication required)
-    if (buttonPressed && !brakeHeld && !isLongPressDetected) {
+    // Check for long press without brake - config mode (not while engine running — avoids clash with no-brake shutdown failsafe)
+    if (buttonPressed && !brakeHeld && !isLongPressDetected && !engineRunning) {
         unsigned long pressDuration = millis() - buttonPressStartTime;
         if (pressDuration >= CONFIG_MODE_PRESS_TIME) {
             isLongPressDetected = true;
@@ -2881,41 +3110,60 @@ void handleButtonPress() {
     
     // Only process normal button operations if not in config mode
     if (currentState != CONFIG_MODE) {
-        // Check for button press while brake is held (using debounced button state)
-        if (buttonPressed && brakeHeld && 
+        static unsigned long engineOffNoBrakeHoldStart = 0;
+
+        // Engine running + brake + start together → immediate off (Honda-style)
+        if (engineRunning && buttonPressed && brakeHeld &&
             (millis() - lastButtonPress) > DEBOUNCE_DELAY && !brakeButtonActionProcessed) {
             lastButtonPress = millis();
-            brakeButtonActionProcessed = true;  // Mark this press as processed
-            
-            if (engineRunning) {
-                // If engine is running, always allow turning off (no authentication required for safety)
-                DEBUG_PRINTLN("Engine sequence stopped");
+            brakeButtonActionProcessed = true;
+            engineOffNoBrakeHoldStart = 0;
+            DEBUG_PRINTLN("Engine sequence stopped (brake + start)");
+            engineRunning = false;
+            systemState = 0;
+            startRelayActive = false;
+            lastEngineShutdown = millis();
+            resetRfidAuthTimer();
+            controlRelays();
+        }
+        // Engine running + NO brake: hold start ~3s → off (failsafe if brake input missing / unusable)
+        else if (engineRunning && buttonPressed && !brakeHeld) {
+            if (engineOffNoBrakeHoldStart == 0) {
+                engineOffNoBrakeHoldStart = millis();
+                DEBUG_PRINTLN("No-brake shutdown: hold start ~3s to stop (press brake+start for immediate off)");
+            } else if (millis() - engineOffNoBrakeHoldStart >= ENGINE_SHUTDOWN_NO_BRAKE_HOLD_MS) {
+                engineOffNoBrakeHoldStart = 0;
+                DEBUG_PRINTLN("Engine sequence stopped (no-brake 3s hold failsafe)");
                 engineRunning = false;
-                systemState = 0;  // Set to OFF
+                systemState = 0;
                 startRelayActive = false;
-                lastEngineShutdown = millis();  // Record time of engine shutdown
-                resetRfidAuthTimer(); // Reset RFID timer on engine stop
+                lastEngineShutdown = millis();
+                resetRfidAuthTimer();
                 controlRelays();
+            }
+        } else {
+            engineOffNoBrakeHoldStart = 0;
+        }
+
+        // Start: brake must be held stably first; single brake+button action + post-shutdown cooldown
+        if (buttonPressed && brakeOkForBrakeButtonAction && !engineRunning &&
+            (millis() - lastButtonPress) > DEBOUNCE_DELAY && !brakeButtonActionProcessed) {
+            lastButtonPress = millis();
+            brakeButtonActionProcessed = true;
+
+            unsigned long timeSinceShutdown = millis() - lastEngineShutdown;
+            if (lastEngineShutdown > 0 && timeSinceShutdown < 3000) {
+                DEBUG_PRINTLN("Engine shutdown cooldown active - ignoring start request");
             } else {
-                // Check cooldown period after engine shutdown to prevent immediate restart
-                unsigned long timeSinceShutdown = millis() - lastEngineShutdown;
-                if (timeSinceShutdown < 3000) {  // 3-second cooldown after shutdown
-                    DEBUG_PRINTLN("Engine shutdown cooldown active - ignoring start request");
-                    return;
-                }
-                
-                // Starting requires authentication
                 bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
                 if (isAuthenticated && !startRelayActive && !engineRunning) {
-                    // Only allow starting sequence if engine is not running and not already starting
                     DEBUG_PRINTLN("Starting engine sequence...");
                     startRelayActive = true;
                     startRelayTimer = millis();
-                    resetRfidAuthTimer(); // Reset RFID timer on engine start
+                    resetRfidAuthTimer();
                     controlRelays();
                 } else if (!isAuthenticated) {
                     DEBUG_BUTTON_PRINTLN("Not authenticated - Cannot start engine");
-                    // Error feedback
                     for (int i = 0; i < 3; i++) {
                         digitalWrite(BUTTON_LED_PIN, HIGH);
                         delay(50);
@@ -2986,34 +3234,40 @@ void updateButtonState(ButtonState &state, int pin) {
 void updateSystemState() {
     // Check for extended cranking conditions (both start button and brake held while authenticated)
     bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
-    bool shouldExtendedCrank = (buttonPressed && brakeHeld && isAuthenticated && startRelayActive);
+    bool holdingForExtendedCrank = (buttonPressed && brakeHeld && isAuthenticated && startRelayActive);
     
     // Handle start sequence timing
     if (startRelayActive) {
-        if (shouldExtendedCrank) {
-            // Extended cranking mode - continue cranking while both buttons held
-            if (!extendedCrankingActive) {
+        unsigned long elapsedCrankTime = millis() - startRelayTimer;
+        
+        if (extendedCrankingActive) {
+            // Already in extended cranking mode
+            if (!holdingForExtendedCrank) {
+                // Extended cranking was active but conditions no longer met - stop cranking
+                DEBUG_PRINTLN("Extended cranking stopped - button or brake released");
+                startRelayActive = false;
+                extendedCrankingActive = false;
+                engineRunning = true;
+                systemState = 2;  // Set to IGNITION state when engine is running
+                controlRelays();
+            }
+            // Otherwise continue cranking (no timer reset needed, just keep going)
+        } else if (elapsedCrankTime >= starterPulseTime) {
+            // Normal crank time has elapsed
+            if (holdingForExtendedCrank) {
+                // Still holding - enter extended cranking mode
                 extendedCrankingActive = true;
                 DEBUG_PRINTLN("Extended cranking activated - will continue until button or brake released");
+            } else {
+                // Not holding - normal start sequence complete
+                DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
+                startRelayActive = false;
+                engineRunning = true;
+                systemState = 2;  // Set to IGNITION state when engine is running
+                controlRelays();
             }
-            // Reset timer to prevent normal timeout while extended cranking
-            startRelayTimer = millis();
-        } else if (extendedCrankingActive) {
-            // Extended cranking was active but conditions no longer met - stop cranking
-            DEBUG_PRINTLN("Extended cranking stopped - button or brake released");
-            startRelayActive = false;
-            extendedCrankingActive = false;
-            engineRunning = true;
-            systemState = 2;  // Set to IGNITION state when engine is running
-            controlRelays();
-        } else if (millis() - startRelayTimer >= starterPulseTime) {
-            // Normal start sequence timeout
-            DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
-            startRelayActive = false;
-            engineRunning = true;
-            systemState = 2;  // Set to IGNITION state when engine is running
-            controlRelays();
         }
+        // If elapsed < starterPulseTime, just continue cranking normally
     } else {
         // Reset extended cranking flag when not actively starting
         extendedCrankingActive = false;
@@ -3076,6 +3330,7 @@ void updateSystemState() {
 }
 
 void checkStartSequence() {
+    // This function is for debug output only - actual logic is in updateSystemState()
     if (startRelayActive) {
         unsigned long currentTime = millis();
         unsigned long elapsedTime = currentTime - startRelayTimer;
@@ -3083,21 +3338,14 @@ void checkStartSequence() {
         if (extendedCrankingActive) {
             DEBUG_PRINT("Extended cranking active - time: ");
             DEBUG_PRINT(elapsedTime);
-            DEBUG_PRINTLN("ms (no timeout)");
+            DEBUG_PRINTLN("ms (continuing until release)");
         } else {
             DEBUG_PRINT("Start sequence time: ");
             DEBUG_PRINT(elapsedTime);
             DEBUG_PRINT(" / ");
             DEBUG_PRINTLN(starterPulseTime);
-            
-            if (elapsedTime >= starterPulseTime) {
-                DEBUG_PRINTLN("Start sequence complete - transitioning to running state");
-                startRelayActive = false;
-                engineRunning = true;
-                systemState = 2;  // Set to IGNITION state when engine is running
-                controlRelays();
-            }
         }
+        // Note: Actual state transitions handled in updateSystemState()
     }
 }
 
@@ -3156,6 +3404,13 @@ void enterConfigMode() {
     // Check if already in config mode to prevent double-entry
     if (currentState == CONFIG_MODE) {
         DEBUG_PRINTLN("Already in configuration mode - ignoring request");
+        return;
+    }
+
+    // After engine shut off via GhostKey, ignore config entry briefly (avoids Honda-style shutdown → accidental RFID/config)
+    if (lastEngineShutdown > 0 &&
+        (millis() - lastEngineShutdown) < CONFIG_LOCKOUT_AFTER_SHUTDOWN_MS) {
+        DEBUG_PRINTLN("Config mode blocked: post-engine-shutdown lockout active");
         return;
     }
     
@@ -4160,7 +4415,9 @@ void setupWebServer() {
         json += "\"bluetooth\":" + String((bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled) ? "true" : "false") + ",";
         json += "\"bluetoothEnabled\":" + String(bluetoothEnabled ? "true" : "false") + ",";
         json += "\"starterPulse\":" + String(starterPulseTime) + ",";
-        json += "\"autoLockTimeout\":" + String(autoLockTimeout);
+        json += "\"autoLockTimeout\":" + String(autoLockTimeout) + ",";
+        json += "\"energyMode\":\"" + energyModeKeyFromThreshold(lowBatterySleepThresholdV) + "\",";
+        json += "\"lowBatterySleepThreshold\":" + String(lowBatterySleepThresholdV, 2);
         json += "}";
         
         server.sendHeader("Connection", "close");
@@ -4339,7 +4596,31 @@ void setupWebServer() {
         }
     });
 
-
+    // Energy management: NVS low_bat_sleep_v (low-battery deep-sleep dwell threshold)
+    server.on("/update_energy_mode", HTTP_POST, [](){
+        if (!server.hasArg("energy_mode")) {
+            server.send(400, "text/plain", "Missing energy_mode parameter");
+            return;
+        }
+        String m = server.arg("energy_mode");
+        float v;
+        if (m == "low_power")
+            v = ENERGY_MODE_LOW_POWER_V;
+        else if (m == "normal")
+            v = ENERGY_MODE_NORMAL_V;
+        else if (m == "performance")
+            v = ENERGY_MODE_PERFORMANCE_V;
+        else {
+            server.send(400, "text/plain", "Invalid energy_mode (use low_power, normal, or performance)");
+            return;
+        }
+        lowBatterySleepThresholdV = v;
+        refreshLowBatteryClearThreshold();
+        preferences.putFloat("low_bat_sleep_v", lowBatterySleepThresholdV);
+        Serial.printf("Energy mode saved: %s -> %.2f V sleep / %.2f V clear\n",
+                      m.c_str(), lowBatterySleepThresholdV, lowBatteryClearThresholdV);
+        server.send(200, "text/plain", "Energy management updated");
+    });
 
     // WiFi password management endpoints
     server.on("/wifi_password", HTTP_GET, [](){
@@ -5130,7 +5411,31 @@ void printSystemStatus() {
     Serial.print(digitalRead(RELAY_IGNITION2) ? "ON" : "OFF");
     Serial.print(" START: ");
     Serial.println(digitalRead(RELAY_START) ? "ON" : "OFF");
-    
+
+    Serial.print("Battery: ");
+    Serial.print(batteryVoltageV, 2);
+    Serial.print(" V");
+    if (lowBatteryGraceActive) {
+        unsigned long graceRemaining = LOW_BATTERY_GRACE_PERIOD_MS - (millis() - lowBatteryGraceStartMs);
+        if (graceRemaining > 0 && graceRemaining <= LOW_BATTERY_GRACE_PERIOD_MS) {
+            Serial.print(" [LOW BATTERY GRACE: ");
+            Serial.print(graceRemaining / 1000);
+            Serial.print("s remaining]");
+        }
+    } else if (lowBatteryLowConditionStartMs > 0 && batteryVoltageV < lowBatteryClearThresholdV) {
+        unsigned long dwell = millis() - lowBatteryLowConditionStartMs;
+        Serial.print(" [LOW dwell ");
+        Serial.print(dwell / 1000);
+        Serial.print("s / ");
+        Serial.print(LOW_BATTERY_DWELL_BEFORE_SLEEP_MS / 1000);
+        Serial.print("s before sleep; blocked if IGN on]");
+    } else if (batteryVoltageV <= lowBatterySleepThresholdV && batteryVoltageV > 0.5f) {
+        Serial.print(" [LOW - accumulating toward ");
+        Serial.print(LOW_BATTERY_DWELL_BEFORE_SLEEP_MS / 60000);
+        Serial.print(" min dwell]");
+    }
+    Serial.println();
+
     Serial.print("\nSecurity State: ");
     Serial.println(securityEnabled ? "ENABLED" : "DISABLED");
     Serial.print("Security Relays - POS: ");
@@ -5429,7 +5734,7 @@ void addRSSIReading(int8_t rssi, esp_bd_addr_t address) {
     rssiAnalysis.lastUpdate = now;
     
     // Trigger analysis if enough time has passed
-    if (now - rssiAnalysis.lastAnalysis >= 250) { // Analyze every 250ms (4x faster response)
+    if (now - rssiAnalysis.lastAnalysis >= 100) { // FAST: Analyze every 100ms (was 250ms)
         performRSSIAnalysis();
         rssiAnalysis.lastAnalysis = now;
     }
@@ -5685,14 +5990,15 @@ void performRSSIAnalysis() {
     }
     
     // Calculate statistics for each time window
+    // FAST: Reduced max ages for quicker response
     rssiAnalysis.shortTermStats = calculateBufferStatistics(
-        rssiAnalysis.shortTerm, RSSI_SHORT_TERM_SIZE, 2000); // 2 second max age
+        rssiAnalysis.shortTerm, RSSI_SHORT_TERM_SIZE, 1500); // FAST: 1.5 second max age (was 2000)
     
     rssiAnalysis.mediumTermStats = calculateBufferStatistics(
-        rssiAnalysis.mediumTerm, RSSI_MEDIUM_TERM_SIZE, 10000); // 10 second max age
+        rssiAnalysis.mediumTerm, RSSI_MEDIUM_TERM_SIZE, 5000); // FAST: 5 second max age (was 10000)
     
     rssiAnalysis.longTermStats = calculateBufferStatistics(
-        rssiAnalysis.longTerm, RSSI_LONG_TERM_SIZE, 60000); // 60 second max age
+        rssiAnalysis.longTerm, RSSI_LONG_TERM_SIZE, 30000); // FAST: 30 second max age (was 60000)
     
     // Calculate confidence components
     rssiAnalysis.stabilityScore = calculateStabilityScore();
@@ -5969,6 +6275,15 @@ void addCalibrationSample(float rssi, float confidence) {
 
 // Update power management state based on authentication and timing
 void updatePowerManagement() {
+    // If power management is disabled, always stay in POWER_ACTIVE (240MHz full power)
+    #if DISABLE_POWER_MANAGEMENT
+    if (currentPowerState != POWER_ACTIVE) {
+        Serial.println("Power Management DISABLED - forcing POWER_ACTIVE (240MHz)");
+        setPowerState(POWER_ACTIVE);
+    }
+    return;  // Skip all power management logic
+    #endif
+    
     // If in CONFIG_MODE, always stay in POWER_ACTIVE
     if (currentState == CONFIG_MODE) {
         if (currentPowerState != POWER_ACTIVE) {
@@ -6245,7 +6560,7 @@ void setPowerState(PowerState newState) {
                 digitalWrite(BUTTON_LED_PIN, LOW);
                 
                 // Configure wake-up source: GPIO35 (start button) on LOW signal
-                esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
+                esp_sleep_enable_ext0_wakeup(WAKEUP_BUTTON_GPIO_NUM, 0);
                 
                 // Configure timer wake-up for periodic scanning (12 seconds)
                 // BLE when enabled, RFID cycling when BLE disabled
@@ -6261,7 +6576,7 @@ void setPowerState(PowerState newState) {
                 deepSleepCycles++;
                 deepSleepEntryTime = millis();
                 
-                Serial.printf("ESP32 Deep Sleep: Cycle #%d, wake sources: Start button (GPIO35) + 12s timer\n", deepSleepCycles);
+                Serial.printf("ESP32 Deep Sleep: Cycle #%d, wake sources: Start button (GPIO%d) + 12s timer\n", deepSleepCycles, BUTTON_PIN);
                 Serial.println("ESP32 Deep Sleep: Calling esp_deep_sleep_start() NOW...");
                 Serial.flush();
                 delay(200);
@@ -6539,7 +6854,7 @@ void handleBLEWindow() {
                 digitalWrite(BUTTON_LED_PIN, LOW);
                 
                 // Configure wake-up sources
-                esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
+                esp_sleep_enable_ext0_wakeup(WAKEUP_BUTTON_GPIO_NUM, 0);
                 esp_sleep_enable_timer_wakeup(12 * 1000000ULL);
                 
                 // Store deep sleep state in RTC memory
@@ -6627,7 +6942,7 @@ void handleRFIDCyclingWindow() {
             digitalWrite(BUTTON_LED_PIN, LOW);
             
             // Configure wake-up sources
-            esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
+            esp_sleep_enable_ext0_wakeup(WAKEUP_BUTTON_GPIO_NUM, 0);
             esp_sleep_enable_timer_wakeup(12 * 1000000ULL);
             
             // Store deep sleep state in RTC memory

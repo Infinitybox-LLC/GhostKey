@@ -1038,6 +1038,31 @@ const char config_html[] PROGMEM = R"rawliteral(
                     autoLockTimeElement.value = closestOption.value;
                 }
                 
+                const energyModeSelect = document.getElementById('energyModeSelect');
+                if (energyModeSelect && data.energyMode) {
+                    const allowed = ['low_power', 'normal', 'performance'];
+                    if (allowed.includes(data.energyMode)) {
+                        energyModeSelect.value = data.energyMode;
+                    } else if (typeof data.lowBatterySleepThreshold === 'number') {
+                        const t = data.lowBatterySleepThreshold;
+                        const presets = [
+                            { key: 'low_power', v: 12.2 },
+                            { key: 'normal', v: 12.1 },
+                            { key: 'performance', v: 12.0 }
+                        ];
+                        let best = presets[2];
+                        let bestDiff = Math.abs(t - best.v);
+                        for (let i = 0; i < presets.length; i++) {
+                            const d = Math.abs(t - presets[i].v);
+                            if (d < bestDiff) {
+                                bestDiff = d;
+                                best = presets[i];
+                            }
+                        }
+                        energyModeSelect.value = best.key;
+                    }
+                }
+                
                 // Load system configuration status
                 await loadSystemConfig();
                 
@@ -1198,6 +1223,26 @@ const char config_html[] PROGMEM = R"rawliteral(
                 });
                 const data = await response.text();
                 showNotification(data);
+            } catch (error) {
+                showNotification('Error: ' + error.message, 'error');
+            }
+        }
+
+        async function updateEnergyMode() {
+            const mode = document.getElementById('energyModeSelect').value;
+            const formData = new FormData();
+            formData.append('energy_mode', mode);
+            try {
+                const response = await fetch('/update_energy_mode', {
+                    method: 'POST',
+                    body: formData
+                });
+                const text = await response.text();
+                if (response.ok) {
+                    showNotification(text);
+                } else {
+                    showNotification(text, 'error');
+                }
             } catch (error) {
                 showNotification('Error: ' + error.message, 'error');
             }
@@ -2369,6 +2414,25 @@ function handleHeaderCollapse() {
                             <button onclick="updateAutoLock()" class="btn btn-primary" style="margin-left: 1rem;">Update</button>
                         </div>
                     </div>
+                    
+                    <div class="card">
+                        <h2 class="card-title">Energy Management</h2>
+                        <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+                            Sets the battery voltage threshold for low-battery protection (10 minute dwell below this level, then deep sleep when ignition is off). Stored in NVS. Higher voltage = enter low-power sooner and protect the vehicle battery more aggressively.
+                        </p>
+                        <div class="form-group">
+                            <label class="form-label" for="energyModeSelect" style="display: inline-flex; align-items: center; gap: 0.35rem;">
+                                Preset
+                                <span title="Low Power: 12.2 V — deep sleep sooner. Normal: 12.1 V. Performance: 12.0 V — stays awake longer on a weak battery. Recovery uses 0.15 V hysteresis above the threshold. Ignition ON always blocks deep sleep." style="cursor: help; color: #667eea; font-weight: 700; font-size: 1rem;">(?)</span>
+                            </label>
+                            <select id="energyModeSelect" class="form-input" style="max-width: 28rem;">
+                                <option value="low_power">Low Power — 12.2 V</option>
+                                <option value="normal">Normal — 12.1 V</option>
+                                <option value="performance">Performance — 12.0 V</option>
+                            </select>
+                            <button type="button" onclick="updateEnergyMode()" class="btn btn-primary" style="margin-left: 1rem;">Update</button>
+                        </div>
+                    </div>
                 </section>
 
                 <!-- RFID Section -->
@@ -2448,7 +2512,7 @@ function handleHeaderCollapse() {
                     
                     <!-- Version Information -->
                     <div style="text-align: center; margin-top: 2rem; padding: 1rem;">
-                        <p style="font-size: 0.75rem; color: #999; margin: 0;">Ghost Key v0.10.3</p>
+                        <p style="font-size: 0.75rem; color: #999; margin: 0;">Ghost Key v0.10.4</p>
                     </div>
                 </section>
                 

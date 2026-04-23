@@ -22,6 +22,8 @@
 #include "setup_html.h"
 #include <esp32-hal-cpu.h>
 
+#define FIRMWARE_VERSION "0.10.5"
+
 // ========================================
 // JDI LOGO SVG - STORED IN PROGMEM
 // ========================================
@@ -2035,6 +2037,7 @@ void setup() {
     systemBootTime = millis();
     Serial.begin(115200);
     DEBUG_PRINTLN("\n\n=== GhostKey System Starting ===");
+    Serial.printf("Firmware version: v%s\n", FIRMWARE_VERSION);
     DEBUG_PRINTLN("Initializing system...");
     DEBUG_PRINT("System boot time: ");
     DEBUG_PRINT(systemBootTime);
@@ -3184,14 +3187,20 @@ void handleButtonPress() {
             brakeReading == HIGH && (millis() - lastButtonPress) > DEBOUNCE_DELAY && !recentWifiOperation) {
             // Only process button release if we're not in shutdown delay
             if (!isShuttingDown && !engineRunning && !startRelayActive) {
-                // Check if authenticated by Bluetooth (if enabled) or RFID
-                bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
-                if (isAuthenticated) {  // Only allow normal sequence if engine isn't running
-                    systemState = (systemState + 1) % 3;
-                    DEBUG_BUTTON_PRINT("Button released. New state: ");
-                    DEBUG_BUTTON_PRINTLN(systemState);
-                    resetRfidAuthTimer(); // Reset RFID timer on system state change
-                    controlRelays();
+                // Block state cycling during shutdown cooldown (prevents relay re-activation after shutdown)
+                unsigned long timeSinceShutdown = millis() - lastEngineShutdown;
+                if (lastEngineShutdown > 0 && timeSinceShutdown < 3000) {
+                    DEBUG_BUTTON_PRINTLN("Button release ignored - shutdown cooldown active");
+                } else {
+                    // Check if authenticated by Bluetooth (if enabled) or RFID
+                    bool isAuthenticated = rfidAuthenticated || (bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled);
+                    if (isAuthenticated) {  // Only allow normal sequence if engine isn't running
+                        systemState = (systemState + 1) % 3;
+                        DEBUG_BUTTON_PRINT("Button released. New state: ");
+                        DEBUG_BUTTON_PRINTLN(systemState);
+                        resetRfidAuthTimer(); // Reset RFID timer on system state change
+                        controlRelays();
+                    }
                 }
             }
             lastButtonPress = millis();
@@ -4410,6 +4419,7 @@ void setupWebServer() {
         }
         
         String json = "{";
+        json += "\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\",";
         json += "\"state\":\"" + stateStr + "\",";
         json += "\"powerState\":\"" + powerStateStr + "\",";
         json += "\"bluetooth\":" + String((bluetoothEnabled && bluetoothAuthenticated && ghostKeyEnabled) ? "true" : "false") + ",";
@@ -5292,6 +5302,7 @@ void updateSecurityState() {
 }
 
 void printSystemStatus() {
+    Serial.printf("Firmware version: v%s\n", FIRMWARE_VERSION);
     Serial.println("\nSystem State: ");
     if (engineRunning) {
         Serial.println("RUNNING");
